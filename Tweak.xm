@@ -58,6 +58,10 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <SystemConfiguration/SystemConfiguration.h>
+// dispatch_after / dispatch_time / NSEC_PER_SEC 的来源。
+// 不能指望 Foundation 间接带进来：Theos 有 prefix.pch 兜底，
+// 零 Theos 构建（xcrun clang 单文件直接编）没有，必须显式包含。
+#import <dispatch/dispatch.h>
 #import <ifaddrs.h>
 #import <sys/socket.h>
 #import <netinet/in.h>
@@ -584,7 +588,10 @@ static UIViewController *MakeHeadlessPage(void) {
         return nil;
     }
     RetainObject(page);                        // 保住它，别被释放
-    LOG("✓ 已创建无界面 BNHttpServerPage (httpServer=%p)", hs);
+    // %p 的形参类型是 void *，直接塞 id 会被 -Wformat 判定类型不符。
+    // （不是 error，但零 Theos 构建下 warning 会混在 CI 日志里，
+    //   以后真出错时看不到重点，所以顺手清掉。）
+    LOG("✓ 已创建无界面 BNHttpServerPage (httpServer=%p)", (void *)hs);
     return page;
 }
 
@@ -763,8 +770,12 @@ static void OkaWiFiInit(void) {
             if (!h) h = dlopen("libswiftCore.dylib", RTLD_LAZY);
             if (h) gWeakLoadStrong = (WeakLoadStrong_t)dlsym(h, "_swift_unknownObjectWeakLoadStrong");
         }
-        LOG(gWeakLoadStrong ? "✓ 解析到 _swift_unknownObjectWeakLoadStrong"
-                            : "× 未找到 _swift_unknownObjectWeakLoadStrong（outlet 读取不可用）");
+        // ★ 不能把三元表达式直接塞进 LOG(...)：
+        //   LOG 展开是 NSLog(@"[OkaWiFi] " fmt, ...)，代入后变成
+        //   @"..." ? "..." : "..."，字符串字面量被当成条件 → 语法错。
+        //   三元要作为**参数**传进去，而不是占满整个 fmt 位置。
+        LOG("%s", gWeakLoadStrong ? "✓ 解析到 _swift_unknownObjectWeakLoadStrong"
+                                  : "× 未找到 _swift_unknownObjectWeakLoadStrong（outlet 读取不可用）");
 
         // ---- 2b: 热点 IP ----
         if (gEnableIPFix) {

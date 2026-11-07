@@ -1,173 +1,198 @@
 name: Build OkaWiFi tweak
 
-# 三个包体方案并行构建，每个任务一个干净的 macOS runner。
-# 用 matrix 而不是"一个 job 里顺序编译三次"，原因：
-#   1) roothide 用的是 roothide/theos 仓库，rootful/rootless 用 theos/theos，
-#      共享 $HOME/theos 会串味；
-#   2) .theos/ 里缓存着上一次的 ARCHS 和 install prefix，混编会出诡异产物。
+# 零 Theos 构建：xcrun clang 直接编 dylib → codesign 自签 → devkit/mkdeb.sh 拼 deb。
+#
+# 为什么不用 Theos：
+#   实测 Setup Theos（clone 主仓库 + 全部 submodule + 下载 SDK）约 680 秒，
+#   而本工程没有任何 %hook / Logos 语法，全是运行时 hook，不需要 logos.pl，
+#   也不需要 theos 的 makefile 体系。整套 Theos 只为跑一次 dpkg-deb 不值得。
+#   零 Theos 全流程约 20 秒。devkit/build.sh 里有详细说明。
+#
+# 三个变体各自独立编译（不同 CPU 切片 + 不同 Architecture 字段 + 不同装包路径）：
+#   rootful   iphoneos-arm     arm64        /Library/MobileSubstrate/...
+#   rootless  iphoneos-arm64   arm64        /var/jb/Library/MobileSubstrate/...
+#   roothide  iphoneos-arm64e  arm64e       /Library/MobileSubstrate/...（jbroot 内）
 on:
   push:
     branches: [ main, master ]
   pull_request:
   workflow_dispatch:
     inputs:
-      scheme:
-        description: "只构建某个变体（留空=全部）"
+      version:
+        description: "版本号（留空用默认）"
         required: false
         default: ""
-        type: choice
-        options: [ "", rootful, rootless, roothide ]
+
+env:
+  # 版本号单一来源，禁止在别处硬编码（否则会出现「包名 v1.0、内容 v1.1」）。
+  VERSION: ${{ github.event.inputs.version || '1.0.0' }}
+  HOMEBREW_NO_AUTO_UPDATE: 1
 
 jobs:
-  # 先算出要构建哪些变体，免得手改两处
-  plan:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.pick.outputs.matrix }}
-    steps:
-      - id: pick
-        shell: bash
-        run: |
-          set -euo pipefail
-          # $GITHUB_OUTPUT 的 key=value 只能是单行，多行 JSON 会被截断成
-          # "Invalid format" 报错。所以这里用 python 一次性生成压缩后的单行 JSON。
-          WANT="${{ github.event.inputs.scheme }}"
-          python3 - "$WANT" <<'PY' >> "$GITHUB_OUTPUT"
-          import json, sys
-          want = sys.argv[1] if len(sys.argv) > 1 else ""
-          all_variants = [
-              {"scheme": "rootful",  "theos_repo": "https://github.com/theos/theos.git",    "arch": "iphoneos-arm"},
-              {"scheme": "rootless", "theos_repo": "https://github.com/theos/theos.git",    "arch": "iphoneos-arm64"},
-              {"scheme": "roothide", "theos_repo": "https://github.com/roothide/theos.git", "arch": "iphoneos-arm64e"},
-          ]
-          picked = [v for v in all_variants if v["scheme"] == want] if want else all_variants
-          if not picked:
-              picked = all_variants
-          print("matrix=" + json.dumps({"include": picked}, separators=(",", ":")))
-          PY
-          grep '^matrix=' "$GITHUB_OUTPUT" | head -c 400; echo
-
   build:
-    needs: plan
     name: ${{ matrix.scheme }}
-    # 不用 macos-14：该标签在本仓库被解析为 macos-14-arm64-us-default，
-    # 报 "configuration not supported" 直接 cancelled（job 无任何日志）。
-    # macos-latest 走的是 x86_64 runner，公网免费额度下最稳。
     runs-on: macos-latest
     strategy:
-      fail-fast: false          # 一个变体失败不影响其它变体，便于定位
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+      fail-fast: false     # 一个变体失败不影响其它变体，便于定位
+      matrix:
+        include:
+          - scheme: rootful
+            arch: iphoneos-arm
+            cpu: arm64
+          - scheme: rootless
+            arch: iphoneos-arm64
+            cpu: arm64
+          - scheme: roothide
+            arch: iphoneos-arm64e
+            cpu: arm64e
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Show toolchain
         run: |
-          set -euo pipefail
-          brew install ldid dpkg make xz
-          # dm.pl 依赖 xz；dpkg 提供 dpkg-deb 用于校验产物
-
-      # theos 官方安装脚本还会装依赖和 SDK，但它会往 ~/.bash_profile 写 export，
-      # 且部分分支需要交互。CI 里直接 clone + 显式 install-sdk 更可控。
-      - name: Install Theos (${{ matrix.scheme }})
-        run: |
-          set -euo pipefail
-          export THEOS="$HOME/theos"
-          rm -rf "$THEOS"
-
-          # 注意：--recursive 配 --depth 1 时 submodule 会留空目录，
-          # 表现为 vendor/lib 里没有 libsubstrate.tbd，链接阶段才炸。
-          # 所以分两步，显式 --init --recursive 拉 submodule。
-          git clone --depth 1 "${{ matrix.theos_repo }}" "$THEOS"
-          git -C "$THEOS" submodule update --init --recursive --depth 1 --jobs 8
-
-          # submodule 到底有没有拉下来，这里就要判定，不能等到链接
-          test -f "$THEOS/vendor/lib/libsubstrate.tbd" \
-            || { echo "::error::vendor/lib/libsubstrate.tbd 缺失，submodule 未拉全"; ls -la "$THEOS/vendor/"; exit 1; }
-
-          # SDK 是 Release 附件，单独下载
-          "$THEOS/bin/install-sdk" latest
-
-          ls "$THEOS/sdks/"
-          {
-            echo "THEOS=$THEOS"
-            echo "THEOS_MAKE_PATH=$THEOS/makefiles"
-          } >> "$GITHUB_ENV"
-          echo "$THEOS/bin" >> "$GITHUB_PATH"
+          set -eu
+          xcrun --sdk iphoneos --show-sdk-path
+          xcrun --sdk iphoneos --show-sdk-version
+          clang --version | head -2
 
       - name: Build ${{ matrix.scheme }}
         run: |
-          set -euo pipefail
-          # rootful 不能传 THEOS_PACKAGE_SCHEME，否则 theos 报
-          # "'rootful' package scheme does not exist"（modules 目录里没有 rootful 模块）
-          if [ "${{ matrix.scheme }}" = "rootful" ]; then
-            export THEOS_PACKAGE_SCHEME=""
-          else
-            export THEOS_PACKAGE_SCHEME="${{ matrix.scheme }}"
-          fi
-          echo "== THEOS_PACKAGE_SCHEME='${THEOS_PACKAGE_SCHEME}' =="
+          set -eu
+          sh devkit/build.sh "${{ matrix.cpu }}" "${{ matrix.arch }}" "$VERSION"
 
-          make clean 2>/dev/null || true
-          make package FINALPACKAGE=1 -j"$(sysctl -n hw.ncpu)"
-
-          echo "== packages =="
-          ls -la packages/
-
+      # 产物校验：不只看"文件生成了"，要看 deb 内部结构真的对。
       - name: Verify deb
         run: |
-          set -euo pipefail
-          DEB=$(ls packages/*.deb | head -1)
+          set -eu
+          DEB=$(ls .build/out/*.deb | head -1)
           echo "deb: $DEB"
-          dpkg-deb -I "$DEB"
-          echo "--- payload tree ---"
-          dpkg-deb -c "$DEB"
+          ls -l "$DEB"
 
-          # 硬校验 1：Architecture 必须与预期一致，否则用户机器上装不上
-          ARCH=$(dpkg-deb -f "$DEB" Architecture)
+          # 1) Architecture 字段必须与预期一致，否则用户机器上装不上
+          ARCH=$(python3 - "$DEB" <<'PY'
+          import sys, tarfile, gzip, io
+          raw = open(sys.argv[1], 'rb').read()
+          # ar 归档：全局头 8 字节，然后每个成员 60 字节头
+          off = 8
+          while off + 60 <= len(raw):
+              hdr = raw[off:off+60]
+              name = hdr[0:16].decode().strip()
+              size = int(hdr[48:58].decode().strip())
+              body = raw[off+60:off+60+size]
+              if name.startswith('control.tar'):
+                  tf = tarfile.open(fileobj=io.BytesIO(gzip.decompress(body)))
+                  ctl = tf.extractfile('./control').read().decode()
+                  for line in ctl.splitlines():
+                      if line.startswith('Architecture:'):
+                          print(line.split(':', 1)[1].strip())
+                          sys.exit(0)
+              off += 60 + size + (size % 2)
+          sys.exit(1)
+          PY
+          )
           echo "Architecture = $ARCH (expect ${{ matrix.arch }})"
           if [ "$ARCH" != "${{ matrix.arch }}" ]; then
             echo "::error::Architecture mismatch: got '$ARCH', want '${{ matrix.arch }}'"
             exit 1
           fi
 
-          # 硬校验 2：dylib 和 filter plist 必须都在 deb 里，且路径符合该 scheme
-          LIST=$(dpkg-deb -c "$DEB")
-          echo "$LIST" | grep -q "OkaWiFi.dylib" \
-            || { echo "::error::deb 里没有 OkaWiFi.dylib"; exit 1; }
-          echo "$LIST" | grep -q "OkaWiFi.plist" \
-            || { echo "::error::deb 里没有 filter plist"; exit 1; }
-
+          # 2) 载荷路径必须符合该 scheme
           if [ "${{ matrix.scheme }}" = "rootless" ]; then
-            echo "$LIST" | grep -q "\./var/jb/Library/MobileSubstrate/DynamicLibraries/OkaWiFi.dylib" \
-              || { echo "::error::rootless 包路径不对，应为 /var/jb/..."; exit 1; }
+            EXPECT_PATH="./var/jb/Library/MobileSubstrate/DynamicLibraries/OkaWiFi.dylib"
           else
-            echo "$LIST" | grep -q "\./Library/MobileSubstrate/DynamicLibraries/OkaWiFi.dylib" \
-              || { echo "::error::包路径不对，应为 /Library/MobileSubstrate/..."; exit 1; }
+            EXPECT_PATH="./Library/MobileSubstrate/DynamicLibraries/OkaWiFi.dylib"
           fi
+          echo "expect payload: $EXPECT_PATH"
+          python3 - "$DEB" "$EXPECT_PATH" <<'PY'
+          import sys, tarfile, gzip, lzma, io
+          deb, want = sys.argv[1], sys.argv[2]
+          raw = open(deb, 'rb').read()
+          off = 8
+          names = []
+          while off + 60 <= len(raw):
+              hdr = raw[off:off+60]
+              name = hdr[0:16].decode().strip()
+              size = int(hdr[48:58].decode().strip())
+              body = raw[off+60:off+60+size]
+              if name.startswith('data.tar'):
+                  if name.endswith('.xz'):
+                      blob = lzma.decompress(body)
+                  elif name.endswith('.gz'):
+                      blob = gzip.decompress(body)
+                  else:
+                      blob = body
+                  tf = tarfile.open(fileobj=io.BytesIO(blob))
+                  names = [m.name for m in tf.getmembers()]
+              off += 60 + size + (size % 2)
+          for n in names:
+              print('   ', n)
+          if want not in names:
+              print('::error::data.tar 里没有 %s' % want); sys.exit(1)
+          if './DEBIAN/postinst' in names:
+              print('::error::DEBIAN 混进了 data.tar（rootless 上会整个包装不上）'); sys.exit(1)
+          print('  ✓ 载荷路径正确')
+          PY
 
-          # 硬校验 3：dylib 必须是 arm64 + arm64e 双切片
-          # （RootHide/arm64e 设备上缺 arm64e 切片会直接不加载）
-          mkdir -p /tmp/x && rm -rf /tmp/x/* && dpkg-deb -x "$DEB" /tmp/x
-          DYLIB=$(find /tmp/x -name OkaWiFi.dylib | head -1)
-          echo "dylib: $DYLIB"
-          lipo -info "$DYLIB"
+          # 3) dylib 必须是目标 CPU 切片（arch 不对 → 装了不加载）
+          rm -rf .verify && mkdir -p .verify
+          python3 - "$DEB" <<'PY'
+          import sys, tarfile, lzma, gzip, io
+          raw = open(sys.argv[1], 'rb').read()
+          off = 8
+          while off + 60 <= len(raw):
+              hdr = raw[off:off+60]
+              name = hdr[0:16].decode().strip()
+              size = int(hdr[48:58].decode().strip())
+              body = raw[off+60:off+60+size]
+              if name.startswith('data.tar'):
+                  # 按扩展名选解压器，别写死 lzma：mkdeb.sh 哪天改成 .gz 就会崩在这里
+                  if name.endswith('.xz'):
+                      blob = lzma.decompress(body)
+                  elif name.endswith('.gz'):
+                      blob = gzip.decompress(body)
+                  else:
+                      blob = body
+                  tf = tarfile.open(fileobj=io.BytesIO(blob))
+                  for m in tf.getmembers():
+                      if m.name.endswith('OkaWiFi.dylib'):
+                          open('.verify/OkaWiFi.dylib','wb').write(tf.extractfile(m).read())
+                          sys.exit(0)
+              off += 60 + size + (size % 2)
+          sys.exit(1)
+          PY
+          xcrun lipo -info .verify/OkaWiFi.dylib
+          xcrun lipo -info .verify/OkaWiFi.dylib | grep -q "${{ matrix.cpu }}" \
+            || { echo "::error::dylib 缺 ${{ matrix.cpu }} 切片"; exit 1; }
+
+          # 4) 签名必须存在（无 LC_CODE_SIGNATURE 的 dylib 会被 ellekit 跳过）
+          xcrun codesign -dv .verify/OkaWiFi.dylib 2>&1 | head -5 || true
+          xcrun otool -l .verify/OkaWiFi.dylib | grep -q LC_CODE_SIGNATURE \
+            || { echo "::error::dylib 没有 LC_CODE_SIGNATURE，装上去不会被加载"; exit 1; }
+          echo "✓ deb 校验全部通过"
+
+      - name: Report packages
+        run: |
+          set -eu
+          echo "--- 产物 ---"
+          ls -l .build/out/*.deb
+          for f in .build/out/*.deb; do
+            echo ""
+            echo "== $(basename "$f") =="
+            echo "size   : $(wc -c < "$f")"
+            echo "sha256 : $(shasum -a 256 "$f" | cut -d' ' -f1)"
+          done
 
       - name: Upload deb
         uses: actions/upload-artifact@v4
         with:
-          name: OkaWiFi-${{ matrix.scheme }}
-          path: packages/*.deb
+          name: OkaWiFi-${{ matrix.scheme }}-${{ env.VERSION }}
+          path: .build/out/*.deb
           if-no-files-found: error
           retention-days: 30
-
-      - name: Upload build log on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: buildlog-${{ matrix.scheme }}
-          path: |
-            .theos/
-            packages/
-          if-no-files-found: ignore
-          retention-days: 7

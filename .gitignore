@@ -1,10 +1,16 @@
-# Theos 构建产物
+# Theos 构建产物（legacy/ 里那套，已弃用但保留）
 .theos/
 packages/
 obj/
 *.deb
 *.dylib
 *.o
+
+# 零 Theos 构建产物（devkit/build.sh + devkit/mkdeb.sh 的中间目录与输出）
+# ★ 这个必须写：.build 下既有 zip（stage）也有 out（deb），
+#   而且 verify 步骤会往里写 .verify —— 漏了就会把整坨产物提交进仓库。
+.build/
+.verify/
 
 # 系统
 .DS_Store
