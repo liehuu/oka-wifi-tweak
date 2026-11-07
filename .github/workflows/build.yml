@@ -64,8 +64,30 @@ jobs:
 
       - name: Build ${{ matrix.scheme }}
         run: |
-          set -eu
-          sh devkit/build.sh "${{ matrix.cpu }}" "${{ matrix.arch }}" "$VERSION"
+          set -u
+          # ★ 用 tee + PIPESTATUS 保留真实退出码：
+          #   `sh build.sh | tee log` 的退出码是 tee 的（恒 0），构建失败会被吞掉。
+          #   bash 才有 PIPESTATUS，所以这里显式用 bash 而不是 sh。
+          bash devkit/build.sh "${{ matrix.cpu }}" "${{ matrix.arch }}" "$VERSION" 2>&1 \
+            | tee build.log
+          RC=${PIPESTATUS[0]:-$?}
+          echo "build.sh exit=$RC"
+          if [ "$RC" -ne 0 ]; then
+            # 把编译器报错逐条打成 ::error::，否则 GitHub 只显示 "exit code 1"，
+            # 真实原因藏在折叠的日志里 —— 排查时全靠它。
+            echo "::group::编译器错误摘要"
+            grep -nE "error:|fatal error|✗" build.log | head -40 || echo "(build.log 里没有 error: 关键字)"
+            echo "::endgroup::"
+            echo "::error::build.sh 退出码 $RC"
+            exit "$RC"
+          fi
+
+      # 构建成功时也把编译警告列出来：warning 里常藏着真问题
+      # （比如某个函数参数类型不匹配，现在能过、换 Xcode 版本就报错）。
+      - name: Show warnings
+        if: success()
+        run: |
+          grep -nE "warning:" build.log | head -40 || echo "（无警告）"
 
       # 产物校验：不只看"文件生成了"，要看 deb 内部结构真的对。
       - name: Verify deb

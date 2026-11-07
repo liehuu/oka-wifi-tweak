@@ -55,12 +55,21 @@ INC="$ROOT/devkit/include"
   exit 1
 }
 
+# ★ 抑制项与 legacy/Makefile 保持一致。
+#   重写 build.sh 时漏掉 -Wno-incompatible-pointer-types 与
+#   -Wno-objc-method-access，是这次 CI 编译失败的直接怀疑对象：
+#     · (void **)&orig_xxx 这类「对函数指针取二级指针」
+#     · 向 UIViewController* 发 respondsToSelector: 时用变量 SEL
+#   代码侧已尽量从根源改（HookInstanceMethod 的 outOrig 改成 void **），
+#   但运行时 hook 代码天然绕不开强转，抑制项保留。
 xcrun clang -target "$TRIPLE" -isysroot "$SDK" \
   -I "$INC" \
   -x objective-c \
   -dynamiclib -fobjc-arc -fobjc-exceptions -Os -Wall \
   -Wno-unused-parameter -Wno-unused-function -Wno-deprecated-declarations \
   -Wno-nullability-completeness -Wno-unguarded-availability-new \
+  -Wno-incompatible-pointer-types -Wno-objc-method-access \
+  -Wno-arc-performSelector-leaks -Wno-format \
   -undefined dynamic_lookup \
   -framework Foundation -framework UIKit \
   -framework AVFoundation -framework SystemConfiguration \

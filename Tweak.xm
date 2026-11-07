@@ -745,11 +745,20 @@ static void my_performAction(id self, SEL _cmd, UIApplication *app,
 // ===========================================================================
 //  四、安装
 // ===========================================================================
-static void HookInstanceMethod(Class cls, SEL sel, IMP newImp, IMP *outOrig, const char *tag) {
+// outOrig 用 void ** 而不是 IMP *：
+//   调用方持有的是 `BOOL (*)(id, SEL, ...)` 这类**具体签名**的函数指针，
+//   `(IMP *)&orig_xxx` 是一次有损强转（IMP 是 `void (*)(void)`），
+//   clang 在 -Wall 下会报 -Wincompatible-pointer-types；
+//   更麻烦的是它对函数指针取二级指针，属于 strict aliasing 灰色地带。
+//   参数类型改成 void ** 后 `&orig_xxx` 依然是 `BOOL(**)(...)` → void** 的转换，
+//   但这一步在 C 里是常见的 out-parameter 写法，且我们只做一次写入，
+//   不通过它回读，不存在 aliasing 问题。
+//   （MSHookFunction 的第三个参数本身就是 void **，这里保持同一约定。）
+static void HookInstanceMethod(Class cls, SEL sel, IMP newImp, void **outOrig, const char *tag) {
     if (!cls) return;
     Method m = class_getInstanceMethod(cls, sel);
     if (!m) { LOG("  × 找不到方法 %s", tag); return; }
-    if (outOrig) *outOrig = method_getImplementation(m);
+    if (outOrig) *outOrig = (void *)method_getImplementation(m);
     method_setImplementation(m, newImp);
     LOG("  ✓ hook %s", tag);
 }
@@ -804,11 +813,11 @@ static void OkaWiFiInit(void) {
             }
             if (gws) {
                 HookInstanceMethod(gws, @selector(startWithPort:bonjourName:),
-                                   (IMP)my_startWithPort, (IMP *)&orig_startWithPort,
+                                   (IMP)my_startWithPort, (void **)&orig_startWithPort,
                                    "-[GCDWebServer startWithPort:bonjourName:]");
                 // 同时挂 stop，用于清 gServerPort（见 my_stop 的注释）
                 HookInstanceMethod(gws, @selector(stop),
-                                   (IMP)my_stop, (IMP *)&orig_stop,
+                                   (IMP)my_stop, (void **)&orig_stop,
                                    "-[GCDWebServer stop]");
             } else {
                 LOG("× 找不到 GCDWebServer 类（端口记录不可用，将用兜底 8080）");
@@ -830,10 +839,10 @@ static void OkaWiFiInit(void) {
                 LOG("页面类 = %s", class_getName(pageCls));
                 HookInstanceMethod(pageCls, NSSelectorFromString(@"reachabilityChangedWithNote:"),
                                    (IMP)my_reachabilityChanged,
-                                   (IMP *)&orig_reachabilityChanged,
+                                   (void **)&orig_reachabilityChanged,
                                    "-[BNHttpServerPage reachabilityChangedWithNote:]");
                 HookInstanceMethod(pageCls, @selector(viewDidLoad),
-                                   (IMP)my_viewDidLoad, (IMP *)&orig_viewDidLoad,
+                                   (IMP)my_viewDidLoad, (void **)&orig_viewDidLoad,
                                    "-[BNHttpServerPage viewDidLoad]");
             } else {
                 LOG("× 找不到 BNHttpServerPage 类");
@@ -848,7 +857,7 @@ static void OkaWiFiInit(void) {
                 HookInstanceMethod(appDel,
                                    @selector(application:didFinishLaunchingWithOptions:),
                                    (IMP)my_didFinishLaunching,
-                                   (IMP *)&orig_didFinishLaunching,
+                                   (void **)&orig_didFinishLaunching,
                                    "-[AppDelegate application:didFinishLaunchingWithOptions:]");
 
                 SEL sel = @selector(application:performActionForShortcutItem:completionHandler:);
