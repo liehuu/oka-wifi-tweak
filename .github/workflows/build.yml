@@ -50,7 +50,10 @@ jobs:
   build:
     needs: plan
     name: ${{ matrix.scheme }}
-    runs-on: macos-14
+    # 不用 macos-14：该标签在本仓库被解析为 macos-14-arm64-us-default，
+    # 报 "configuration not supported" 直接 cancelled（job 无任何日志）。
+    # macos-latest 走的是 x86_64 runner，公网免费额度下最稳。
+    runs-on: macos-latest
     strategy:
       fail-fast: false          # 一个变体失败不影响其它变体，便于定位
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
