@@ -1,0 +1,11 @@
+# Theos 构建产物
+.theos/
+packages/
+obj/
+*.deb
+*.dylib
+*.o
+
+# 系统
+.DS_Store
+Thumbs.db

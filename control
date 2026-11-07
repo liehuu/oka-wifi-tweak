@@ -1,0 +1,15 @@
+Package: com.oka.wifitweak
+Name: Oka WiFi 传输增强
+Version: 1.0.0
+Architecture: iphoneos-arm
+Description: 为 Oka Files (Blinker) 增加桌面长按快捷开启 WiFi 传输，并解除"仅 WiFi 可开启"的限制，同时修正个人热点下的显示地址。
+Depends: mobilesubstrate
+Maintainer: oka
+Author: oka
+Section: Tweaks
+
+# 注意：Architecture 上面写 iphoneos-arm 只是占位。
+# 用 make package SCHEME=roothide / rootless 打包时，Theos 会自动改成
+#   roothide  -> iphoneos-arm64e
+#   rootless  -> iphoneos-arm64
+# 千万别手动改成 iphoneos-arm 再装到 roothide/rootless 设备上，路径会对不上。
