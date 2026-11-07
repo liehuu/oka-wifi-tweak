@@ -1,0 +1,8 @@
+# 强制 LF：Makefile 的 recipe 行尾如果是 CRLF，macOS/Linux 上的 make
+# 会报 "missing separator"，且报错信息完全不指向换行符，极难排查。
+* text=auto eol=lf
+
+# 二进制不要做任何转换
+*.deb   binary
+*.dylib binary
+*.a     binary
