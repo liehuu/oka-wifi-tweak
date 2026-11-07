@@ -64,6 +64,7 @@
 #import <dispatch/dispatch.h>
 #import <ifaddrs.h>
 #import <sys/socket.h>
+#import <sys/time.h>      // struct timeval（SO_SNDTIMEO / SO_RCVTIMEO）
 #import <netinet/in.h>
 #import <arpa/inet.h>
 #import <net/if.h>
@@ -296,13 +297,38 @@ static NSString *BestLocalIPAddress(BOOL includeIPv6) {
     return best;
 }
 
+// 原函数返回值必须是**真正的 IP**才能采信。
+// 实测反汇编（GCDWebServer.framework 0x17FF4）：
+//   找不到 en0 时走 "mov x20,#0" → 返回 nil；
+//   -[GCDWebServer serverURL] 在 0xEE94 用 cbz 判空，
+//   为 nil 直接 "mov x20,#0"（0xEF3C）→ serverURL 返回 nil。
+//   旧写法用 `if (r.length > 0) return r`，只要原函数（或上层包装）
+//   回一个非空的占位串（"unknown" / "localhost" / "(null)"），
+//   fallback 就永远不触发 —— 界面于是停在占位文案上。
+static BOOL IsPlausibleIPAddress(NSString *s) {
+    if (!s.length) return NO;
+    const char *c = [s UTF8String];
+    if (!c) return NO;
+    struct in_addr a4;
+    struct in6_addr a6;
+    if (inet_pton(AF_INET,  c, &a4) == 1) return YES;
+    if (inet_pton(AF_INET6, c, &a6) == 1) return YES;
+    return NO;
+}
+
 static NSString *my_GetPrimaryIPAddress(BOOL includeIPv6) {
     NSString *r = orig_GetPrimaryIPAddress ? orig_GetPrimaryIPAddress(includeIPv6) : nil;
-    if (r.length > 0) return r;                 // en0 有地址，原逻辑正常，不动
+    // ★ 这条日志是定位「地址显示 unknown」的关键证据：
+    //   完全没有这行 → MSHookFunction 没打上 / 函数根本没被调用；
+    //   orig=(null) 且没有 fallback → BestLocalIPAddress 在真机上没枚举到可用接口。
+    LOG("GetPrimaryIPAddress orig=%@ (判定=%s)",
+        r, IsPlausibleIPAddress(r) ? "IP" : "非IP/空");
     if (!gEnableIPFix) return r;
+    if (IsPlausibleIPAddress(r)) return r;     // 是合法 IP，原逻辑正常，不动
 
     NSString *ip = BestLocalIPAddress(includeIPv6);
     if (ip) { LOG("GetPrimaryIPAddress fallback -> %@", ip); return ip; }
+    LOG("× BestLocalIPAddress 也没拿到地址，只能返回原值");
     return r;
 }
 
@@ -466,6 +492,10 @@ static void ForceStartButtonVisible(id page) {
     }
 }
 
+// 实现在文件后部的「UI 层地址修正」段；本文件的几个 hook 都在它之前，
+// 所以前置声明必须放在最靠前的那个调用点（my_reachabilityChanged）之前。
+static void RewriteAddressIfNeeded(id page);
+
 // hook: reachabilityChangedWithNote:
 static void (*orig_reachabilityChanged)(id, SEL, id);
 static void my_reachabilityChanged(id self, SEL _cmd, id note) {
@@ -476,9 +506,17 @@ static void my_reachabilityChanged(id self, SEL _cmd, id note) {
     // 注意：这一步只是让按钮可见；真正的"能启动"依赖下面 SCNetworkReachability
     // 的 flag 清洗（层 1）。两层都开，任何一层失效都还有另一层兜底。
     ForceStartButtonVisible(self);
+
+    // reachability 通知也是 App 刷新地址文案的入口。原逻辑跑完可能又把
+    // ipAddress 写回占位词，所以延迟一拍再校正一次（幂等，地址正常时不动）。
+    __weak id weakPage = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (weakPage) RewriteAddressIfNeeded(weakPage);
+    });
 }
 
-// hook: viewDidLoad —— 首次进入页面时立刻放行按钮
+// hook: viewDidLoad —— 首次进入页面时立刻放行按钮 + 校正地址
 static void (*orig_viewDidLoad)(id, SEL);
 static void my_viewDidLoad(id self, SEL _cmd) {
     if (orig_viewDidLoad) orig_viewDidLoad(self, _cmd);
@@ -491,6 +529,13 @@ static void my_viewDidLoad(id self, SEL _cmd) {
             if (weakSelf && gEnableCellular) ForceStartButtonVisible(weakSelf);
         });
     }
+    // 若服务器是之前从快捷菜单开启的，进页面时地址文案可能已经是占位词。
+    // RewriteAddressIfNeeded 只在「服务器在跑 + 地址坏了」时才改，幂等。
+    __weak id weakPageForIP = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (weakPageForIP) RewriteAddressIfNeeded(weakPageForIP);
+    });
 }
 
 // ===========================================================================
@@ -646,6 +691,197 @@ static NSString *FallbackServerURLString(void) {
     NSUInteger port = gServerPort;
     if (!port) port = 8080;
     return [NSString stringWithFormat:@"http://%@:%lu", ip, (unsigned long)port];
+}
+
+// ---------------------------------------------------------------------------
+//  UI 层地址修正：不依赖 MSHookFunction / GCDWebServer 内部
+// ---------------------------------------------------------------------------
+//  为什么必须有这一层：
+//    上面 hook _GCDWebServerGetPrimaryIPAddress 是「从源头修」，但它有两个
+//    失效点任何一个命中都会让界面停留在占位文案（真机实测显示 "unknown"）：
+//      1) MSHookFunction 在该 framework 上没真正打上桩（日志里仍会打 ✓ hook，
+//         因为那只代表 dlsym 找到了符号）；
+//      2) App 显示地址时压根不走 serverURL，而是自己另算了一个状态文案。
+//    而 serverURL 拿到 nil 就返回 nil（反汇编 0xEE94 / 0xEF3C 已确认），
+//    App 把「没有地址」渲染成占位词。
+//    所以这里做第二层：等 App 写完 ipAddress 之后，发现文案不对就直接改写。
+//    这一层只看 UIKit 的 outlet，不碰 Swift Helper，不碰 GCDWebServer 符号。
+// ---------------------------------------------------------------------------
+
+// 直接读原始文本（URLTextFromPage 会过滤掉非 http 开头的，这里要读原样）
+static NSString *RawAddressText(id page) {
+    if (!page) return nil;
+    id tv = GetIvar(page, "ipAddress");
+    if (!tv) return nil;
+    SEL s = @selector(text);
+    if (![tv respondsToSelector:s]) return nil;
+    id t = ((id (*)(id, SEL))objc_msgSend)(tv, s);
+    return [t isKindOfClass:[NSString class]] ? (NSString *)t : nil;
+}
+
+// 从 "http://1.2.3.4:8080/" 里抠 host
+static NSString *HostFromURLString(NSString *s) {
+    if (!s.length) return nil;
+    NSRange scheme = [s rangeOfString:@"://"];
+    if (scheme.location == NSNotFound) return nil;
+    NSString *rest = [s substringFromIndex:scheme.location + 3];
+    NSRange slash = [rest rangeOfString:@"/"];
+    if (slash.location != NSNotFound) rest = [rest substringToIndex:slash.location];
+    NSRange colon = [rest rangeOfString:@":" options:NSBackwardsSearch];
+    if (colon.location != NSNotFound) rest = [rest substringToIndex:colon.location];
+    return rest.length ? rest : nil;
+}
+
+// 从现有文案里抠端口（App 可能用 startWithOptions:，端口 hook 没覆盖到）
+static NSUInteger PortFromText(NSString *s) {
+    if (!s.length) return 0;
+    NSRange r = [s rangeOfString:@":" options:NSBackwardsSearch];
+    if (r.location == NSNotFound || r.location + 1 >= s.length) return 0;
+    NSString *tail = [s substringFromIndex:r.location + 1];
+    NSUInteger v = 0;
+    for (NSUInteger i = 0; i < tail.length; i++) {
+        unichar c = [tail characterAtIndex:i];
+        if (c < '0' || c > '9') break;
+        v = v * 10 + (NSUInteger)(c - '0');
+        if (v > 65535) return 0;
+    }
+    return v ? v : 0;
+}
+
+// ---------------------------------------------------------------------------
+//  端口自证：只有「真的有服务在 LISTEN」才允许把地址写回界面
+// ---------------------------------------------------------------------------
+//  为什么需要第三个观测源：
+//    gServerPort 只由 -[GCDWebServer startWithPort:bonjourName:] 记录；App 若走
+//    startWithOptions:error: 就抓不到，而 my_stop 又会在手动停止后把它清零。
+//    只看这一个量会出两种错：
+//      (1) 服务明明在跑却判成没跑 → 不修地址，界面继续 unknown；
+//      (2) 服务已停止、界面残留 unknown → 拼一个根本连不上的假地址写回去。
+//    本机 TCP connect 是不依赖任何 hook 是否生效的独立证据：连得上 = 端口在听。
+static BOOL PortIsListeningAddr(struct in_addr a, NSUInteger port) {
+    if (!port || port > 65535) return NO;
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return NO;
+
+    // loopback 上未监听的端口会立刻 ECONNREFUSED；仍设超时，避免个别接口
+    // 把 SYN drop 掉时卡住主线程（这段跑在主队列）。
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 120000;
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_len    = sizeof(addr);
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons((uint16_t)port);
+    addr.sin_addr   = a;
+
+    int rc = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+    close(fd);
+    return rc == 0;
+}
+
+// 候选端口按可信度排序：start hook 记录 > App 文案里抠出来的 > 默认 8080。
+// 回环 + 对外 IP 各试一次：GCDWebServer 可能绑 0.0.0.0，也可能只绑热点接口。
+static NSUInteger ResolveLivePort(NSString *cur, NSString *localIP) {
+    struct in_addr lo, lan;
+    memset(&lo, 0, sizeof(lo));
+    memset(&lan, 0, sizeof(lan));
+    inet_pton(AF_INET, "127.0.0.1", &lo);
+    BOOL hasLan = (localIP.length && inet_pton(AF_INET, [localIP UTF8String], &lan) == 1);
+
+    NSUInteger cand[5];
+    int n = 0;
+    if (gServerPort && gServerPort <= 65535) cand[n++] = gServerPort;
+    NSUInteger fromText = PortFromText(cur);
+    if (fromText && fromText != gServerPort) cand[n++] = fromText;
+    if (8080 != gServerPort && 8080 != fromText)  cand[n++] = 8080;
+    if (8081 != gServerPort && 8081 != fromText)  cand[n++] = 8081;
+
+    for (int i = 0; i < n; i++) {
+        if (PortIsListeningAddr(lo, cand[i]) ||
+            (hasLan && PortIsListeningAddr(lan, cand[i]))) {
+            LOG("端口自证: %lu 正在 LISTEN（候选第 %d 个）",
+                (unsigned long)cand[i], i + 1);
+            return cand[i];
+        }
+    }
+    // 一个都没连上：若 start hook 亲手记过端口仍采信（hook 是直接证据）；
+    // 但 stop hook 已把它清零时绝不能凭空补一个地址。
+    if (gServerPort) {
+        LOG("端口自证: 未探测到 LISTEN，但 start hook 记录过 %lu，采信",
+            (unsigned long)gServerPort);
+        return gServerPort;
+    }
+    LOG("端口自证: 无端口在 LISTEN 且无 start 记录 → 判定服务未运行，不改地址");
+    return 0;
+}
+
+// 什么算「地址坏了」：空 / 占位词 / 不是 http / host 不是合法 IP
+static BOOL AddressLooksBroken(NSString *s) {
+    if (!s.length) return YES;
+    NSString *low = [s lowercaseString];
+    if ([low rangeOfString:@"unknown"].location != NSNotFound) return YES;
+    if ([low rangeOfString:@"(null)"].location != NSNotFound) return YES;
+    if ([low rangeOfString:@"http://"].location != 0) return YES;
+    NSString *host = HostFromURLString(s);
+    if (!host) return YES;
+    if ([low rangeOfString:@"localhost"].location != NSNotFound) return YES;
+    return !IsPlausibleIPAddress(host);
+}
+
+// 在 App 写完地址之后调用。三个条件缺一不可：
+//   ① 地址本身是坏的（占位词 / 非法 IP）  ② 枚举得到本机 IP
+//   ③ 端口实测在 LISTEN（或 start hook 有直接记录）
+// 绝不覆盖 WiFi 下本来就正常的地址，也绝不在停止服务后凭空填地址。
+static void RewriteAddressIfNeeded(id page) {
+    if (!page || !gEnableIPFix) return;
+    id tv = GetIvar(page, "ipAddress");
+    if (!tv) return;
+
+    NSString *cur = RawAddressText(page);
+    if (!AddressLooksBroken(cur)) return;          // 正常，别动
+
+    NSString *ip = BestLocalIPAddress(NO);
+    if (!ip) { LOG("× 地址修正跳过：枚举不到本机 IP"); return; }
+
+    NSUInteger port = ResolveLivePort(cur, ip);
+    if (!port) return;   // 服务没在跑：unknown / 空白是正确状态，不造假地址
+
+    NSString *url = [NSString stringWithFormat:@"http://%@:%lu", ip, (unsigned long)port];
+    LOG("地址修正: 原=[%@] -> 新=[%@] (port=%lu, 已自证)",
+        cur, url, (unsigned long)port);
+
+    SEL setText = @selector(setText:);
+    if ([tv respondsToSelector:setText]) {
+        ((void (*)(id, SEL, id))objc_msgSend)(tv, setText, url);
+    }
+}
+
+// ★ 不 hook viewDidAppear: —— class_getInstanceMethod 会沿继承链查找，
+//   若 BNHttpServerPage 没有自己 override，method_setImplementation 会改到
+//   UIViewController 上，污染整个 App 的所有页面。改用已验证安全的
+//   my_viewDidLoad（见下方）挂一次校正。
+// hook: changeWifiTransferStateAction: —— 页面自己实现的方法，hook 安全
+//   启动是异步的（0x100013cdc 进全局队列），App 会在稍后写 ipAddress。
+//   所以延迟两拍各校正一次；RewriteAddressIfNeeded 自带幂等判断，
+//   地址正常时不会反复写。
+//   这个方法同时也是「停止」的入口。停止后端口不再 LISTEN，
+//   ResolveLivePort 探测不到就不会改写，不会凭空填一个假地址。
+static void (*orig_changeWiFiState)(id, SEL, id);
+static void my_changeWiFiState(id self, SEL _cmd, id sender) {
+    if (orig_changeWiFiState) orig_changeWiFiState(self, _cmd, sender);
+    __weak id weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (weakSelf) RewriteAddressIfNeeded(weakSelf);
+    });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.8 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (weakSelf) RewriteAddressIfNeeded(weakSelf);
+    });
 }
 
 // 弹出结果提示
@@ -839,6 +1075,19 @@ static void OkaWiFiInit(void) {
                                    "-[GCDWebServer stop]");
             } else {
                 LOG("× 找不到 GCDWebServer 类（端口记录不可用，将用兜底 8080）");
+            }
+
+            // ---- 2b 兜底：UI 层地址写回 ----
+            // 不依赖上面的 MSHookFunction 是否真的打上桩。
+            // 只 hook 页面自己实现的方法，避免沿继承链改到 UIViewController。
+            Class pageClsIP = LookupClass(PAGE_CLASS_MANGLED, PAGE_CLASS_SWIFT);
+            if (pageClsIP) {
+                HookInstanceMethod(pageClsIP,
+                                   NSSelectorFromString(@"changeWifiTransferStateAction:"),
+                                   (IMP)my_changeWiFiState, (void **)&orig_changeWiFiState,
+                                   "-[BNHttpServerPage changeWifiTransferStateAction:]");
+            } else {
+                LOG("× 找不到 BNHttpServerPage 类（UI 地址修正不可用）");
             }
         }
 
