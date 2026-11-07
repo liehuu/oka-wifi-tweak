@@ -127,26 +127,89 @@ hook `_GCDWebServerGetPrimaryIPAddress(BOOL)`：原函数返回非空就直接�
 
 ## 三、编译
 
-需要 **macOS + Theos**（Windows/Linux 也可以用 WSL + Theos，或 Docker `theos/theos`）。
+**不需要 Theos。** 构建是一台装了 Xcode 的 macOS（或 GitHub Actions 的 `macos-latest`）上跑三条命令：
 
 ```bash
-export THEOS=~/theos
-./build.sh roothide    # RootHide 越狱（/var/jb 不存在）
-./build.sh rootless    # rootless（Dopamine / palera1n rootless）
-./build.sh rootful     # 传统 rootful
+sh devkit/build.sh arm64e iphoneos-arm64e 1.0.0   # RootHide / roothide
+sh devkit/build.sh arm64  iphoneos-arm64  1.0.0   # rootless（Dopamine / palera1n）
+sh devkit/build.sh arm64  iphoneos-arm    1.0.0   # 传统 rootful
 ```
 
-产物在 `packages/com.oka.wifitweak_1.0.0_*.deb`。
+产物在 `.build/out/com.oka.wifitweak_<ver>_<arch>.deb`。
+
+### 为什么不用 Theos
+
+实测 `Setup Theos`（clone 主仓库 + 全部 submodule + 下载 iOS SDK）要 **680 秒**，
+而本工程**没有任何 `%hook` / Logos 语法**——全部 hook 走 ObjC runtime
+（`method_setImplementation` / `class_addMethod`）加一处 `MSHookFunction`
+（对 C 函数打点）。所以 `logos.pl` 用不上，Theos 的 makefile 体系也用不上。
+整套 Theos 只为跑一次 `dpkg-deb` 不值得。零 Theos 全流程约 **20 秒**。
+
+替换链路：
+
+| 环节 | Theos 方案 | 本工程方案 |
+|---|---|---|
+| 编译 | `make`（logos.pl → clang） | `xcrun clang -target ... -dynamiclib` |
+| 签名 | ldid | `codesign --force --sign -` |
+| 打包 | `dpkg-deb -b` | `devkit/mkdeb.sh`（纯 Python 拼 ar 归档） |
+| substrate.h | `$THEOS/vendor/include/` | 仓库自带 `devkit/include/substrate.h` |
+
+### 零 Theos 下踩过的坑（都是 Theos 环境替你掩盖的）
+
+1. **`<substrate.h>` 找不到。** 这个头是 Theos 提供的。零 Theos 直接
+   `fatal error: 'substrate.h' file not found`。→ 仓库自带最小声明（只声明
+   `MSHookFunction`）+ 编译时 `-I devkit/include`。
+
+2. **架构闸门假通过。** 旧写法 `lipo -info | grep -q arm64`：arm64e 的输出是
+   `... is architecture: arm64e`，**包含** `arm64` 子串 → grep 直接过。
+   于是「arm64e 变体被误编成 arm64」这个最致命的错误查不出来（症状是装上了
+   但 dylib 不被加载，系统不报错）。→ 改用 `lipo -archs` + 整词相等 + 单切片校验。
+
+3. **`-fobjc-exceptions` 与 `<dispatch/dispatch.h>`。** Theos 有 `prefix.pch`
+   兜底，`xcrun clang` 单文件直接编没有，`@try/@catch` 与 `dispatch_after` 会报错。
+
+4. **`DEBIAN/` 绝不能进 `data.tar`。** dpkg 只从 `control.tar` 读控制文件。
+   若 `data.tar` 里带 `./DEBIAN/postinst`，会解到根目录的 `/DEBIAN`——
+   rootless 上 `/` 只读 → 解包失败 → **整个包装不上**。（已由 `mkdeb.sh` 剪枝 + 闸门守住。）
+
+5. **rootless 的 `data.tar` 不能同时出现 `./Library/...` 和 `./var/jb/...`。**
+   原本无条件 `mkdir "$STAGE/Library/..."`，rootless 变体就会多出一整棵空的
+   `./Library` 树。空目录也是 tar 成员，不会因为"里面没文件"自动消失；
+   rootless 上解它写 `/` → 只读 → 装不上。→ 只建 `$DEST`，并加路径前缀闸门。
+
+6. **tar 必须 `GNU_FORMAT`。** Python 3.8+ `tarfile.open(mode='w')` 默认
+   `PAX_FORMAT`，遇小数秒 mtime 会在**每个成员前**插 `typeflag='x'` 扩展头，
+   dpkg 报 `unsupported PAX tar header type 'x'`。→ 锁 `GNU_FORMAT` + mtime 取整。
+
+7. **dylib 必须 755 且带 `LC_CODE_SIGNATURE`。** 644 或无签名的 dylib 会被
+   ellekit / RootHide 加载器静默跳过，表现是「装了完全没反应」而 dpkg 不报错。
+
+`devkit/build.sh` 里这四条闸门全部是**硬失败**（`exit 1`），不是警告。
+且都做过反向注入验证：注入缺陷 → 必须报错且不产出坏包 → 还原 → 复跑干净。
+
+### GitHub Actions
+
+推上去自动跑三变体矩阵（`rootful` / `rootless` / `roothide`），
+`.github/workflows/build.yml`。手动触发可指定版本号。
 
 手动装：
+
 ```bash
-scp packages/*.deb root@<设备IP>:/tmp/
+scp .build/out/*.deb root@<设备IP>:/tmp/
 ssh root@<设备IP>
-dpkg -i /tmp/com.oka.wifitweak_1.0.0_*.deb
+dpkg -i /tmp/com.oka.wifitweak_*.deb
 killall -9 Blinker
 ```
 
-**注意架构**：`Makefile` 里 `ARCHS = arm64 arm64e`，两个切片都编。你的设备是 arm64e + RootHide，用 `roothide` scheme 编出来的包结构才是对的（`Architecture: iphoneos-arm64e`，纯 `./Library/...` 无 rootfs 符号链接）。
+**注意架构**：`arm64e` 与 `arm64` 是不同的 cpusubtype，混了会「装上了但不加载」。
+arm64e 设备（A12 及以上 + RootHide）用 `roothide` 那条命令，
+产物 `Architecture: iphoneos-arm64e`，纯 `./Library/...` 结构（jbroot 内，与 rootful 同构，
+**没有** `/var/jb` 前缀）。
+
+### legacy/
+
+`legacy/` 下是旧的 Theos 方案（`Makefile` / `build-theos.sh` / `control`），
+已弃用，仅作参考保留。**不要把 `Makefile` 放回根目录**——它会让人以为还在用 Theos。
 
 ---
 
@@ -188,16 +251,18 @@ idevicesyslog | grep OkaWiFi
 | 完全没有 `[OkaWiFi] 载入` | 插件没被注入 | 检查 `OkaWiFi.plist` 的 Bundles 过滤、确认 `dpkg -L` 里 dylib 路径与越狱类型匹配（rootless 要在 `/var/jb` 下） |
 | 有「载入」但 hook 全打 `×` | 类名/符号没找到 | 看日志里打出来的实际类名，改 `PAGE_CLASS_MANGLED` |
 | 长按没菜单项 | `didFinishLaunching` 没被 hook 到 | 确认 AppDelegate 类名（日志会打）；确认不是从后台恢复（此时不会重走 didFinishLaunching，重启 App 即可） |
-| 点了崩溃（`brk`） | outlet 没连全，Swift 强解包 trap | 看「outlet 未全部连上」日志；此时应已自动放弃，若仍崩说明是别的路径，抓 crash log 里 `0x100013e2x` 附近的 pc |
+| 点了崩溃（`brk`） | Swift 强解包 trap（`brk #1`） | 代码已按「只有 `httpServer` 必须为真」判断，其余 6 个 outlet 是 Swift `weak`，页面没上屏时本来就该是 nil。若仍崩，抓 crash log 里 `0x100013e2x` 附近的 pc 定位到具体强解包点 |
 | 能开但地址空 | IP hook 没生效 | 日志里应有 `GetPrimaryIPAddress fallback`；没有说明 `_GCDWebServerGetPrimaryIPAddress` 没 dlsym 到 |
 | 开了但电脑连不上 | 进程被挂起 | 看是否有「后台保活音频 已启动」；没有说明 `Happy Dreams.mp3` 找不到，需换素材 |
 | 蜂窝下按钮还是不出现 | flags 没被改写 | 看是否有 `flags 0x... -> ...` 日志；没有说明 `SCNetworkReachabilityGetFlags` 的 hook 没命中（可能是 App 静态链接了 SystemConfiguration 的私有副本，改用层 2 兜底，看 `viewDidLoad` 是否被 hook） |
+| 日志没有 `✓ 解析到 _swift_unknownObjectWeakLoadStrong` | libswiftCore 没解析到该符号 | 此时所有 Swift weak outlet 都读不到（`GetIvar` 返回 nil），功能降级为「仅按钮放行」，不崩。检查 App 是否确实用 Swift weak 存 outlet（1.7.5 是） |
+| 快捷菜单点了没反应，日志停在「已在运行」 | `gServerPort` 未清零 | 已 hook `-[GCDWebServer stop]` 清零。若 App 走了别的停服路径，会误判为已在运行；日志会打 `已在运行 (url=... port=...)`，据此判断 |
 
 ---
 
 ## 五、已知限制（如实说明）
 
-1. **未在本机编译验证。** 本机是 Windows 且没有 iOS SDK / Theos，代码只做了静态审查（括号平衡、签名匹配、ARC 桥接、ObjC 调用约定）。首次 `make` 可能有个别警告或类型不匹配需要微调，我在 README 里标了每处可能的点。
+1. **编译环境是 macOS，本机（Windows）无法验证真实编译。** 代码做了静态审查（括号平衡、函数定义顺序、函数指针签名与赋值、ARC 桥接配对、格式串类型），`devkit/build.sh` / `devkit/mkdeb.sh` 的 shell 语法与打包链路已在本地实测通过（三种 scheme 的 deb 结构、Architecture 字段、载荷路径、权限全部核验），但 `clang` 编译与 `codesign` 只能在 macOS 上发生。首次 CI 可能还有个别 warning 级别的类型问题。
 2. **后台保活依赖音频后台模式。** App 的 `UIBackgroundModes` 是 `audio`/`fetch`，用音频钉住进程是可行的，但 iOS 会占一个「正在播放」状态（音量 0，听不到）。若你介意，可在 prefs 里关掉——但那会导致切后台后端口失效。
 3. **`_GCDWebServerGetPrimaryIPAddress` 靠符号名 hook。** 若 App 后续版本换了 GCDWebServer 版本或静态链接，符号可能找不到（日志会明确报 `×`）。此时功能 2b 降级为「能开但地址空」，功能 2a 与功能 1 不受影响。
 4. **地址优先级是启发式。** `bridge* > en* > pdp_ip*` 覆盖了绝大多数场景；若你同时开了 VPN 且 VPN 也建了 `bridge` 接口，可能选错。日志会打印所有候选接口和分数，便于判断。
@@ -209,12 +274,31 @@ idevicesyslog | grep OkaWiFi
 
 ```
 wifitweak/
-├── Tweak.xm        # 全部实现（约 750 行，含逐条逆向依据注释）
-├── Makefile        # 支持 rootless / roothide / rootful
-├── control         # deb 元信息
-├── OkaWiFi.plist   # CydiaSubstrate 过滤：只注入 com.blinker.documents
-├── build.sh        # 一键编译打包
-└── README.md       # 本文件
+├── Tweak.xm                    # 全部实现（约 860 行，含逐条逆向依据注释）
+├── OkaWiFi.plist               # CydiaSubstrate 过滤：只注入 com.blinker.documents
+├── devkit/
+│   ├── build.sh                # 零 Theos 编译：xcrun clang + codesign + 4 组闸门
+│   ├── mkdeb.sh                # 纯 Python 拼 ar 归档（不依赖 dpkg-deb）
+│   └── include/
+│       └── substrate.h         # 最小 MSHookFunction 声明（Theos 的 vendor/include 替代）
+├── .github/workflows/build.yml # 三变体矩阵 CI
+├── legacy/                     # 旧 Theos 方案，已弃用仅作参考
+│   ├── Makefile
+│   ├── build-theos.sh
+│   └── control
+├── .gitattributes              # 锁 LF（Makefile recipe 行尾 CRLF 会让 make 报 missing separator）
+├── .gitignore                  # 含 .build/ 与 .verify/
+└── README.md                   # 本文件
+```
+
+### 构建产物
+
+```
+.build/
+├── OkaWiFi.dylib               # 编译出的中间产物（已签名）
+├── stage-<cpu>/                # 打包暂存目录
+└── out/
+    └── com.oka.wifitweak_<ver>_<arch>.deb   # 最终产物
 ```
 
 ### 可选：偏好设置
