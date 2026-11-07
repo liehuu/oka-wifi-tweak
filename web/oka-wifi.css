@@ -1,0 +1,99 @@
+/* OkaWiFi v1.1.0 — 网页增强层样式
+ * 只使用 oka- 前缀，不覆盖 Bootstrap 原类，保证原页面可用性不受影响。
+ */
+.oka-panel { margin-top: 18px; }
+.oka-panel > .panel-heading { background: #f7f9fb; }
+.oka-hint { color: #777; font-size: 12px; font-weight: normal; margin-left: 8px; }
+
+/* --- 拖放区 --- */
+.oka-dropzone {
+  border: 2px dashed #b8c6d1;
+  border-radius: 8px;
+  background: #fbfdff;
+  text-align: center;
+  padding: 26px 16px;
+  transition: background .15s ease, border-color .15s ease, transform .15s ease;
+  user-select: none;
+}
+.oka-dropzone-icon { font-size: 34px; line-height: 1; color: #5b8db8; margin-bottom: 8px; }
+.oka-dropzone-title { font-size: 16px; font-weight: 600; color: #2c3e50; }
+.oka-dropzone-sub { margin-top: 6px; color: #7b8a97; font-size: 12px; }
+.oka-dropzone.oka-dropzone-active {
+  border-color: #2f7fbf;
+  background: #eaf4ff;
+  transform: scale(1.005);
+}
+
+/* --- 全屏拖放提示 --- */
+.oka-drag-overlay {
+  position: fixed; inset: 0; z-index: 100000;
+  background: rgba(30, 80, 130, .38);
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: none;   /* 不抢 drop 事件 */
+}
+.oka-drag-box {
+  background: #fff; border: 2px dashed #2f7fbf; border-radius: 14px;
+  padding: 34px 54px; text-align: center;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, .22);
+}
+.oka-drag-box-icon { font-size: 52px; line-height: 1; color: #2f7fbf; }
+.oka-drag-box-title { font-size: 26px; font-weight: 700; color: #1f4e79; margin-top: 10px; }
+.oka-drag-box-sub { font-size: 13px; color: #667; margin-top: 8px; }
+
+/* --- 批量工具条 --- */
+.oka-batch-bar { margin-top: 14px; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.oka-batch-bar .btn { margin-right: 4px; }
+.oka-batch-bar .badge { background: #fff; color: #2f7fbf; margin-left: 4px; }
+
+/* --- 行选择 --- */
+#listing .oka-check { width: 34px; text-align: center; vertical-align: middle; }
+#listing .oka-checkbox { cursor: pointer; }
+#listing tr.row-file { cursor: pointer; }
+#listing tr.row-file.oka-selected { background: #e8f3ff !important; }
+#listing tr.row-file.oka-selected > td { border-top-color: #b9d9f5; }
+
+/* --- 任务面板 --- */
+.oka-tasks-wrap { margin-top: 16px; border: 1px solid #e3e8ec; border-radius: 6px; }
+.oka-tasks-head {
+  background: #f7f9fb; padding: 8px 10px; border-bottom: 1px solid #e3e8ec;
+  overflow: hidden; min-height: 38px;
+}
+.oka-tasks-head .btn { margin-left: 6px; }
+.oka-tasks { max-height: 280px; overflow-y: auto; padding: 6px 10px; }
+.oka-task { padding: 6px 2px; border-bottom: 1px solid #f0f2f4; }
+.oka-task:last-child { border-bottom: none; }
+.oka-task-line { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.oka-task-name { flex: 1; word-break: break-all; color: #34495e; }
+.oka-task-size { color: #8895a2; }
+.oka-task-pct { color: #2f7fbf; min-width: 36px; text-align: right; }
+.oka-task-error { color: #a94442; font-size: 11px; margin-top: 3px; word-break: break-all; }
+.oka-task-fail .oka-task-name, .oka-task-skip .oka-task-name { color: #a94442; }
+.oka-progress { height: 6px; margin: 5px 0 0; background: #eef2f5; border-radius: 3px; box-shadow: none; }
+.oka-progress .progress-bar { background-color: #2f7fbf; border-radius: 3px; transition: width .12s linear; }
+.oka-result-alert { margin-top: 14px; margin-bottom: 0; }
+
+/* --- 批量移动弹窗 --- */
+.oka-move-section { margin-bottom: 16px; }
+.oka-move-section > label { display: block; font-size: 13px; margin-bottom: 6px; color: #34495e; }
+.oka-move-items { max-height: 96px; overflow-y: auto; border: 1px solid #e3e8ec; border-radius: 4px; padding: 6px; }
+.oka-chip {
+  display: inline-block; background: #eef5fc; border: 1px solid #d3e4f4; color: #2c5a80;
+  border-radius: 3px; padding: 2px 7px; margin: 2px; font-size: 12px;
+}
+.oka-move-crumb { font-size: 12px; margin-bottom: 6px; color: #667; }
+.oka-move-crumb a { margin: 0 2px; }
+.oka-move-browser {
+  border: 1px solid #e3e8ec; border-radius: 4px; padding: 6px;
+  max-height: 180px; overflow-y: auto; display: flex; flex-direction: column;
+}
+.oka-move-browser a.oka-dir {
+  display: block; padding: 5px 8px; color: #2c5a80; text-decoration: none; border-radius: 3px;
+}
+.oka-move-browser a.oka-dir:hover { background: #eef5fc; text-decoration: none; }
+.oka-move-failures { margin-top: 8px; font-size: 12px; color: #a94442; max-height: 100px; overflow-y: auto; }
+
+@media (max-width: 640px) {
+  .oka-drag-box { padding: 24px; }
+  .oka-drag-box-title { font-size: 20px; }
+  .oka-batch-bar .oka-hint { display: block; width: 100%; margin: 6px 0 0; }
+}

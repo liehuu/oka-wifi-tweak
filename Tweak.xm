@@ -77,6 +77,9 @@
 //   ElleKit 会提供 <substrate.h> 兼容头；若目标环境只有 libhooker，
 //   把下面这行换成 <libhooker/libhooker.h>。
 #import <substrate.h>
+// v1.1.0 网页增强资源（devkit/gen-webassets.py 在编译前生成到 .build/）。
+// 纯 ASCII C 字符串常量 kOkaWebJS / kOkaWebCSS，构建脚本用 -I .build 顶上来。
+#import "OkaWebAssets.h"
 
 #define SHORTCUT_TYPE  @"com.oka.wifi.start"
 // ★ Swift 类在 ObjC 运行时里注册的是 mangled 名（我从 __objc_classlist 的
@@ -123,6 +126,7 @@ static Class LookupClass(NSString *mangled, NSString *swiftName) {
 static BOOL gEnableShortcut    = YES;   // 功能 1：长按菜单
 static BOOL gEnableCellular    = YES;   // 功能 2a：蜂窝/热点可开启
 static BOOL gEnableIPFix       = YES;   // 功能 2b：热点 IP 修正
+static BOOL gEnableWebEnhance  = YES;   // 功能 3：电脑网页端拖放上传 / 批量移动
 static BOOL gCopyURLOnShortcut = YES;   // 长按开启后把地址复制到剪贴板
 
 static void LoadPrefs(void) {
@@ -131,9 +135,11 @@ static void LoadPrefs(void) {
     if (d[@"EnableShortcut"])    gEnableShortcut    = [d[@"EnableShortcut"] boolValue];
     if (d[@"EnableCellular"])    gEnableCellular    = [d[@"EnableCellular"] boolValue];
     if (d[@"EnableIPFix"])       gEnableIPFix       = [d[@"EnableIPFix"] boolValue];
+    if (d[@"EnableWebEnhance"])  gEnableWebEnhance  = [d[@"EnableWebEnhance"] boolValue];
     if (d[@"CopyURLOnShortcut"]) gCopyURLOnShortcut = [d[@"CopyURLOnShortcut"] boolValue];
-    LOG("prefs: shortcut=%d cellular=%d ipfix=%d copy=%d",
-        gEnableShortcut, gEnableCellular, gEnableIPFix, gCopyURLOnShortcut);
+    LOG("prefs: shortcut=%d cellular=%d ipfix=%d web=%d copy=%d",
+        gEnableShortcut, gEnableCellular, gEnableIPFix,
+        gEnableWebEnhance, gCopyURLOnShortcut);
 }
 
 // 保存一份强引用，避免"无界面实例"被提前释放导致 httpServer 消失
@@ -1087,6 +1093,87 @@ static void HookInstanceMethod(Class cls, SEL sel, IMP newImp, void **outOrig, c
     LOG("  ✓ hook %s", tag);
 }
 
+// ===========================================================================
+//  三、v1.1.0 电脑网页端增强（拖放上传 / 批量移动）
+// ===========================================================================
+//  不改 App 包内 GCDWebUploader.bundle 的任何文件 —— 那会破坏代码签名。
+//  GCDWebUploader 用 +[GCDWebServerDataResponse responseWithHTMLTemplate:variables:]
+//  渲染 index.html，模板里有 %epilogue% 占位符，值来自 variables[@"epilogue"]。
+//  这里在 variables 层追加 <style> + <script>，随首页 HTML 一起下发。
+//
+//  为什么两个方法都 hook：
+//    · 类方法 responseWithHTMLTemplate:variables: 是常规入口；
+//    · 其内部通常转 -initWithHTMLTemplate:variables:，App 若直接走实例方法也要覆盖。
+//    两者同时命中时用 epilogue 里的 OKA-WIFI-INJECTED 标记保证只注入一次。
+//
+//  作用域：只有带 epilogue key、或模板路径是 index.html 的响应才被改。
+//  就算误命中别的页面，增强 JS 找不到 #listing / .btn-toolbar 会自行降级，
+//  不会抛异常，也不会动原页面任何元素。
+// ===========================================================================
+
+static NSString *OkaWebInjectionHTML(void) {
+    static NSString *html = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *js  = [NSString stringWithUTF8String:kOkaWebJS];
+        NSString *css = [NSString stringWithUTF8String:kOkaWebCSS];
+        // gen-webassets.py 已做往返解码自检；这里仍对解码失败做兜底，
+        // 避免把空脚本下发出去、让页面看起来像"增强没生效"。
+        if (!js)  js  = @"";
+        if (!css) css = @"";
+        // 全部用 NSString 字面量拼接（@"..." 与 "..." 混用 clang 会报错）。
+        // JS/CSS 作为参数传入，不参与格式串解析，其中的 % 不会被当格式符。
+        html = [NSString stringWithFormat:
+                @"\n<!-- OKA-WIFI-INJECTED -->\n"
+                @"<style type=\"text/css\" id=\"oka-wifi-css\">%@</style>\n"
+                @"<script type=\"text/javascript\" id=\"oka-wifi-js\">%@</script>\n",
+                css, js];
+    });
+    return html;
+}
+
+static NSDictionary *OkaAugmentVariables(NSString *path, NSDictionary *vars) {
+    if (!gEnableWebEnhance) return vars;
+    if (![vars isKindOfClass:[NSDictionary class]]) return vars;
+
+    id ep = [vars objectForKey:@"epilogue"];
+    BOOL isIndex = [path isKindOfClass:[NSString class]] &&
+                   [[path lastPathComponent] isEqualToString:@"index.html"];
+    if (!isIndex && ![ep isKindOfClass:[NSString class]]) return vars;
+
+    if ([ep isKindOfClass:[NSString class]] &&
+        [(NSString *)ep rangeOfString:@"OKA-WIFI-INJECTED"].location != NSNotFound) {
+        return vars;   // 类方法 + 实例方法双 hook 命中，只注入一次
+    }
+
+    NSMutableDictionary *m = [vars mutableCopy];
+    NSString *base = [ep isKindOfClass:[NSString class]] ? (NSString *)ep : @"";
+    [m setObject:[base stringByAppendingString:OkaWebInjectionHTML()]
+          forKey:@"epilogue"];
+    return m;
+}
+
+static id (*orig_responseHTMLTemplate)(id, SEL, NSString *, NSDictionary *);
+static id my_responseHTMLTemplate(id self, SEL _cmd, NSString *path, NSDictionary *vars) {
+    return orig_responseHTMLTemplate(self, _cmd, path,
+                                     OkaAugmentVariables(path, vars));
+}
+
+static id (*orig_initHTMLTemplate)(id, SEL, NSString *, NSDictionary *);
+static id my_initHTMLTemplate(id self, SEL _cmd, NSString *path, NSDictionary *vars) {
+    return orig_initHTMLTemplate(self, _cmd, path,
+                                 OkaAugmentVariables(path, vars));
+}
+
+static void HookClassMethod(Class cls, SEL sel, IMP newImp, void **outOrig, const char *tag) {
+    if (!cls) return;
+    Method m = class_getClassMethod(cls, sel);
+    if (!m) { LOG("  × 找不到类方法 %s", tag); return; }
+    if (outOrig) *outOrig = (void *)method_getImplementation(m);
+    method_setImplementation(m, newImp);
+    LOG("  ✓ hook %s", tag);
+}
+
 __attribute__((constructor))
 static void OkaWiFiInit(void) {
     @autoreleasepool {
@@ -1211,6 +1298,36 @@ static void OkaWiFiInit(void) {
             } else {
                 LOG("× 找不到 AppDelegate");
             }
+        }
+
+        // ---- 3: 电脑网页端增强（v1.1.0） ----
+        // 与 2b 一样用 RTLD_LAZY 真加载 framework，确保类已注册；
+        // 不用 RTLD_NOLOAD（那只是"查一下"，类没注册时不会真的加载）。
+        if (gEnableWebEnhance) {
+            Class dataResp = NSClassFromString(@"GCDWebServerDataResponse");
+            if (!dataResp) {
+                dlopen("@rpath/GCDWebServer.framework/GCDWebServer", RTLD_LAZY);
+                dlopen("Frameworks/GCDWebServer.framework/GCDWebServer", RTLD_LAZY);
+                dataResp = NSClassFromString(@"GCDWebServerDataResponse");
+            }
+            if (dataResp) {
+                HookClassMethod(dataResp,
+                                NSSelectorFromString(@"responseWithHTMLTemplate:variables:"),
+                                (IMP)my_responseHTMLTemplate,
+                                (void **)&orig_responseHTMLTemplate,
+                                "+[GCDWebServerDataResponse responseWithHTMLTemplate:variables:]");
+                HookInstanceMethod(dataResp,
+                                   NSSelectorFromString(@"initWithHTMLTemplate:variables:"),
+                                   (IMP)my_initHTMLTemplate,
+                                   (void **)&orig_initHTMLTemplate,
+                                   "-[GCDWebServerDataResponse initWithHTMLTemplate:variables:]");
+                LOG("网页增强注入层已挂载（JS=%lu CSS=%lu 字节）",
+                    (unsigned long)strlen(kOkaWebJS), (unsigned long)strlen(kOkaWebCSS));
+            } else {
+                LOG("× 找不到 GCDWebServerDataResponse 类（网页增强不可用）");
+            }
+        } else {
+            LOG("网页增强已通过 prefs 关闭");
         }
 
         LOG("初始化完成");

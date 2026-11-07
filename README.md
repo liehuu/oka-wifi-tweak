@@ -1,11 +1,12 @@
 # Oka WiFi 传输增强（com.oka.wifitweak）
 
-针对 **Oka Files / Blinker 1.7.5**（`com.blinker.documents`）的越狱插件，实现两个功能：
+针对 **Oka Files / Blinker 1.7.5**（`com.blinker.documents`）的越狱插件，实现三组功能：
 
 | # | 功能 | 效果 |
 |---|---|---|
 | 1 | 桌面长按快捷开启 | 长按图标出现「开启 WiFi 传输」，点一下直接启动服务，地址自动复制到剪贴板并弹窗提示。不用进 App、不用点按钮 |
-| 2 | 蜂窝 / 热点可开启 | 用手机流量或个人热点时，WiFi 传输页面的「开始」按钮正常出现，可正常开启；且显示的地址是手机在热点网段的真实 IP（`172.20.10.1` 这类），不再是空白 |
+| 2 | 蜂窝 / 热点可开启 | 用手机流量或个人热点时，WiFi 传输页面的「开始」按钮正常出现，可正常开启；且显示的地址是手机在热点网段的真实 IP（`172.20.10.1` 这类），不再是 `unknown` |
+| 3 | 电脑网页端增强（v1.1.0） | 保留原 `Upload Files` 按钮；新增把单个/多个文件、整个文件夹从文件管理器拖进网页上传（全屏放置提示 + 逐项进度 + 成功/失败汇总 + 失败重试），并新增勾选多个文件/文件夹后批量移动到指定目录（带目录浏览与结果反馈） |
 
 ---
 
@@ -168,6 +169,45 @@ _GCDWebServerGetPrimaryIPAddress 硬编码 strcmp(ifa_name,"en0")
    - 挂**后台保活**（`AVAudioSession` Playback + 循环播放 App 自带的 `Happy Dreams.mp3`，音量 0）——否则切到后台几秒后进程被挂起、端口就断了；
    - 等 1.5s 读 App 自己写进 `ipAddress.text` 的 URL（`Helper` 是纯 Swift 类，ObjC runtime 反射不到 `uploader`）；读不到再用「本机 IP + 端口」兜底，复制到剪贴板并弹窗显示。
 
+### 功能 3 —— 电脑网页端增强（v1.1.0）
+
+**约束**：不能改 App 包内 `GCDWebUploader.bundle/Contents/Resources/` 的任何文件，那会破坏代码签名。所以采用「构建期把前端资源编进 dylib + 运行时注入 HTML」。
+
+**注入点是从二进制确认的，不是猜的**：
+
+```
+0x1D1E4  dictionaryWithObjects:forKeys:count:  (w4 = 6)
+0x26D40  6 个 key：device / title / header / prologue / epilogue / footer
+0x1D210  ldr x1, #0x2fbc8   ; SEL "responseWithHTMLTemplate:variables:"
+         mov x2, x26        ; template path
+         mov x3, x27        ; variables 字典
+         bl  objc_msgSend
+```
+
+`index.html` 第 92 行有 `%epilogue%`，正好在文件列表面板之后、footer 之前。插件 hook `+[GCDWebServerDataResponse(Extensions) responseWithHTMLTemplate:variables:]`（同时 hook 内部的 `-initWithHTMLTemplate:variables:` 兜底），把 `variables[@"epilogue"]` 追加一段 `<style>` + `<script>` + DOM。只有带 `epilogue` key 或模板是 `index.html` 的响应会被改，App 其它 HTML 响应不受影响；双 hook 同时命中时用 `OKA-WIFI-INJECTED` 标记保证只注入一次。
+
+**服务端接口的实测结论**（`xhub/work/webapi-dis.py`，capstone 反汇编 `GCDWebServer`）：
+
+| 接口 | 参数 | 行为 |
+|---|---|---|
+| `GET list?path=` | 目录（`/` 结尾） | JSON 数组；目录项 `path` 以 `/` 结尾，文件项不带 |
+| `POST upload` | `path` = **已存在的目标目录** + multipart `files[]` | 先 `fileExistsAtPath:isDirectory:`，目录不存在直接失败 |
+| `POST create` | `path` = 新目录完整路径（不带尾斜杠） | `createDirectoryAtPath:withIntermediateDirectories:` 的实参是 **`mov w3, #0`（NO）** → 父目录必须已存在、目标不能已存在 |
+| `POST move` | `oldPath` / `newPath`（完整目标路径） | 目标已存在报 `Destination ... already exists` |
+| `POST delete` / `GET download` | `path` | 原页面逻辑，不改 |
+
+路径都经 `_GCDWebServerNormalizePath` 规范化。因为 `create` **不递归**，文件夹上传必须把目录按深度升序**逐级创建**，再逐个上传文件到对应子目录；重复拖入同名文件夹时，`create` 会失败，此时用 `list` 反查同名目录是否真的已存在，存在就当"目录已就绪"继续走，不吞掉真实失败。
+
+**前端（`web/oka-wifi.js` / `web/oka-wifi.css`）**：
+
+- 原 `Upload Files` 按钮、`#fileupload` 的 `change` 流程、`#move-modal`、`.button-move`、`_reload()`、`#listing` 渲染**全部不替换、不重写**；
+- 拖放在 `document` 的**捕获阶段**接管：`preventDefault` + `stopPropagation` 既阻止浏览器打开文件，也阻止事件冒泡到 jQuery File Upload 绑在 `$(document)` 上的 `dropZone` handler，避免双份上传；改成自己的上传管线，因为原 `add` 回调把 `formData.path` 写死为 `_path`，无法给子目录指定路径；
+- 用 `DataTransferItem.webkitGetAsEntry()` 递归展开文件夹（`readEntries` 单次最多 100 条，循环读到空为止）；浏览器不给 entry API 时降级为 `dataTransfer.files`（单/多文件，无目录结构）；
+- 上传用 `XMLHttpRequest` + `FormData`，`xhr.upload.onprogress` 更新逐项进度条；串行执行，任务面板显示等待/进行中/完成/失败/跳过与汇总，支持「重试失败项」和「停止剩余」，结束调用原 `_reload(_path)` 刷新；
+- 列表多选只用 `MutationObserver` 往新行**前面追加一个复选框 td**，事件委托处理选中，不动原渲染；批量移动弹窗提供目标路径输入 + 逐级目录浏览（复用 `GET list`），逐个 `POST move` 后汇总成功/失败并刷新列表。
+
+**构建期**：`devkit/gen-webassets.py` 把 JS/CSS 按 UTF-8 字节转成 C 字符串常量写到 `.build/OkaWebAssets.h`（非可打印字节用固定 3 位八进制，避免 `\xNN` 吞后续十六进制字符），并做**往返解码自检**；`build.sh` 用 `-I .build` 编进 dylib，再用功能指纹闸门确认 8 个关键串真的在产物里。
+
 ---
 
 ## 三、编译
@@ -175,9 +215,9 @@ _GCDWebServerGetPrimaryIPAddress 硬编码 strcmp(ifa_name,"en0")
 **不需要 Theos。** 构建是一台装了 Xcode 的 macOS（或 GitHub Actions 的 `macos-latest`）上跑三条命令：
 
 ```bash
-sh devkit/build.sh arm64e iphoneos-arm64e 1.0.2   # RootHide / roothide
-sh devkit/build.sh arm64  iphoneos-arm64  1.0.2   # rootless（Dopamine / palera1n）
-sh devkit/build.sh arm64  iphoneos-arm    1.0.2   # 传统 rootful
+sh devkit/build.sh arm64e iphoneos-arm64e 1.1.0   # RootHide / roothide
+sh devkit/build.sh arm64  iphoneos-arm64  1.1.0   # rootless（Dopamine / palera1n）
+sh devkit/build.sh arm64  iphoneos-arm    1.1.0   # 传统 rootful
 ```
 
 产物在 `.build/out/com.oka.wifitweak_<ver>_<arch>.deb`。
@@ -260,6 +300,9 @@ sh devkit/build.sh arm64  iphoneos-arm    1.0.2   # 传统 rootful
 | `devkit/verify-deb.py --check-macho` | 编译后立刻读 Mach-O 头的 `cputype/cpusubtype` 做**整数比较**，并检查 `LC_CODE_SIGNATURE` | `build.sh` 内；CI 同代码 |
 | `devkit/verify-deb.py <deb> <scheme> <arch>` | 校验 deb 的 ar 结构、Architecture、载荷路径、DEBIAN 隔离、PAX 头、架构、签名、权限（共 22 项） | CI 的 Verify deb 步骤；本地可跑 |
 | `devkit/selftest-verify.py` | **证明上面这个校验器会失败**：15 个用例（正向 3 / 反向 12），用代码拼出的 Mach-O 与 deb，含「arm64e 冒充 arm64」「缺签名」「PAX」「权限错」等 | CI 独立步骤；本地可跑 |
+| `devkit/gen-webassets.py` | 生成内联前端资源头；含危险字面量检查（`</script`、`%key%` 形状）与**往返解码自检**（生成后把 C 字面量解回字节，与源文件 sha256 比对，落盘复读再比一次） | `build.sh` 内；CI 独立步骤也跑一次 |
+| `devkit/selftest-webassets.py` | **证明上面这个资源闸门会失败**：7 个用例，含注入 `</script`、注入 `%epilogue%`、删文件、空文件、篡改 C 转义应被解码检出、还原后复跑干净 | CI 的 Web assets gate；本地可跑 |
+| `node --check web/oka-wifi.js` | 用真实 JS 解析器验语法（不是正则数括号）；runner 缺 node 时**明确报错**，不静默跳过 | CI 的 Web assets gate |
 
 `verify-deb.py` 用纯标准库自己解析 Mach-O，不调 `lipo`/`otool`：
 `lipo -info` 输出的是句子，`grep -q arm64` 对 `arm64e` 必然假通过（坑 2），
@@ -328,6 +371,19 @@ idevicesyslog | grep OkaWiFi
 #       [OkaWiFi] flags 0x00040002 -> 0x00000002 (cleared IsWWAN)
 #       [OkaWiFi] iface bridge100 -> 172.20.10.1 (score 100)
 #       [OkaWiFi] serverURL 修正: 原=[(null)] -> 新=[http://172.20.10.1:8080/] (port=8080 running=1)
+
+# 4) 功能 3：电脑浏览器打开 http://<手机IP>:8080
+#    a) 页面应出现「OkaWiFi 增强」面板与虚线拖放区；原 Upload Files 按钮照常可用
+#    b) 从电脑文件管理器拖 1 个文件 / 多个文件 / 整个文件夹到页面任意位置
+#       期望：全屏「松开即可上传」提示 → 任务面板逐项进度 → 结果条显示成功/失败数
+#       文件夹：手机上应保留完整目录结构（含多级子目录）
+#    c) 在文件列表勾选多项 → 点「移动选中项」→ 用目录浏览选目标目录 → 确认
+#       期望：显示成功/失败汇总，列表自动刷新，文件出现在目标目录
+#    插件加载时日志应有：
+#       [OkaWiFi] ✓ hook +[GCDWebServerDataResponse responseWithHTMLTemplate:variables:]
+#       [OkaWiFi] ✓ hook -[GCDWebServerDataResponse initWithHTMLTemplate:variables:]
+#       [OkaWiFi] 网页增强注入层已挂载（JS=31844 CSS=4593 字节）
+#    浏览器里查看源码，<body> 里应有且仅有一处 <!-- OKA-WIFI-INJECTED -->
 ```
 
 排错对照：
@@ -349,6 +405,11 @@ idevicesyslog | grep OkaWiFi
 | 日志里没有 `GetPrimaryIPAddress orig=...` | `MSHookFunction` 在该 framework 上没真正打上桩（`✓ hook` 只代表 `dlsym` 找到符号） | **v1.0.2 起不影响主修复**：`serverURL` 是 ObjC 方法，走 `method_setImplementation`，与本 C 函数 hook 完全独立 |
 | 日志没有 `✓ hook -[GCDWebServer serverURL]` | `GCDWebServer` 类没找到（framework 未加载 / 类名不同） | 构造函数已改为 `dlopen(..., RTLD_LAZY)` 主动加载两种路径。若仍缺，看是否打印 `× 找不到 GCDWebServer 类`；此时只剩 UI 层写回兜底 |
 | 日志出现 `端口自证: 无端口在 LISTEN，且 port / isRunning 都无证据 → 不改地址` | 服务确实没在跑，或 hook 没拿到实例状态 | 这是**故意不写假地址**。v1.0.2 起端口由 `[self port]` 直取，探测不到也会采信；若电脑实测能连上却仍显示 unknown，把整段日志发来改判据 |
+| 网页里没有「OkaWiFi 增强」面板 | 模板注入没生效 | 先看日志有没有两条 `✓ hook ...HTMLTemplate:variables:` 与 `网页增强注入层已挂载`；再在浏览器「查看网页源代码」搜 `OKA-WIFI-INJECTED`。日志齐但页面没有 → 强刷（Ctrl+F5）排除缓存；日志缺 → 说明 `GCDWebServerDataResponse` 类没找到，看是否打印 `× 找不到 ...` |
+| 页面源码里出现两次 `OKA-WIFI-INJECTED` | 幂等标记失效（类方法 + 实例方法双 hook 都注入了） | 正常情况下 `OkaAugmentVariables` 会在第二次命中时直接返回原 variables。若重复，检查 `rangeOfString:@"OKA-WIFI-INJECTED"` 是否被改掉 |
+| 拖入文件夹后只剩顶层文件、子目录丢了 | `create` 用 `withIntermediateDirectories:NO`，父目录不存在时整条链会失败 | 任务面板会显示每个目录的失败原因。代码已按深度升序逐级创建并对「目录已存在」做 `list` 反查；若仍失败，把任务面板的失败明细发来 |
+| 拖放后出现两份上传 / 进度条乱跳 | 捕获阶段的 `stopPropagation` 没挡住 jQuery File Upload 在 `$(document)` 上的 drop handler | 检查是否有其它插件/浏览器扩展改写了 drag/drop；本插件的 `onDrop` 必须同时 `preventDefault()` 与 `stopPropagation()` |
+| 批量移动全部报失败 | `newPath` 目标已存在，或目标目录不存在 | 弹窗里逐项列出失败原因。服务端 `move` 在目标已存在时返回 `Destination ... already exists`；目录浏览只列 `GET list` 里真实存在的目录，手动输入路径时先确认它存在 |
 
 ---
 
@@ -359,6 +420,8 @@ idevicesyslog | grep OkaWiFi
 3. **`_GCDWebServerGetPrimaryIPAddress` 靠符号名 hook。** 若 App 换 GCDWebServer 版本或静态链接，符号可能找不到（日志会报 `×`）。这层失效**不影响 v1.0.2 的主力修复**（`serverURL` 是 ObjC 方法 hook）；只有 `GCDWebServer` 类本身找不到时才会退化到 UI 层写回。功能 2a 与功能 1 始终不受影响。
 4. **地址优先级是启发式。** `bridge* > en* > pdp_ip*` 覆盖了绝大多数场景；若你同时开了 VPN 且 VPN 也建了 `bridge` 接口，可能选错。日志会打印所有候选接口和分数，便于判断。
 5. **端口是 App 自己定的，插件不改。** v1.0.2 直接从 `[self port]` 读真实端口（`GCDWebServer` 公开属性）、`isRunning` 读运行状态，`stop` 时清零；不再靠猜 8080，也不再依赖 `startWithPort:` 是否被命中。端口 LISTEN 探测只保留为 UI 兜底层的补充手段。
+6. **网页增强依赖电脑浏览器的 `DataTransferItem.webkitGetAsEntry()`。** Chrome / Edge / Safari 支持整个文件夹递归；不提供该 API 的浏览器会自动降级为「单文件 / 多文件」拖放上传，文件夹结构无法保留（点 `Upload Files` 选文件始终可用）。另外服务端 `create` 不递归、也不允许目标已存在，所以文件夹上传是**串行**的：先逐级建目录，再逐个传文件，大文件夹会比一次多文件选择慢。
+7. **注入层依赖 `responseWithHTMLTemplate:variables:` 这条渲染路径。** 已在 1.7.5 的 `GCDWebServer` 二进制里反汇编确认（6 个 variables key 的字典 + `0x1D210` 的类方法调用）。若 App 升级换了 GCDWebServer 版本、改走别的 HTML 渲染方法，注入会静默不生效——但功能 1 / 2 完全不受影响，网页也会保持原版可用状态。
 
 ---
 
@@ -366,11 +429,16 @@ idevicesyslog | grep OkaWiFi
 
 ```
 wifitweak/
-├── Tweak.xm                    # 全部实现（约 860 行，含逐条逆向依据注释）
+├── Tweak.xm                    # 全部实现（约 1230 行，含逐条逆向依据注释）
 ├── OkaWiFi.plist               # CydiaSubstrate 过滤：只注入 com.blinker.documents
+├── web/                        # v1.1.0 电脑网页端增强前端资源（构建期内联进 dylib）
+│   ├── oka-wifi.js             # 拖放上传 / 文件夹递归 / 进度汇总 / 批量移动
+│   └── oka-wifi.css            # 只使用 oka- 前缀，不覆盖 Bootstrap 原类
 ├── devkit/
-│   ├── build.sh                # 零 Theos 编译：xcrun clang + codesign + 闸门
+│   ├── build.sh                # 零 Theos 编译：资源内联 + xcrun clang + codesign + 闸门
 │   ├── mkdeb.sh                # 纯 Python 拼 ar 归档（不依赖 dpkg-deb）
+│   ├── gen-webassets.py        # JS/CSS -> .build/OkaWebAssets.h（含往返解码自检）
+│   ├── selftest-webassets.py   # 上面这个资源闸门的自测：7 用例，证明它会失败
 │   ├── check-shell.py          # 静态闸门：bash 3.2 兼容性（本地也能跑）
 │   ├── verify-deb.py           # deb / 裸 dylib 校验（纯标准库，自己读 Mach-O）
 │   ├── selftest-verify.py      # 上面这个校验器的自测：15 用例，证明它会失败
@@ -390,6 +458,7 @@ wifitweak/
 
 ```
 .build/
+├── OkaWebAssets.h             # gen-webassets.py 生成的内联前端资源（.gitignore 忽略）
 ├── OkaWiFi.dylib               # 编译出的中间产物（已签名）
 ├── stage-<cpu>/                # 打包暂存目录
 └── out/
@@ -398,13 +467,16 @@ wifitweak/
 
 ### 可选：偏好设置
 
-插件会读 `/var/mobile/Library/Preferences/com.oka.wifitweak.plist`，四个开关，缺省全开：
+插件会读 `/var/mobile/Library/Preferences/com.oka.wifitweak.plist`，五个开关，缺省全开：
 
 ```xml
 <dict>
     <key>EnableShortcut</key>    <true/>   <!-- 功能 1：长按菜单 -->
     <key>EnableCellular</key>    <true/>   <!-- 功能 2a：蜂窝/热点可开 -->
     <key>EnableIPFix</key>       <true/>   <!-- 功能 2b：热点 IP 修正 -->
+    <key>EnableWebEnhance</key>  <true/>   <!-- 功能 3：网页拖放上传 / 批量移动 -->
     <key>CopyURLOnShortcut</key> <true/>   <!-- 开启后复制地址到剪贴板 -->
 </dict>
 ```
+
+把 `EnableWebEnhance` 设为 `false` 可让网页回到原版（原 `Upload Files`、原 `Move Item` 弹窗照常可用）。

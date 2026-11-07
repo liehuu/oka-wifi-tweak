@@ -25,7 +25,7 @@ on:
 
 env:
   # 版本号单一来源，禁止在别处硬编码（否则会出现「包名 v1.0、内容 v1.1」）。
-  VERSION: ${{ github.event.inputs.version || '1.0.2' }}
+  VERSION: ${{ github.event.inputs.version || '1.1.0' }}
   HOMEBREW_NO_AUTO_UPDATE: 1
 
 jobs:
@@ -81,6 +81,22 @@ jobs:
         run: |
           set -eu
           python3 devkit/selftest-verify.py
+
+      # v1.1.0 前端资源闸门：
+      #  · node --check 用真实 JS 解析器验语法（不是正则数括号）；
+      #  · selftest-webassets.py 做反向注入，证明危险字面量闸门会失败；
+      #  · 生成一次头文件，确认往返解码自检在 CI 环境同样通过。
+      # runner 缺 node 时明确报错，不静默跳过（跳过即通过的下场见 1.0.2 的教训）。
+      - name: Web assets gate
+        run: |
+          set -eu
+          if ! command -v node >/dev/null 2>&1; then
+            echo "::error::runner 缺 node，无法做 JS 语法闸门"
+            exit 1
+          fi
+          node --check web/oka-wifi.js
+          python3 devkit/selftest-webassets.py
+          python3 devkit/gen-webassets.py web .build/OkaWebAssets.h
 
       - name: Build ${{ matrix.scheme }}
         run: |

@@ -55,6 +55,15 @@ INC="$ROOT/devkit/include"
   exit 1
 }
 
+# ---------- 0) 网页增强资源内联 ----------
+# v1.1.0：不改 App 包内 GCDWebUploader.bundle（会破坏签名），把 web/ 下的
+#   JS/CSS 编成 dylib 里的 C 字符串常量，运行时由 Tweak.xm 追加到 epilogue。
+# 生成脚本自带往返解码自检；这里再补一条"文件真的落盘且非空"的硬判据。
+python3 "$ROOT/devkit/gen-webassets.py" "$ROOT/web" "$BUILD/OkaWebAssets.h" \
+  || { echo "✗ 前端资源内联失败，中止"; exit 1; }
+[ -s "$BUILD/OkaWebAssets.h" ] \
+  || { echo "✗ OkaWebAssets.h 未生成或为空，中止"; exit 1; }
+
 # ★ 抑制项与 legacy/Makefile 保持一致。
 #   重写 build.sh 时漏掉 -Wno-incompatible-pointer-types 与
 #   -Wno-objc-method-access，是这次 CI 编译失败的直接怀疑对象：
@@ -63,7 +72,7 @@ INC="$ROOT/devkit/include"
 #   代码侧已尽量从根源改（HookInstanceMethod 的 outOrig 改成 void **），
 #   但运行时 hook 代码天然绕不开强转，抑制项保留。
 xcrun clang -target "$TRIPLE" -isysroot "$SDK" \
-  -I "$INC" \
+  -I "$INC" -I "$BUILD" \
   -x objective-c \
   -dynamiclib -fobjc-arc -fobjc-exceptions -Os -Wall \
   -Wno-unused-parameter -Wno-unused-function -Wno-deprecated-declarations \
@@ -172,6 +181,17 @@ grep -aq "_swift_unknownObjectWeakLoadStrong" "$BUILD/$NAME.dylib" \
   || { echo "✗ dylib 缺 _swift_unknownObjectWeakLoadStrong（outlet 读取会失效）"
        echo "  排查：Tweak.xm 里 dlsym(RTLD_DEFAULT, \"_swift_unknownObjectWeakLoadStrong\") 是否还以字符串字面量形式存在"
        exit 1; }
+
+# 功能 3（v1.1.0）：网页增强注入层
+# 前 3 条是 ObjC 侧：类方法 hook 的 selector、幂等标记、类名常量。
+# 后 4 条来自内联的 kOkaWebJS —— 丢了说明 gen-webassets.py 的产物没被编进来，
+# 页面会照常打开但拖放/批量移动全部不存在，属于"静默功能缺失"。
+for sym in responseWithHTMLTemplate:variables: initWithHTMLTemplate:variables: \
+           OKA-WIFI-INJECTED GCDWebServerDataResponse \
+           oka-dropzone oka-move-modal webkitGetAsEntry dirAlreadyExists; do
+  grep -aqF "$sym" "$BUILD/$NAME.dylib" \
+    || { echo "✗ dylib 缺 ${sym}（网页增强会静默失效）"; exit 1; }
+done
 
 # 目标 App 的过滤条件（写在 plist 里，但 dylib 里也应有类名常量）
 for sym in Blinker BNHttpServerPage; do
