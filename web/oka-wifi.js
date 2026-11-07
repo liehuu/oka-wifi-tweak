@@ -1,25 +1,30 @@
 /*
- * OkaWiFi v1.1.0 — GCDWebUploader 网页端增强层
+ * OkaWiFi v1.1.1 — GCDWebUploader 网页端增强层
  *
  * 注入方式：由 Tweak.xm hook +[GCDWebServerDataResponse responseWithHTMLTemplate:variables:]
- *          把本文件 + oka-wifi.css 追加到模板的 epilogue 变量里，随首页 HTML 一起下发。
+ *          把本文件 + oka-wifi.css 追加到 epilogue 变量里，随首页 HTML 一起下发。
  *
- * 设计约束（用户明确要求）：
+ * 布局原则（v1.1.1 按用户反馈改）：
+ *   页面默认状态与原版几乎一致，不新增任何占空间的可见区块。
+ *   · 拖放在整个页面都可用，所以**没有单独的拖放框**；只在拖入时显示全屏提示层。
+ *   · 上传任务面板默认隐藏，只在有任务时出现；结果条复用原页面的 #alerts。
+ *   · 全选/取消选择放进原 .btn-toolbar，与原按钮同一行。
+ *   · 移动**复用原版入口**：点行末的 .button-move，弹出的仍是原版 #move-modal，
+ *     只是把「只能手填地址」替换成目录浏览 + 批量选中 + 结果反馈。
+ *     不再有独立的「移动选中项」按钮和独立弹窗。
+ *
+ * 设计约束：
  *   1. 原生 "Upload Files" 按钮 / #fileupload 的点击选择流程完全不动；
- *   2. 原生 .button-move / #move-modal / _reload / #listing 渲染逻辑完全不动；
- *   3. 新增功能只通过"追加 DOM + 事件委托"实现，不替换、不重写任何原函数。
+ *   2. 原生 #listing / _reload / #create-modal 完全不动；
+ *   3. 新增功能只通过「追加 DOM + 事件委托 / 捕获阶段拦截」实现。
  *
- * 服务端接口（由 GCDWebServer 二进制反汇编确认，2026-11-07）：
- *   GET  list?path=<dir>                 -> JSON 数组；目录的 path 以 "/" 结尾
- *   POST upload  {path:<已存在目录>, files[]:...} -> 目录不存在或不是目录会失败
- *   POST create  {path:<新目录完整路径>}          -> createDirectoryAtPath:withIntermediateDirectories:NO
- *                                                    => 父目录必须已存在，且目标不能已存在
- *   POST move    {oldPath, newPath}                -> newPath 是完整目标路径；已存在会失败
- *   POST delete  {path}
- *   GET  download?path=
+ * 服务端接口（由 GCDWebServer 二进制反汇编确认）：
+ *   GET  list?path=<dir>                  -> JSON 数组；目录的 path 以 "/" 结尾
+ *   POST upload {path:<已存在目录>, files[]:...} -> 目录不存在或不是目录会失败
+ *   POST create {path:<新目录完整路径>}   -> createDirectoryAtPath:withIntermediateDirectories:NO
+ *                                            => 父目录必须已存在，且目标不能已存在
+ *   POST move   {oldPath, newPath}        -> newPath 是完整目标路径；已存在会失败
  *   路径一律经 GCDWebServerNormalizePath 规范化。
- *
- * 因此文件夹上传必须：目录按深度升序逐级 create，再逐个 upload 到对应子目录。
  */
 (function () {
   'use strict';
@@ -34,12 +39,10 @@
   // 0. 工具
   // ---------------------------------------------------------------------
   function curPath() {
-    // _path 是原页面全局变量，表示当前目录，始终以 "/" 结尾
     return (typeof window._path === 'string' && window._path) ? window._path : '/';
   }
 
   function reload() {
-    // 直接调用原页面的 _reload，不替换、不包装
     if (typeof window._reload === 'function') { window._reload(curPath()); }
   }
 
@@ -77,41 +80,23 @@
   }
 
   // ---------------------------------------------------------------------
-  // 1. DOM：拖放区 / 任务面板 / 批量工具条 / 移动弹窗 / 全屏提示层
+  // 1. DOM 片段：都是默认隐藏 / 塞进原容器，不占额外版面
   // ---------------------------------------------------------------------
-  var HTML_PANEL = [
-    '<div class="oka-panel panel panel-default" id="oka-panel">',
-    '  <div class="panel-heading">',
-    '    <strong>OkaWiFi 增强</strong>',
-    '    <span class="oka-hint">拖拽上传 &middot; 批量移动</span>',
+  // 上传任务面板：插在原 .uploading 面板之后，默认 display:none
+  var HTML_TASKS = [
+    '<div id="oka-tasks-wrap" class="oka-tasks-wrap panel panel-default" style="display:none">',
+    '  <div class="panel-heading oka-tasks-head">',
+    '    <strong id="oka-tasks-title">上传任务</strong>',
+    '    <span id="oka-tasks-summary" class="oka-hint"></span>',
+    '    <button type="button" class="btn btn-xs btn-default pull-right" id="oka-tasks-clear">清除记录</button>',
+    '    <button type="button" class="btn btn-xs btn-default pull-right" id="oka-tasks-retry">重试失败项</button>',
+    '    <button type="button" class="btn btn-xs btn-warning pull-right" id="oka-tasks-stop">停止剩余</button>',
     '  </div>',
-    '  <div class="panel-body">',
-    '    <div id="oka-dropzone" class="oka-dropzone">',
-    '      <div class="oka-dropzone-icon">&#8681;</div>',
-    '      <div class="oka-dropzone-title">把文件或多个文件、整个文件夹拖到这里上传</div>',
-    '      <div class="oka-dropzone-sub">当前目录：<code id="oka-current-path">/</code>&nbsp;&middot;&nbsp;文件夹会保留目录结构</div>',
-    '    </div>',
-    '    <div class="oka-batch-bar">',
-    '      <button type="button" class="btn btn-sm btn-default" id="oka-select-all">全选</button>',
-    '      <button type="button" class="btn btn-sm btn-default" id="oka-select-none">取消选择</button>',
-    '      <button type="button" class="btn btn-sm btn-primary" id="oka-move-open" disabled>移动选中项 <span id="oka-sel-count" class="badge">0</span></button>',
-    '      <span class="oka-hint">在上方文件列表中勾选，可一次移动多个文件 / 文件夹</span>',
-    '    </div>',
-    '    <div id="oka-tasks-wrap" class="oka-tasks-wrap" style="display:none">',
-    '      <div class="oka-tasks-head">',
-    '        <strong id="oka-tasks-title">上传任务</strong>',
-    '        <span id="oka-tasks-summary" class="oka-hint"></span>',
-    '        <button type="button" class="btn btn-xs btn-default pull-right" id="oka-tasks-clear">清除记录</button>',
-    '        <button type="button" class="btn btn-xs btn-default pull-right" id="oka-tasks-retry">重试失败项</button>',
-    '        <button type="button" class="btn btn-xs btn-warning pull-right" id="oka-tasks-stop">停止剩余</button>',
-    '      </div>',
-    '      <div id="oka-tasks" class="oka-tasks"></div>',
-    '    </div>',
-    '    <div id="oka-result"></div>',
-    '  </div>',
+    '  <div id="oka-tasks" class="oka-tasks"></div>',
     '</div>'
   ].join('\n');
 
+  // 全屏拖放提示：拖入时才显示，pointer-events:none 不抢 drop 事件
   var HTML_OVERLAY = [
     '<div id="oka-drag-overlay" class="oka-drag-overlay" style="display:none">',
     '  <div class="oka-drag-box">',
@@ -122,47 +107,38 @@
     '</div>'
   ].join('\n');
 
-  var HTML_MOVE_MODAL = [
-    '<div class="modal fade" id="oka-move-modal" tabindex="-1">',
-    '  <div class="modal-dialog modal-lg">',
-    '    <div class="modal-content">',
-    '      <div class="modal-header">',
-    '        <button type="button" class="close" data-dismiss="modal">&times;</button>',
-    '        <h4 class="modal-title">批量移动 / 移动到指定位置</h4>',
-    '      </div>',
-    '      <div class="modal-body">',
-    '        <div class="oka-move-section">',
-    '          <label>已选中 <span id="oka-move-count">0</span> 项</label>',
-    '          <div id="oka-move-items" class="oka-move-items"></div>',
-    '        </div>',
-    '        <div class="oka-move-section">',
-    '          <label for="oka-move-target">目标目录（移动后保持原文件名）</label>',
-    '          <input type="text" class="form-control" id="oka-move-target" autocomplete="off" value="/">',
-    '          <div class="oka-hint">也可以点下面的目录逐级浏览，选中后自动填入</div>',
-    '        </div>',
-    '        <div class="oka-move-section">',
-    '          <label>目录浏览</label>',
-    '          <div id="oka-move-crumb" class="oka-move-crumb"></div>',
-    '          <div id="oka-move-browser" class="oka-move-browser"></div>',
-    '        </div>',
-    '        <div id="oka-move-result"></div>',
-    '      </div>',
-    '      <div class="modal-footer">',
-    '        <button type="button" class="btn btn-default" data-dismiss="modal">关闭</button>',
-    '        <button type="button" class="btn btn-primary" id="oka-move-confirm">移动选中项</button>',
-    '      </div>',
-    '    </div>',
-    '  </div>',
-    '</div>'
+  // 列表工具：追加到原 .btn-toolbar，与原按钮同一行
+  var HTML_LIST_TOOLS = [
+    '<span class="oka-list-tools">',
+    '  <button type="button" class="btn btn-default btn-sm" id="oka-select-all">全选</button>',
+    '  <button type="button" class="btn btn-default btn-sm" id="oka-select-none">取消选择</button>',
+    '  <span class="oka-hint">已选 <span id="oka-sel-count" class="badge">0</span> 项 &middot; 点行末移动按钮可批量移动</span>',
+    '</span>'
+  ].join('\n');
+
+  // 追加到原版 #move-modal .modal-body：目录浏览 + 本次移动项 + 结果
+  // 目标路径仍用原版自带的 #move-input（可手填，也可由目录浏览自动填入）
+  var HTML_MOVE_ENHANCE = [
+    '<div class="oka-move-section">',
+    '  <label>本次移动 <span id="oka-move-count">1</span> 项</label>',
+    '  <div id="oka-move-items" class="oka-move-items"></div>',
+    '  <div class="oka-hint">未勾选时只移动你点击的那一项；勾选多个后点移动按钮即批量移动</div>',
+    '</div>',
+    '<div class="oka-move-section">',
+    '  <label>目录浏览（点目录自动填入上面的目标路径）</label>',
+    '  <div id="oka-move-crumb" class="oka-move-crumb"></div>',
+    '  <div id="oka-move-browser" class="oka-move-browser"></div>',
+    '</div>',
+    '<div id="oka-move-result"></div>'
   ].join('\n');
 
   // ---------------------------------------------------------------------
-  // 2. 任务面板
+  // 2. 任务面板与结果条
   // ---------------------------------------------------------------------
-  var tasks = [];          // {kind:'dir'|'file', label, relDir, file, state, pct, error}
+  var tasks = [];
   var running = false;
   var cancelled = false;
-  var batchBase = '/';   // 本批次的目标根目录：用户中途切换目录后，重试仍回原处
+  var batchBase = '/';   // 本批次目标根目录：用户中途切换目录后重试仍回原处
 
   function tasksVisible(v) { $('#oka-tasks-wrap').toggle(!!v); }
 
@@ -206,21 +182,27 @@
     $('#oka-tasks-stop').prop('disabled', !running);
   }
 
+  // 复用原页面的 #alerts，不新增常驻容器；同时只保留一条本插件的结果
   function showResult(level, html) {
-    $('#oka-result').html(
+    var box = $('#alerts');
+    if (!box.length) { return; }
+    box.find('.oka-result-alert').remove();
+    box.prepend(
       '<div class="alert alert-' + level + ' alert-dismissable oka-result-alert">' +
       '<button type="button" class="close" data-dismiss="alert">&times;</button>' + html + '</div>'
     );
   }
 
+  function clearResult() { $('#alerts .oka-result-alert').remove(); }
+
   // ---------------------------------------------------------------------
-  // 3. 拖放接管
+  // 3. 拖放接管（全页面都是放置区，没有单独的框）
   //
   // 原页面把 dropZone 设成 $(document)，且 add 回调把 formData.path 写死为 _path。
-  // 文件夹上传需要给不同子目录指定 path，因此这里在 **捕获阶段** 接管 drop：
+  // 文件夹上传需要给不同子目录指定 path，因此在 **捕获阶段** 接管 drop：
   //   preventDefault + stopPropagation 让浏览器不打开文件，
   //   同时阻止事件冒泡到 jQuery fileupload 在 document 上的 handler，避免双份上传。
-  // 点击 "Upload Files" 选择文件走的是 change 事件，完全不受影响。
+  // 点击 "Upload Files" 选择文件走 change 事件，完全不受影响。
   // ---------------------------------------------------------------------
   var dragDepth = 0;
 
@@ -241,7 +223,6 @@
     dragDepth++;
     $('#oka-drag-path').text(curPath());
     $('#oka-drag-overlay').show();
-    $('#oka-dropzone').addClass('oka-dropzone-active');
   }
 
   function onDragOver(e) {
@@ -256,22 +237,15 @@
     e.preventDefault();
     e.stopPropagation();
     dragDepth = Math.max(0, dragDepth - 1);
-    if (dragDepth === 0) {
-      $('#oka-drag-overlay').hide();
-      $('#oka-dropzone').removeClass('oka-dropzone-active');
-    }
+    if (dragDepth === 0) { $('#oka-drag-overlay').hide(); }
   }
 
-  function hideDragUI() {
-    dragDepth = 0;
-    $('#oka-drag-overlay').hide();
-    $('#oka-dropzone').removeClass('oka-dropzone-active');
-  }
+  function hideDragUI() { dragDepth = 0; $('#oka-drag-overlay').hide(); }
 
   function onDrop(e) {
     if (!isFileDrag(e)) { return; }
     e.preventDefault();
-    e.stopPropagation();   // 关键：不让 jQuery fileupload 的 document drop handler 收到
+    e.stopPropagation();
     hideDragUI();
     if (running) {
       showResult('warning', '<strong>已有上传任务在进行</strong> 请等当前批次结束后再拖入。');
@@ -299,12 +273,11 @@
       if (en) { entries.push(en); }
     }
 
-    // 浏览器不提供 entry API 时降级：只处理 dataTransfer.files（单/多文件，无文件夹）
+    // 浏览器不提供 entry API 时降级：只处理 dataTransfer.files
     if (!entries.length) {
       var plain = [];
       for (var j = 0; j < (dt.files || []).length; ++j) {
-        var f = dt.files[j];
-        plain.push({ file: f, relDir: '' });
+        plain.push({ file: dt.files[j], relDir: '' });
       }
       return Promise.resolve({ dirs: [], files: plain });
     }
@@ -353,7 +326,6 @@
       })(entries[m]);
     }
     return chain.then(function () {
-      // 父目录必须先于子目录创建
       out.dirs.sort(function (a, b) {
         var da = a.split('/').length - 1, db = b.split('/').length - 1;
         return da - db || a.localeCompare(b);
@@ -375,9 +347,8 @@
     });
   }
 
-  // create 用的是 withIntermediateDirectories:NO，目标已存在会直接失败。
-  // 重复拖入同一个文件夹时，"已存在"不是错误，要当成目录已经就绪继续往下走。
-  // 用 list 反查一次父目录，确认同名目录确实存在，避免把真实失败吞掉。
+  // create 用 withIntermediateDirectories:NO，目标已存在会直接失败。
+  // 重复拖入同名文件夹时反查 list，确认同名目录确实存在才当「已就绪」。
   function dirAlreadyExists(absNoSlash) {
     var cut = absNoSlash.lastIndexOf('/');
     var parent = cut > 0 ? absNoSlash.slice(0, cut + 1) : '/';
@@ -470,14 +441,12 @@
       var t = tasks[i++];
       if (t.state === 'ok') { okCount++; return next(); }
 
-      // 目录：create 的父目录必须已存在，目标不能已存在（见文件头反汇编结论）
       if (t.kind === 'dir') {
         var relNoSlash = noSlash(joinPath(base, t.relDir));
-        // 父目录在本批次里创建失败 -> 跳过，不产生一串必然失败的上传
         var parent = relNoSlash.slice(0, relNoSlash.lastIndexOf('/'));
         if (failedDirs[parent]) {
           t.state = 'skip'; t.error = '上级目录未创建成功';
-          failedDirs[relNoSlash] = true;   // 让子目录 / 该目录下的文件一并跳过
+          failedDirs[relNoSlash] = true;
           renderTasks(); return next();
         }
         t.state = 'run'; renderTasks();
@@ -496,7 +465,6 @@
         });
       }
 
-      // 文件：目标目录必须已存在；若其所属目录建失败则跳过
       var target = withSlash(joinPath(base, t.relDir));
       var dirKey = noSlash(target);
       if (failedDirs[dirKey]) {
@@ -514,7 +482,7 @@
     function finish(wasCancelled) {
       running = false;
       renderTasks();
-      reload();   // 复用原页面刷新，不重写列表渲染
+      reload();
       if (wasCancelled) {
         showResult('warning', '<strong>上传已取消</strong> 已完成的部分已保留在手机上。');
       } else if (failCount === 0) {
@@ -544,7 +512,6 @@
 
   // ---------------------------------------------------------------------
   // 6. 列表多选：MutationObserver 只往新行前面追加一个复选框 td
-  //    不改动原 _reload 的渲染，也不覆盖任何原有事件绑定
   // ---------------------------------------------------------------------
   var selected = {};   // path -> {path,name,isDir}
 
@@ -571,13 +538,11 @@
     for (var i = 0; i < keys.length; ++i) { map[keys[i]] = true; }
     $('#listing').find('tr.row-file').each(function () {
       var d = $(this).data() || {};
-      var p = d.path;
-      var on = !!(p && map[p]);
+      var on = !!(d.path && map[d.path]);
       $(this).find('.oka-checkbox').prop('checked', on);
       $(this).toggleClass('oka-selected', on);
     });
     $('#oka-sel-count').text(keys.length);
-    $('#oka-move-open').prop('disabled', keys.length === 0);
   }
 
   function bindSelection() {
@@ -594,7 +559,6 @@
       setInterval(function () { injectChecks(); syncSelectionUI(); }, 600);
     }
 
-    // 事件委托：点击行内按钮时不要触发选中
     $(document).on('click', '#listing tr.row-file', function (e) {
       if ($(e.target).closest('button, a, input, .edit').length) { return; }
       var d = $(this).data() || {};
@@ -606,8 +570,7 @@
     });
 
     $(document).on('change', '#listing .oka-checkbox', function (e) {
-      var tr = $(this).closest('tr.row-file');
-      var d = tr.data() || {};
+      var d = $(this).closest('tr.row-file').data() || {};
       if (!d.path) { return; }
       if (this.checked) { selected[d.path] = { path: d.path, name: d.name || baseName(d.path), isDir: (d.size == null) }; }
       else { delete selected[d.path]; }
@@ -626,25 +589,30 @@
   }
 
   // ---------------------------------------------------------------------
-  // 7. 批量移动：目标目录浏览 + 逐个 POST move + 汇总反馈
+  // 7. 移动：复用原版 .button-move 入口与原版 #move-modal，
+  //    把「只能手填地址」替换成目录浏览 + 批量 + 结果反馈。
   // ---------------------------------------------------------------------
+  var pendingMove = [];
   var browseDir = '/';
 
   function renderMoveItems() {
-    var keys = Object.keys(selected);
-    $('#oka-move-count').text(keys.length);
-    if (!keys.length) { $('#oka-move-items').html('<span class="oka-hint">未选中任何项目</span>'); return; }
+    $('#oka-move-count').text(pendingMove.length);
+    if (!pendingMove.length) {
+      $('#oka-move-items').html('<span class="oka-hint">未选中任何项目</span>');
+      return;
+    }
     var rows = [];
-    for (var i = 0; i < keys.length; ++i) {
-      var it = selected[keys[i]];
+    for (var i = 0; i < pendingMove.length; ++i) {
+      var it = pendingMove[i];
       rows.push('<span class="oka-chip">' + (it.isDir ? '&#128193; ' : '&#128196; ') + esc(it.name) + '</span>');
     }
     $('#oka-move-items').html(rows.join(''));
   }
 
+  // 目标路径写回原版自带的 #move-input（它本来就是给用户手填的）
   function loadBrowse(dir) {
     browseDir = withSlash(dir);
-    $('#oka-move-target').val(browseDir);
+    $('#move-input').val(browseDir);
     var parts = browseDir.split('/').filter(Boolean);
     var crumbs = ['<a href="#" data-dir="/">根目录</a>'];
     var acc = '/';
@@ -657,8 +625,7 @@
 
     $.ajax({ url: 'list', type: 'GET', data: { path: browseDir }, dataType: 'json' })
       .done(function (data) {
-        var arr = data || [];
-        var dirs = [];
+        var arr = data || [], dirs = [];
         for (var k = 0; k < arr.length; ++k) {
           var o = arr[k];
           if (o && o.path && o.path.charAt(o.path.length - 1) === '/') { dirs.push(o); }
@@ -675,36 +642,78 @@
       });
   }
 
-  function doMove() {
+  // 捕获阶段拦下原版 .button-move 的 click：
+  // 原版 handler 是每次 _reload 直接绑到 button 上的，冒泡阶段拦不住，
+  // 必须在 document 的捕获阶段 stopPropagation，才能不弹出原版那个简陋逻辑。
+  function onMoveButtonCapture(e) {
+    var t = e.target;
+    if (!t || !t.closest) { return; }
+    var btn = t.closest('#listing .button-move');
+    if (!btn) { return; }
+    var tr = btn.closest('tr.row-file');
+    if (!tr) { return; }
+    e.preventDefault();
+    e.stopPropagation();       // 原版 button handler 不再执行，不会重复弹窗/重复移动
+    openEnhancedMove(tr);
+  }
+
+  function openEnhancedMove(tr) {
+    var d = $(tr).data() || {};
     var keys = Object.keys(selected);
-    if (!keys.length) { return; }
-    var target = withSlash($('#oka-move-target').val());
-    $('#oka-move-confirm').prop('disabled', true);
+    if (keys.length) {
+      pendingMove = keys.map(function (k) { return selected[k]; });
+    } else if (d.path) {
+      pendingMove = [{ path: d.path, name: d.name || baseName(d.path), isDir: (d.size == null) }];
+    } else {
+      pendingMove = [];
+    }
+    renderMoveItems();
+    $('#oka-move-result').empty();
+    // 每次打开都恢复可点击；doMove() 完成后会保持 disabled，
+    // 防止用户看着结果再点一次造成重复 POST（第二次必然失败，像功能坏了）。
+    $('#move-confirm').prop('disabled', !pendingMove.length);
+    $('#move-modal').modal('show');
+    loadBrowse(curPath());
+  }
+
+  // 接管原版 #move-confirm：原版只发一个 POST move 且立刻关窗，
+  // 这里改成批量 + 逐项结果 + 保留弹窗反馈 + 结束后刷新列表。
+  function doMove() {
+    if (!pendingMove.length) { return; }
+    var target = withSlash($('#move-input').val());
+    $('#move-confirm').prop('disabled', true);
     var ok = 0, fail = 0, skipped = 0;
     var failures = [];
     var idx = 0;
 
     function next() {
-      if (idx >= keys.length) {
-        $('#oka-move-confirm').prop('disabled', false);
+      if (idx >= pendingMove.length) {
+        // 保持 disabled：结果留在弹窗里给用户看，但不允许重复提交。
+        // 下次点 .button-move 打开时由 openEnhancedMove() 恢复。
+        var msg = '<strong>移动完成</strong> 成功 ' + ok + ' 项 · 失败 ' + fail +
+                  ' 项 · 跳过 ' + skipped + ' 项 → ' + esc(target);
+        if (failures.length) {
+          msg += '<div class="oka-move-failures">' +
+                 failures.map(function (s) { return esc(s); }).join('<br>') + '</div>';
+        }
+        var cls = fail ? 'danger' : 'success';
+        $('#oka-move-result').html('<div class="alert alert-' + cls + '">' + msg + '</div>');
+        showResult(cls, msg);
         selected = {};
         syncSelectionUI();
-        renderMoveItems();
+        // 不调用 renderMoveItems()：把「本次移动 N 项」保留为刚移动的批次，
+        // 清零成「未选中任何项目」会和上面的成功汇总并排看着像失败。
         reload();
-        var msg = '<strong>移动完成</strong> 成功 ' + ok + ' 项 · 失败 ' + fail + ' 项 · 跳过 ' + skipped + ' 项 → ' + esc(target);
-        if (failures.length) {
-          msg += '<div class="oka-move-failures">' + failures.map(function (s) { return esc(s); }).join('<br>') + '</div>';
-        }
-        $('#oka-move-result').html('<div class="alert alert-' + (fail ? 'danger' : 'success') + '">' + msg + '</div>');
-        showResult(fail ? 'danger' : 'success', msg);
         return;
       }
-      var it = selected[keys[idx++]];
+      var it = pendingMove[idx++];
       var oldPath = noSlash(it.path);
-      var newPath = joinPath(target, it.name);
-      $('#oka-move-result').html('<div class="alert alert-info">正在移动 ' + (idx) + '/' + keys.length + '：' + esc(it.name) + '…</div>');
-      if (noSlash(newPath) === oldPath) { skipped++; return next(); }
-      ajaxForm('move', { oldPath: oldPath, newPath: noSlash(newPath) }).then(function () {
+      var newPath = noSlash(joinPath(target, it.name));
+      $('#oka-move-result').html(
+        '<div class="alert alert-info">正在移动 ' + idx + '/' + pendingMove.length +
+        '：' + esc(it.name) + '…</div>');
+      if (newPath === oldPath) { skipped++; return next(); }
+      ajaxForm('move', { oldPath: oldPath, newPath: newPath }).then(function () {
         ok++; next();
       }, function (err) {
         fail++; failures.push(it.name + '：' + err.message); next();
@@ -718,16 +727,29 @@
   // ---------------------------------------------------------------------
   $(document).ready(function () {
     try {
-      // 把增强面板放到工具栏下方；移动弹窗与提示层挂到 body
-      var toolbar = $('.btn-toolbar').first();
-      if (toolbar.length) { toolbar.after(HTML_PANEL); }
-      else { $('.container').first().append(HTML_PANEL); }
-      $('body').append(HTML_OVERLAY).append(HTML_MOVE_MODAL);
+      // 任务面板插在原 .uploading 之后；默认隐藏，只有上传时才出现
+      var up = $('.uploading').first();
+      if (up.length) { up.after(HTML_TASKS); }
+      else { $('.btn-toolbar').first().after(HTML_TASKS); }
 
-      $('#oka-current-path').text('/');
-      setInterval(function () { $('#oka-current-path').text(curPath()); }, 500);
+      // 列表工具塞进原 .btn-toolbar，与原按钮同一行，不新增行
+      $('.btn-toolbar').first().append(HTML_LIST_TOOLS);
+      $('body').append(HTML_OVERLAY);
 
-      // 捕获阶段接管拖放
+      // ---- 改造原版 #move-modal ----
+      var mbody = $('#move-modal .modal-body');
+      mbody.find('p').first().text('选择目标目录，或直接填写完整目标路径（移动后保持原文件名）：');
+      mbody.append(HTML_MOVE_ENHANCE);
+      $('#move-modal .modal-title').text('移动文件 / 文件夹');
+      $('#move-confirm').text('移动');
+      $('#move-confirm').off('click');        // 摘掉原版「单个 POST move + 立即关窗」
+      $('#move-confirm').on('click', doMove);
+      // 原版 #move-input 的 Enter -> $("#move-confirm").click() 保留复用
+
+      // 捕获阶段接管原版行内移动按钮
+      document.addEventListener('click', onMoveButtonCapture, true);
+
+      // 捕获阶段接管拖放（全页面都是放置区）
       document.addEventListener('dragenter', onDragEnter, true);
       document.addEventListener('dragover', onDragOver, true);
       document.addEventListener('dragleave', onDragLeave, true);
@@ -736,7 +758,7 @@
 
       $('#oka-tasks-clear').on('click', function () {
         if (running) { return; }
-        tasks = []; renderTasks(); tasksVisible(false); $('#oka-result').empty();
+        tasks = []; renderTasks(); tasksVisible(false); clearResult();
       });
       $('#oka-tasks-retry').on('click', retryFailed);
       $('#oka-tasks-stop').on('click', function () {
@@ -748,13 +770,7 @@
           }
         }
       });
-      $('#oka-move-open').on('click', function () {
-        renderMoveItems();
-        $('#oka-move-result').empty();
-        $('#oka-move-modal').modal('show');
-        loadBrowse(curPath());
-      });
-      $('#oka-move-confirm').on('click', doMove);
+
       $(document).on('click', '#oka-move-crumb a, #oka-move-browser a.oka-dir', function (e) {
         e.preventDefault();
         loadBrowse($(this).attr('data-dir'));
@@ -763,10 +779,10 @@
       bindSelection();
       renderTasks();
     } catch (e) {
-      // 增强层任何异常都不能把原页面带崩：只留一条可见提示
       try {
         $('.container').first().prepend(
-          '<div class="alert alert-warning">OkaWiFi 增强层初始化失败，原页面功能不受影响：' + esc(e && e.message ? e.message : e) + '</div>'
+          '<div class="alert alert-warning">OkaWiFi 增强层初始化失败，原页面功能不受影响：' +
+          esc(e && e.message ? e.message : e) + '</div>'
         );
       } catch (ignored) {}
     }

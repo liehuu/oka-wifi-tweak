@@ -182,16 +182,30 @@ grep -aq "_swift_unknownObjectWeakLoadStrong" "$BUILD/$NAME.dylib" \
        echo "  排查：Tweak.xm 里 dlsym(RTLD_DEFAULT, \"_swift_unknownObjectWeakLoadStrong\") 是否还以字符串字面量形式存在"
        exit 1; }
 
-# 功能 3（v1.1.0）：网页增强注入层
-# 前 3 条是 ObjC 侧：类方法 hook 的 selector、幂等标记、类名常量。
-# 后 4 条来自内联的 kOkaWebJS —— 丢了说明 gen-webassets.py 的产物没被编进来，
-# 页面会照常打开但拖放/批量移动全部不存在，属于"静默功能缺失"。
+# 功能 3（v1.1.1）：网页增强注入层
+# 前 4 条是 ObjC 侧：类方法 hook 的 selector、幂等标记、类名常量。
+# 后 6 条来自内联的 kOkaWebJS / kOkaWebCSS —— 丢了说明 gen-webassets.py 的
+# 产物没被编进来，页面会照常打开但拖放/批量移动全部不存在，属于"静默功能缺失"。
+# v1.1.1 的交互是「全页面拖放 + 复用原版 #move-modal」，所以指纹换成
+# oka-list-tools / onMoveButtonCapture / HTML_MOVE_ENHANCE / move-confirm，
+# 不再用 v1.1.0 的 oka-dropzone / oka-move-modal。
 for sym in responseWithHTMLTemplate:variables: initWithHTMLTemplate:variables: \
            OKA-WIFI-INJECTED GCDWebServerDataResponse \
-           oka-dropzone oka-move-modal webkitGetAsEntry dirAlreadyExists; do
+           oka-list-tools onMoveButtonCapture HTML_MOVE_ENHANCE move-confirm \
+           oka-drag-overlay webkitGetAsEntry dirAlreadyExists; do
   grep -aqF "$sym" "$BUILD/$NAME.dylib" \
     || { echo "✗ dylib 缺 ${sym}（网页增强会静默失效）"; exit 1; }
 done
+
+# 负向闸门：v1.1.0 的独立拖放框 / 独立批量移动弹窗必须从产物里彻底消失。
+# 用户明确反馈过这两样占版面、另起一套入口不合理，不能让旧代码回流。
+for stale in oka-dropzone oka-move-modal oka-move-open oka-batch-bar; do
+  if grep -aqF "$stale" "$BUILD/$NAME.dylib"; then
+    echo "✗ dylib 仍有 v1.1.0 残留 ${stale}（独立拖放框 / 独立移动弹窗未清理）"
+    exit 1
+  fi
+done
+echo "✓ 无 v1.1.0 独立拖放框 / 独立移动弹窗残留"
 
 # 目标 App 的过滤条件（写在 plist 里，但 dylib 里也应有类名常量）
 for sym in Blinker BNHttpServerPage; do

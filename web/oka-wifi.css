@@ -1,30 +1,20 @@
-/* OkaWiFi v1.1.0 — 网页增强层样式
+/* OkaWiFi v1.1.1 — 网页增强层样式
  * 只使用 oka- 前缀，不覆盖 Bootstrap 原类，保证原页面可用性不受影响。
+ *
+ * v1.1.1 布局原则（按用户反馈改）：
+ *   · 全页面本身就是放置区，不再有独立拖放框，也没有任何占版面的常驻
+ *     增强区块（v1.1.0 那套独立拖放框 / 独立批量条的样式已整体删除）。
+ *   · 上传任务面板默认 display:none，只有真正开始上传时才出现。
+ *   · 结果条复用原页面 #alerts；全选工具塞进原 .btn-toolbar 同一行。
+ *   · 移动复用原版 #move-modal，下面的 oka-move-* 都只作用于弹窗内部。
+ *
+ * 注意：本文件会被整体编进 dylib，而 devkit/build.sh 有一条负向闸门检查
+ * 旧版独立组件的 class/id 是否残留。不要在注释里写出那些旧类名，
+ * 否则注释本身就会把闸门打挂（守卫查的是产物字节，不是 CSS 选择器）。
  */
-.oka-panel { margin-top: 18px; }
-.oka-panel > .panel-heading { background: #f7f9fb; }
 .oka-hint { color: #777; font-size: 12px; font-weight: normal; margin-left: 8px; }
 
-/* --- 拖放区 --- */
-.oka-dropzone {
-  border: 2px dashed #b8c6d1;
-  border-radius: 8px;
-  background: #fbfdff;
-  text-align: center;
-  padding: 26px 16px;
-  transition: background .15s ease, border-color .15s ease, transform .15s ease;
-  user-select: none;
-}
-.oka-dropzone-icon { font-size: 34px; line-height: 1; color: #5b8db8; margin-bottom: 8px; }
-.oka-dropzone-title { font-size: 16px; font-weight: 600; color: #2c3e50; }
-.oka-dropzone-sub { margin-top: 6px; color: #7b8a97; font-size: 12px; }
-.oka-dropzone.oka-dropzone-active {
-  border-color: #2f7fbf;
-  background: #eaf4ff;
-  transform: scale(1.005);
-}
-
-/* --- 全屏拖放提示 --- */
+/* --- 全屏拖放提示：只在拖入时出现，不占常驻版面 --- */
 .oka-drag-overlay {
   position: fixed; inset: 0; z-index: 100000;
   background: rgba(30, 80, 130, .38);
@@ -40,10 +30,14 @@
 .oka-drag-box-title { font-size: 26px; font-weight: 700; color: #1f4e79; margin-top: 10px; }
 .oka-drag-box-sub { font-size: 13px; color: #667; margin-top: 8px; }
 
-/* --- 批量工具条 --- */
-.oka-batch-bar { margin-top: 14px; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
-.oka-batch-bar .btn { margin-right: 4px; }
-.oka-batch-bar .badge { background: #fff; color: #2f7fbf; margin-left: 4px; }
+/* --- 列表工具：追加进原 .btn-toolbar，与原按钮同一行 --- */
+.oka-list-tools {
+  display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  margin-left: 14px; vertical-align: middle; min-height: 34px;
+}
+.oka-list-tools .btn { float: none; margin: 0; }
+.oka-list-tools .badge { background: #2f7fbf; color: #fff; margin: 0 2px; }
+.oka-list-tools .oka-hint { margin-left: 2px; }
 
 /* --- 行选择 --- */
 #listing .oka-check { width: 34px; text-align: center; vertical-align: middle; }
@@ -52,7 +46,7 @@
 #listing tr.row-file.oka-selected { background: #e8f3ff !important; }
 #listing tr.row-file.oka-selected > td { border-top-color: #b9d9f5; }
 
-/* --- 任务面板 --- */
+/* --- 上传任务面板（默认隐藏，只有上传时才 jQuery.show()） --- */
 .oka-tasks-wrap { margin-top: 16px; border: 1px solid #e3e8ec; border-radius: 6px; }
 .oka-tasks-head {
   background: #f7f9fb; padding: 8px 10px; border-bottom: 1px solid #e3e8ec;
@@ -70,12 +64,16 @@
 .oka-task-fail .oka-task-name, .oka-task-skip .oka-task-name { color: #a94442; }
 .oka-progress { height: 6px; margin: 5px 0 0; background: #eef2f5; border-radius: 3px; box-shadow: none; }
 .oka-progress .progress-bar { background-color: #2f7fbf; border-radius: 3px; transition: width .12s linear; }
+/* 结果条插在原页面 #alerts 里，沿用 Bootstrap 的 alert 外观 */
 .oka-result-alert { margin-top: 14px; margin-bottom: 0; }
 
-/* --- 批量移动弹窗 --- */
-.oka-move-section { margin-bottom: 16px; }
+/* --- 原版 #move-modal 内的增强区（不新增第二个弹窗） --- */
+.oka-move-section { margin-top: 14px; margin-bottom: 14px; }
 .oka-move-section > label { display: block; font-size: 13px; margin-bottom: 6px; color: #34495e; }
-.oka-move-items { max-height: 96px; overflow-y: auto; border: 1px solid #e3e8ec; border-radius: 4px; padding: 6px; }
+.oka-move-items {
+  max-height: 96px; overflow-y: auto;
+  border: 1px solid #e3e8ec; border-radius: 4px; padding: 6px;
+}
 .oka-chip {
   display: inline-block; background: #eef5fc; border: 1px solid #d3e4f4; color: #2c5a80;
   border-radius: 3px; padding: 2px 7px; margin: 2px; font-size: 12px;
@@ -91,9 +89,10 @@
 }
 .oka-move-browser a.oka-dir:hover { background: #eef5fc; text-decoration: none; }
 .oka-move-failures { margin-top: 8px; font-size: 12px; color: #a94442; max-height: 100px; overflow-y: auto; }
+#oka-move-result .alert { margin: 10px 0 0; }
 
 @media (max-width: 640px) {
   .oka-drag-box { padding: 24px; }
   .oka-drag-box-title { font-size: 20px; }
-  .oka-batch-bar .oka-hint { display: block; width: 100%; margin: 6px 0 0; }
+  .oka-list-tools .oka-hint { display: block; width: 100%; margin: 4px 0 0; }
 }

@@ -6,7 +6,7 @@
 |---|---|---|
 | 1 | 桌面长按快捷开启 | 长按图标出现「开启 WiFi 传输」，点一下直接启动服务，地址自动复制到剪贴板并弹窗提示。不用进 App、不用点按钮 |
 | 2 | 蜂窝 / 热点可开启 | 用手机流量或个人热点时，WiFi 传输页面的「开始」按钮正常出现，可正常开启；且显示的地址是手机在热点网段的真实 IP（`172.20.10.1` 这类），不再是 `unknown` |
-| 3 | 电脑网页端增强（v1.1.0） | 保留原 `Upload Files` 按钮；新增把单个/多个文件、整个文件夹从文件管理器拖进网页上传（全屏放置提示 + 逐项进度 + 成功/失败汇总 + 失败重试），并新增勾选多个文件/文件夹后批量移动到指定目录（带目录浏览与结果反馈） |
+| 3 | 电脑网页端增强（v1.1.1） | 保留原 `Upload Files` 按钮；**整个页面就是放置区**（没有独立拖放框），把单个/多个文件、整个文件夹从文件管理器拖进网页任意位置即可上传（拖入时全屏提示 + 逐项进度 + 成功/失败汇总 + 失败重试）；**复用原版行末「移动」按钮与原弹窗**，把它从「只能手填地址」增强为目录浏览 + 可勾选批量移动 + 结果反馈 |
 
 ---
 
@@ -169,7 +169,7 @@ _GCDWebServerGetPrimaryIPAddress 硬编码 strcmp(ifa_name,"en0")
    - 挂**后台保活**（`AVAudioSession` Playback + 循环播放 App 自带的 `Happy Dreams.mp3`，音量 0）——否则切到后台几秒后进程被挂起、端口就断了；
    - 等 1.5s 读 App 自己写进 `ipAddress.text` 的 URL（`Helper` 是纯 Swift 类，ObjC runtime 反射不到 `uploader`）；读不到再用「本机 IP + 端口」兜底，复制到剪贴板并弹窗显示。
 
-### 功能 3 —— 电脑网页端增强（v1.1.0）
+### 功能 3 —— 电脑网页端增强（v1.1.1）
 
 **约束**：不能改 App 包内 `GCDWebUploader.bundle/Contents/Resources/` 的任何文件，那会破坏代码签名。所以采用「构建期把前端资源编进 dylib + 运行时注入 HTML」。
 
@@ -198,15 +198,27 @@ _GCDWebServerGetPrimaryIPAddress 硬编码 strcmp(ifa_name,"en0")
 
 路径都经 `_GCDWebServerNormalizePath` 规范化。因为 `create` **不递归**，文件夹上传必须把目录按深度升序**逐级创建**，再逐个上传文件到对应子目录；重复拖入同名文件夹时，`create` 会失败，此时用 `list` 反查同名目录是否真的已存在，存在就当"目录已就绪"继续走，不吞掉真实失败。
 
+#### v1.1.1 的交互定型（按真机使用反馈改的）
+
+v1.1.0 曾单独放了一块占大半个页面的虚线拖放框，又另起了一个「移动选中项」按钮和弹窗。这两处都不合理，v1.1.1 全部去掉：
+
+| v1.1.0 | v1.1.1 |
+|---|---|
+| 独立拖放框，常驻占版面 | **整个页面本身就是放置区**，不新增任何常驻可见区块；只有拖入时才浮出全屏「松开即可上传」提示 |
+| 独立的「移动选中项」按钮 + 独立弹窗 | **复用原版行末 `.button-move` 与原版 `#move-modal`**，把「只能手填地址」替换成目录浏览 + 批量选中 + 结果反馈 |
+| 独立结果容器 | 结果条插进原页面的 `#alerts`，与原版告警同款 |
+| 常驻上传任务面板 | 任务面板默认 `display:none`，只有真正开始上传才出现；「全选 / 取消选择」塞进原 `.btn-toolbar` 同一行 |
+
 **前端（`web/oka-wifi.js` / `web/oka-wifi.css`）**：
 
-- 原 `Upload Files` 按钮、`#fileupload` 的 `change` 流程、`#move-modal`、`.button-move`、`_reload()`、`#listing` 渲染**全部不替换、不重写**；
+- 原 `Upload Files` 按钮、`#fileupload` 的 `change` 流程、`#move-input`、`#move-confirm`（按钮换绑，元素仍是原版那个）、`_reload()`、`#listing` 渲染**全部保留**；
 - 拖放在 `document` 的**捕获阶段**接管：`preventDefault` + `stopPropagation` 既阻止浏览器打开文件，也阻止事件冒泡到 jQuery File Upload 绑在 `$(document)` 上的 `dropZone` handler，避免双份上传；改成自己的上传管线，因为原 `add` 回调把 `formData.path` 写死为 `_path`，无法给子目录指定路径；
 - 用 `DataTransferItem.webkitGetAsEntry()` 递归展开文件夹（`readEntries` 单次最多 100 条，循环读到空为止）；浏览器不给 entry API 时降级为 `dataTransfer.files`（单/多文件，无目录结构）；
 - 上传用 `XMLHttpRequest` + `FormData`，`xhr.upload.onprogress` 更新逐项进度条；串行执行，任务面板显示等待/进行中/完成/失败/跳过与汇总，支持「重试失败项」和「停止剩余」，结束调用原 `_reload(_path)` 刷新；
-- 列表多选只用 `MutationObserver` 往新行**前面追加一个复选框 td**，事件委托处理选中，不动原渲染；批量移动弹窗提供目标路径输入 + 逐级目录浏览（复用 `GET list`），逐个 `POST move` 后汇总成功/失败并刷新列表。
+- 列表多选只用 `MutationObserver` 往新行**前面追加一个复选框 td**，不动原渲染；
+- **移动入口接管**：原版 `.button-move` 是每次 `_reload` 直接绑到按钮上的，冒泡阶段拦不住，所以在 `document` 的**捕获阶段** `stopPropagation()`，改为打开同一个 `#move-modal`。原版 `#move-confirm` 的直接 `.click()` handler 用 `.off('click')` 摘掉，换成批量 `POST move`；`#move-input` 的 Enter → `$("#move-confirm").click()` 原样复用，目录浏览点一下就把路径写进这个输入框，也可以继续手填。未勾选时只移动你点的那一项，勾选多个则整批移动。完成后结果留在弹窗内并刷新列表，确认按钮保持禁用直到下次打开，避免重复提交。
 
-**构建期**：`devkit/gen-webassets.py` 把 JS/CSS 按 UTF-8 字节转成 C 字符串常量写到 `.build/OkaWebAssets.h`（非可打印字节用固定 3 位八进制，避免 `\xNN` 吞后续十六进制字符），并做**往返解码自检**；`build.sh` 用 `-I .build` 编进 dylib，再用功能指纹闸门确认 8 个关键串真的在产物里。
+**构建期**：`devkit/gen-webassets.py` 把 JS/CSS 按 UTF-8 字节转成 C 字符串常量写到 `.build/OkaWebAssets.h`（非可打印字节用固定 3 位八进制，避免 `\xNN` 吞后续十六进制字符），并做**往返解码自检**；`build.sh` 用 `-I .build` 编进 dylib，再用功能指纹闸门确认注入点 selector 与 v1.1.1 新组件标记都真的在产物里，**外加一条负向闸门**：v1.1.0 的独立拖放框 / 独立弹窗 class/id 只要还出现在产物字节里就直接 `exit 1`，防止旧交互回流。
 
 ---
 
@@ -215,9 +227,9 @@ _GCDWebServerGetPrimaryIPAddress 硬编码 strcmp(ifa_name,"en0")
 **不需要 Theos。** 构建是一台装了 Xcode 的 macOS（或 GitHub Actions 的 `macos-latest`）上跑三条命令：
 
 ```bash
-sh devkit/build.sh arm64e iphoneos-arm64e 1.1.0   # RootHide / roothide
-sh devkit/build.sh arm64  iphoneos-arm64  1.1.0   # rootless（Dopamine / palera1n）
-sh devkit/build.sh arm64  iphoneos-arm    1.1.0   # 传统 rootful
+sh devkit/build.sh arm64e iphoneos-arm64e 1.1.1   # RootHide / roothide
+sh devkit/build.sh arm64  iphoneos-arm64  1.1.1   # rootless（Dopamine / palera1n）
+sh devkit/build.sh arm64  iphoneos-arm    1.1.1   # 传统 rootful
 ```
 
 产物在 `.build/out/com.oka.wifitweak_<ver>_<arch>.deb`。
@@ -373,17 +385,23 @@ idevicesyslog | grep OkaWiFi
 #       [OkaWiFi] serverURL 修正: 原=[(null)] -> 新=[http://172.20.10.1:8080/] (port=8080 running=1)
 
 # 4) 功能 3：电脑浏览器打开 http://<手机IP>:8080
-#    a) 页面应出现「OkaWiFi 增强」面板与虚线拖放区；原 Upload Files 按钮照常可用
-#    b) 从电脑文件管理器拖 1 个文件 / 多个文件 / 整个文件夹到页面任意位置
-#       期望：全屏「松开即可上传」提示 → 任务面板逐项进度 → 结果条显示成功/失败数
+#    a) 页面默认外观应与原版几乎一致：没有独立拖放框、没有多出来的面板；
+#       只是原按钮那一行多了「全选 / 取消选择」，文件列表每行前面多了复选框。
+#       原 Upload Files 按钮照常可用。
+#    b) 从电脑文件管理器拖 1 个文件 / 多个文件 / 整个文件夹到页面**任意位置**
+#       期望：拖入时浮出全屏「松开即可上传」提示 → 上传任务面板出现并逐项显示进度
+#             → 原 #alerts 位置显示成功/失败数 → 列表自动刷新
 #       文件夹：手机上应保留完整目录结构（含多级子目录）
-#    c) 在文件列表勾选多项 → 点「移动选中项」→ 用目录浏览选目标目录 → 确认
-#       期望：显示成功/失败汇总，列表自动刷新，文件出现在目标目录
+#    c) 在文件列表勾选多项 → 点**任意一行的原版「移动」按钮** → 弹出的仍是原版弹窗，
+#       但多了「本次移动 N 项」和目录浏览 → 点目录或直接填 #move-input → 点「移动」
+#       期望：弹窗内显示成功/失败汇总，列表自动刷新，文件出现在目标目录
+#       （不勾选时只移动你点击的那一项；移动后按钮保持置灰，关掉再打开才恢复）
 #    插件加载时日志应有：
 #       [OkaWiFi] ✓ hook +[GCDWebServerDataResponse responseWithHTMLTemplate:variables:]
 #       [OkaWiFi] ✓ hook -[GCDWebServerDataResponse initWithHTMLTemplate:variables:]
-#       [OkaWiFi] 网页增强注入层已挂载（JS=31844 CSS=4593 字节）
-#    浏览器里查看源码，<body> 里应有且仅有一处 <!-- OKA-WIFI-INJECTED -->
+#       [OkaWiFi] 网页增强注入层已挂载（JS=... CSS=... 字节）
+#    浏览器里查看源码，<body> 里应有且仅有一处 <!-- OKA-WIFI-INJECTED -->；
+#    源码里不应出现独立拖放框或第二个移动弹窗
 ```
 
 排错对照：
@@ -405,10 +423,12 @@ idevicesyslog | grep OkaWiFi
 | 日志里没有 `GetPrimaryIPAddress orig=...` | `MSHookFunction` 在该 framework 上没真正打上桩（`✓ hook` 只代表 `dlsym` 找到符号） | **v1.0.2 起不影响主修复**：`serverURL` 是 ObjC 方法，走 `method_setImplementation`，与本 C 函数 hook 完全独立 |
 | 日志没有 `✓ hook -[GCDWebServer serverURL]` | `GCDWebServer` 类没找到（framework 未加载 / 类名不同） | 构造函数已改为 `dlopen(..., RTLD_LAZY)` 主动加载两种路径。若仍缺，看是否打印 `× 找不到 GCDWebServer 类`；此时只剩 UI 层写回兜底 |
 | 日志出现 `端口自证: 无端口在 LISTEN，且 port / isRunning 都无证据 → 不改地址` | 服务确实没在跑，或 hook 没拿到实例状态 | 这是**故意不写假地址**。v1.0.2 起端口由 `[self port]` 直取，探测不到也会采信；若电脑实测能连上却仍显示 unknown，把整段日志发来改判据 |
-| 网页里没有「OkaWiFi 增强」面板 | 模板注入没生效 | 先看日志有没有两条 `✓ hook ...HTMLTemplate:variables:` 与 `网页增强注入层已挂载`；再在浏览器「查看网页源代码」搜 `OKA-WIFI-INJECTED`。日志齐但页面没有 → 强刷（Ctrl+F5）排除缓存；日志缺 → 说明 `GCDWebServerDataResponse` 类没找到，看是否打印 `× 找不到 ...` |
+| 网页里没有复选框 / 拖了没反应 | 模板注入没生效（v1.1.1 默认外观本就与原版几乎一致，**不要拿「有没有新增面板」当判据**） | 先看日志有没有两条 `✓ hook ...HTMLTemplate:variables:` 与 `网页增强注入层已挂载`；再在浏览器「查看网页源代码」搜 `OKA-WIFI-INJECTED`，并确认 `#listing tr.row-file` 行首有没有 `.oka-checkbox`。日志齐但页面没有 → 强刷（Ctrl+F5）排除缓存；日志缺 → 说明 `GCDWebServerDataResponse` 类没找到，看是否打印 `× 找不到 ...` |
 | 页面源码里出现两次 `OKA-WIFI-INJECTED` | 幂等标记失效（类方法 + 实例方法双 hook 都注入了） | 正常情况下 `OkaAugmentVariables` 会在第二次命中时直接返回原 variables。若重复，检查 `rangeOfString:@"OKA-WIFI-INJECTED"` 是否被改掉 |
 | 拖入文件夹后只剩顶层文件、子目录丢了 | `create` 用 `withIntermediateDirectories:NO`，父目录不存在时整条链会失败 | 任务面板会显示每个目录的失败原因。代码已按深度升序逐级创建并对「目录已存在」做 `list` 反查；若仍失败，把任务面板的失败明细发来 |
 | 拖放后出现两份上传 / 进度条乱跳 | 捕获阶段的 `stopPropagation` 没挡住 jQuery File Upload 在 `$(document)` 上的 drop handler | 检查是否有其它插件/浏览器扩展改写了 drag/drop；本插件的 `onDrop` 必须同时 `preventDefault()` 与 `stopPropagation()` |
+| 点行末「移动」按钮还是原版那个只有路径输入框的弹窗 | 捕获阶段接管没生效（v1.1.1 仍复用原版 `#move-modal`，**弹窗长得很像原版是正常的**，判据是里面有没有「本次移动 N 项」和目录浏览） | 先在浏览器控制台确认 `window.__okaWiFiLoaded` 为真；再看源码里有没有 `onMoveButtonCapture`。若原版 handler 仍执行，会出现「弹窗立刻自动关闭 + 只发 1 个 POST move」——这是 `.off('click')` 没摘掉 `#move-confirm` 旧绑定的特征 |
+| 移动完成后按钮点不动 | 故意设计：结果留在弹窗里给用户看，确认按钮保持禁用以防重复提交 | 关掉弹窗，重新点任意一行的「移动」按钮即可恢复 |
 | 批量移动全部报失败 | `newPath` 目标已存在，或目标目录不存在 | 弹窗里逐项列出失败原因。服务端 `move` 在目标已存在时返回 `Destination ... already exists`；目录浏览只列 `GET list` 里真实存在的目录，手动输入路径时先确认它存在 |
 
 ---
@@ -431,8 +451,8 @@ idevicesyslog | grep OkaWiFi
 wifitweak/
 ├── Tweak.xm                    # 全部实现（约 1230 行，含逐条逆向依据注释）
 ├── OkaWiFi.plist               # CydiaSubstrate 过滤：只注入 com.blinker.documents
-├── web/                        # v1.1.0 电脑网页端增强前端资源（构建期内联进 dylib）
-│   ├── oka-wifi.js             # 拖放上传 / 文件夹递归 / 进度汇总 / 批量移动
+├── web/                        # v1.1.1 电脑网页端增强前端资源（构建期内联进 dylib）
+│   ├── oka-wifi.js             # 全页拖放 / 文件夹递归 / 进度汇总 / 复用原版移动弹窗
 │   └── oka-wifi.css            # 只使用 oka- 前缀，不覆盖 Bootstrap 原类
 ├── devkit/
 │   ├── build.sh                # 零 Theos 编译：资源内联 + xcrun clang + codesign + 闸门
