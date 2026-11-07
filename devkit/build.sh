@@ -73,6 +73,7 @@ xcrun clang -target "$TRIPLE" -isysroot "$SDK" \
   -undefined dynamic_lookup \
   -framework Foundation -framework UIKit \
   -framework AVFoundation -framework SystemConfiguration \
+  -framework CoreFoundation \
   "$ROOT/Tweak.xm" \
   -o "$BUILD/$NAME.dylib" \
   -Xlinker -install_name -Xlinker \

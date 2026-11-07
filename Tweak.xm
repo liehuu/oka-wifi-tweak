@@ -205,7 +205,13 @@ static void StopBackgroundKeepAlive(void) {
     if (gKeepAlivePlayer) {
         id p = (__bridge id)gKeepAlivePlayer;
         ((void (*)(id, SEL))objc_msgSend)(p, @selector(stop));
-        CFRelease(gKeepAlivePlayer);
+        // ★ 与 (__bridge_retained void *) 成对的释放必须用 CFBridgingRelease / CFRelease。
+        //   这里原来写 CFRelease(gKeepAlivePlayer)，参数是 void*：
+        //   ARC 下 CFRelease 签名是 void CFRelease(CFTypeRef)，CFTypeRef 为 const void*，
+        //   显式传 void* 会被判 "incompatible pointer types" 直接报错。
+        //   CFBridgingRelease 接收 void* 并转成 CFTypeRef 再 release，
+        //   语义就是「把 +1 的引用交还给 ARC」，正好对应 __bridge_retained。
+        CFRelease((CFTypeRef)gKeepAlivePlayer);
         gKeepAlivePlayer = NULL;
     }
     gKeepAliveOn = NO;
@@ -386,10 +392,19 @@ static id GetIvar(id obj, const char *name) {
 
     // httpServer 是唯一的强引用（反汇编里直接 str，未走 WeakInit）。
     // object_getIvar 对 strong ivar 返回 +0，而本函数声明为 ns_returns_retained，
-    // 所以这里必须手动 retain 一次，否则 ARC 会在作用域结束时多减一次引用 → 过度释放崩溃。
+    // 所以这里必须额外 +1 一次，否则 ARC 会在作用域结束时多减一次引用 → 过度释放崩溃。
+    //
+    // ★ 不能写成 (__bridge id)(__bridge_retained void *)v：
+    //   嵌套两个桥接转换，语义是「先转成 +1 的 void*，再转回 id（此时 ARC 认为它 +0）」，
+    //   clang 对这种写法行为不确定，也是本次 CI 里同类报错的来源。
+    // ★ 也不能写 [v retain]：ARC 明确禁止显式发送 retain/release
+    //   （error: ARC forbids explicit message send of 'retain'）。
+    //   正确做法是 CFBridgingRetain：它返回 +1 的 CFTypeRef，
+    //   转成 id 时所有权已经转移，与 ns_returns_retained 契约完全对齐。
     if (strcmp(name, "httpServer") == 0) {
         id v = object_getIvar(obj, iv);
-        return v ? (__bridge id)(__bridge_retained void *)v : nil;
+        if (!v) return nil;
+        return (__bridge id)CFBridgingRetain(v);   // +1，符合 ns_returns_retained
     }
 
     // 其余全是 Swift weak：必须走 LoadStrong，否则拿到的是 side-table 垃圾
@@ -588,10 +603,13 @@ static UIViewController *MakeHeadlessPage(void) {
         return nil;
     }
     RetainObject(page);                        // 保住它，别被释放
-    // %p 的形参类型是 void *，直接塞 id 会被 -Wformat 判定类型不符。
-    // （不是 error，但零 Theos 构建下 warning 会混在 CI 日志里，
-    //   以后真出错时看不到重点，所以顺手清掉。）
-    LOG("✓ 已创建无界面 BNHttpServerPage (httpServer=%p)", (void *)hs);
+    // ★ ARC 下 id → void* 必须显式 __bridge，不能裸强转：
+    //     "cast of Objective-C pointer type 'id' to C pointer type 'void *'
+    //      requires a bridged cast"
+    //   这条是硬 error，不是 warning。（我上一轮为了消 -Wformat 加的
+    //   (void *)hs 就栽在这里，CI 直接编译失败。）
+    //   %p 只读地址、不做所有权转移，所以用 __bridge（不是 __bridge_retained）。
+    LOG("✓ 已创建无界面 BNHttpServerPage (httpServer=%p)", (__bridge void *)hs);
     return page;
 }
 
