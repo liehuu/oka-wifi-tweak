@@ -6,7 +6,7 @@
 |---|---|---|
 | 1 | 桌面长按快捷开启 | 长按图标出现「开启 WiFi 传输」，点一下直接启动服务，地址自动复制到剪贴板并弹窗提示。不用进 App、不用点按钮 |
 | 2 | 蜂窝 / 热点可开启 | 用手机流量或个人热点时，WiFi 传输页面的「开始」按钮正常出现，可正常开启；且显示的地址是手机在热点网段的真实 IP（`172.20.10.1` 这类），不再是 `unknown` |
-| 3 | 电脑网页端增强（v1.1.1） | 保留原 `Upload Files` 按钮；**整个页面就是放置区**（没有独立拖放框），把单个/多个文件、整个文件夹从文件管理器拖进网页任意位置即可上传（拖入时全屏提示 + 逐项进度 + 成功/失败汇总 + 失败重试）；**复用原版行末「移动」按钮与原弹窗**，把它从「只能手填地址」增强为目录浏览 + 可勾选批量移动 + 结果反馈 |
+| 3 | 电脑网页端增强（v1.1.2） | 保留原 `Upload Files` 按钮；**整个页面就是放置区**（没有独立拖放框），把单个/多个文件、整个文件夹拖进网页任意位置即可上传（拖入时全屏提示 + 成功/失败汇总 + 失败重试）；**复用原版行末「移动」按钮与原弹窗**，增强为目录浏览 + 可勾选批量移动 + 结果反馈。v1.1.2 另加：**文件夹排在最上面**（组内按名称自然序，不再与文件穿插）、**顶部设备名大标题收成一行小字**（文件列表上移约 100px）、**上传任务面板默认折叠成一条**，要看明细再点「展开」 |
 
 ---
 
@@ -169,7 +169,7 @@ _GCDWebServerGetPrimaryIPAddress 硬编码 strcmp(ifa_name,"en0")
    - 挂**后台保活**（`AVAudioSession` Playback + 循环播放 App 自带的 `Happy Dreams.mp3`，音量 0）——否则切到后台几秒后进程被挂起、端口就断了；
    - 等 1.5s 读 App 自己写进 `ipAddress.text` 的 URL（`Helper` 是纯 Swift 类，ObjC runtime 反射不到 `uploader`）；读不到再用「本机 IP + 端口」兜底，复制到剪贴板并弹窗显示。
 
-### 功能 3 —— 电脑网页端增强（v1.1.1）
+### 功能 3 —— 电脑网页端增强（v1.1.2）
 
 **约束**：不能改 App 包内 `GCDWebUploader.bundle/Contents/Resources/` 的任何文件，那会破坏代码签名。所以采用「构建期把前端资源编进 dylib + 运行时注入 HTML」。
 
@@ -197,6 +197,14 @@ _GCDWebServerGetPrimaryIPAddress 硬编码 strcmp(ifa_name,"en0")
 | `POST delete` / `GET download` | `path` | 原页面逻辑，不改 |
 
 路径都经 `_GCDWebServerNormalizePath` 规范化。因为 `create` **不递归**，文件夹上传必须把目录按深度升序**逐级创建**，再逐个上传文件到对应子目录；重复拖入同名文件夹时，`create` 会失败，此时用 `list` 反查同名目录是否真的已存在，存在就当"目录已就绪"继续走，不吞掉真实失败。
+
+#### v1.1.2 三项补齐（按真机使用反馈改的）
+
+| 反馈 | 原因 | 改法 |
+|---|---|---|
+| 文件夹和文件穿插着排，看着乱 | 原版 `_reload()` 拿到 `GET list` 的数组后**按索引直接 append 行，自己不排序**；服务端给的是文件系统顺序 | 在 `$.ajax` 的 jqXHR 上注册**第一个** `done` 回调，对数组**原地 `sort`**：目录组在前、文件组在后，组内按名称自然序（`localeCompare` 带 `numeric:true`，`2.log` 排在 `10.log` 前）。原版随后注册的 `.done` 拿到的是同一个数组对象，渲染出来就是有序的。**必须在 IIFE 顶层包装**，因为原版 ready 回调里就会调 `_reload("/")`；注入脚本在 epilogue（第 92 行），晚于 index.js（第 53 行）但早于 DOMContentLoaded，能覆盖首屏。只认「每项都是 `{path,name,size}` 的数组」这一结构特征，不枚举 URL 白名单，不会误伤 upload/create/move 的对象响应 |
+| 顶部「xhub」那几个字太占地方，文件都显示在很下面 | Bootstrap 3 的 `.page-header` 是 `margin:40px 0 20px` + 36px `h1`，`index.css` 又给 `.btn-toolbar` 加了 `margin-top:30px`，合计约 100px | JS 在 `body` 上加 `oka-compact`，CSS 用 `body.oka-compact .container > ...` 作用域收紧：标题保留但降到 20px 一行，标题区/工具栏/面板边距一并压缩。**不全局覆盖 Bootstrap 原类**，关掉 `EnableWebEnhance` 页面自然回到原版 |
+| 上传任务那个框太占地方 | v1.1.0/1.1.1 有任务时就展开整块明细列表 | 任务面板**默认折叠**：只显示一条头部（汇总 + 「展开」按钮 + 清除/重试/停止三个操作），明细区 `display:none`，要看逐项进度再点「展开」。每批上传开始都回到折叠；结果条仍在原 `#alerts`，折叠状态下反馈与重试都可用 |
 
 #### v1.1.1 的交互定型（按真机使用反馈改的）
 
@@ -227,9 +235,9 @@ v1.1.0 曾单独放了一块占大半个页面的虚线拖放框，又另起了�
 **不需要 Theos。** 构建是一台装了 Xcode 的 macOS（或 GitHub Actions 的 `macos-latest`）上跑三条命令：
 
 ```bash
-sh devkit/build.sh arm64e iphoneos-arm64e 1.1.1   # RootHide / roothide
-sh devkit/build.sh arm64  iphoneos-arm64  1.1.1   # rootless（Dopamine / palera1n）
-sh devkit/build.sh arm64  iphoneos-arm    1.1.1   # 传统 rootful
+sh devkit/build.sh arm64e iphoneos-arm64e 1.1.2   # RootHide / roothide
+sh devkit/build.sh arm64  iphoneos-arm64  1.1.2   # rootless（Dopamine / palera1n）
+sh devkit/build.sh arm64  iphoneos-arm    1.1.2   # 传统 rootful
 ```
 
 产物在 `.build/out/com.oka.wifitweak_<ver>_<arch>.deb`。
@@ -386,16 +394,20 @@ idevicesyslog | grep OkaWiFi
 
 # 4) 功能 3：电脑浏览器打开 http://<手机IP>:8080
 #    a) 页面默认外观应与原版几乎一致：没有独立拖放框、没有多出来的面板；
+#       顶部设备名（xhub 那行）应是一行小字，文件列表明显比原版靠上；
 #       只是原按钮那一行多了「全选 / 取消选择」，文件列表每行前面多了复选框。
 #       原 Upload Files 按钮照常可用。
 #    b) 从电脑文件管理器拖 1 个文件 / 多个文件 / 整个文件夹到页面**任意位置**
-#       期望：拖入时浮出全屏「松开即可上传」提示 → 上传任务面板出现并逐项显示进度
+#       期望：拖入时浮出全屏「松开即可上传」提示 → 任务面板只出现**一条折叠小条**
+#             （上面有汇总、展开、清除/重试/停止），点「展开」才看到逐项进度
 #             → 原 #alerts 位置显示成功/失败数 → 列表自动刷新
 #       文件夹：手机上应保留完整目录结构（含多级子目录）
 #    c) 在文件列表勾选多项 → 点**任意一行的原版「移动」按钮** → 弹出的仍是原版弹窗，
 #       但多了「本次移动 N 项」和目录浏览 → 点目录或直接填 #move-input → 点「移动」
 #       期望：弹窗内显示成功/失败汇总，列表自动刷新，文件出现在目标目录
 #       （不勾选时只移动你点击的那一项；移动后按钮保持置灰，关掉再打开才恢复）
+#    d) 排序：随便进一个同时有文件夹和文件的目录，文件夹应全部排在文件上方，
+#       组内按名称排（2.log 在 10.log 前）。新建文件/文件夹后点 Refresh 仍保持有序
 #    插件加载时日志应有：
 #       [OkaWiFi] ✓ hook +[GCDWebServerDataResponse responseWithHTMLTemplate:variables:]
 #       [OkaWiFi] ✓ hook -[GCDWebServerDataResponse initWithHTMLTemplate:variables:]
@@ -424,6 +436,8 @@ idevicesyslog | grep OkaWiFi
 | 日志没有 `✓ hook -[GCDWebServer serverURL]` | `GCDWebServer` 类没找到（framework 未加载 / 类名不同） | 构造函数已改为 `dlopen(..., RTLD_LAZY)` 主动加载两种路径。若仍缺，看是否打印 `× 找不到 GCDWebServer 类`；此时只剩 UI 层写回兜底 |
 | 日志出现 `端口自证: 无端口在 LISTEN，且 port / isRunning 都无证据 → 不改地址` | 服务确实没在跑，或 hook 没拿到实例状态 | 这是**故意不写假地址**。v1.0.2 起端口由 `[self port]` 直取，探测不到也会采信；若电脑实测能连上却仍显示 unknown，把整段日志发来改判据 |
 | 网页里没有复选框 / 拖了没反应 | 模板注入没生效（v1.1.1 默认外观本就与原版几乎一致，**不要拿「有没有新增面板」当判据**） | 先看日志有没有两条 `✓ hook ...HTMLTemplate:variables:` 与 `网页增强注入层已挂载`；再在浏览器「查看网页源代码」搜 `OKA-WIFI-INJECTED`，并确认 `#listing tr.row-file` 行首有没有 `.oka-checkbox`。日志齐但页面没有 → 强刷（Ctrl+F5）排除缓存；日志缺 → 说明 `GCDWebServerDataResponse` 类没找到，看是否打印 `× 找不到 ...` |
+| 文件夹和文件还是穿插着排 | 列表排序没生效 | 先在控制台确认 `window.__okaWiFiLoaded` 为真，再在网页源码里搜 `sortListingInPlace`；都没有说明注入层根本没加载。**首屏就乱**通常是包装 `$.ajax` 的时机被改到了 `$(document).ready()` 里（必须留在 IIFE 顶层，才能赶在原版 ready 里的 `_reload("/")` 之前）。若只有某个目录乱，把该目录 `GET list` 的原始 JSON 发来——排序只认「每项都有 `path`/`name` 字符串」的数组，结构不符会原样放过 |
+| 顶部还是很空 / 上传任务框还是占地方 | `body.oka-compact` 没加上，或注入的 CSS 被缓存了 | 控制台看 `document.body.classList.contains('oka-compact')`；为真但样式没变就强刷（Ctrl+F5）。任务面板的折叠由 `setTasksExpanded(false)` 控制，若上传后明细直接展开，检查 `startUpload()` 里那行是否被删；也可直接点头部「展开 / 收起」验证切换是否可用 |
 | 页面源码里出现两次 `OKA-WIFI-INJECTED` | 幂等标记失效（类方法 + 实例方法双 hook 都注入了） | 正常情况下 `OkaAugmentVariables` 会在第二次命中时直接返回原 variables。若重复，检查 `rangeOfString:@"OKA-WIFI-INJECTED"` 是否被改掉 |
 | 拖入文件夹后只剩顶层文件、子目录丢了 | `create` 用 `withIntermediateDirectories:NO`，父目录不存在时整条链会失败 | 任务面板会显示每个目录的失败原因。代码已按深度升序逐级创建并对「目录已存在」做 `list` 反查；若仍失败，把任务面板的失败明细发来 |
 | 拖放后出现两份上传 / 进度条乱跳 | 捕获阶段的 `stopPropagation` 没挡住 jQuery File Upload 在 `$(document)` 上的 drop handler | 检查是否有其它插件/浏览器扩展改写了 drag/drop；本插件的 `onDrop` 必须同时 `preventDefault()` 与 `stopPropagation()` |
@@ -451,9 +465,9 @@ idevicesyslog | grep OkaWiFi
 wifitweak/
 ├── Tweak.xm                    # 全部实现（约 1230 行，含逐条逆向依据注释）
 ├── OkaWiFi.plist               # CydiaSubstrate 过滤：只注入 com.blinker.documents
-├── web/                        # v1.1.1 电脑网页端增强前端资源（构建期内联进 dylib）
-│   ├── oka-wifi.js             # 全页拖放 / 文件夹递归 / 进度汇总 / 复用原版移动弹窗
-│   └── oka-wifi.css            # 只使用 oka- 前缀，不覆盖 Bootstrap 原类
+├── web/                        # v1.1.2 电脑网页端增强前端资源（构建期内联进 dylib）
+│   ├── oka-wifi.js             # 列表排序 / 全页拖放 / 文件夹递归 / 折叠任务面板 / 复用原版移动弹窗
+│   └── oka-wifi.css            # oka- 前缀样式 + body.oka-compact 作用域的顶部紧凑布局
 ├── devkit/
 │   ├── build.sh                # 零 Theos 编译：资源内联 + xcrun clang + codesign + 闸门
 │   ├── mkdeb.sh                # 纯 Python 拼 ar 归档（不依赖 dpkg-deb）

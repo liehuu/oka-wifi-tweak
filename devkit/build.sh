@@ -182,17 +182,17 @@ grep -aq "_swift_unknownObjectWeakLoadStrong" "$BUILD/$NAME.dylib" \
        echo "  排查：Tweak.xm 里 dlsym(RTLD_DEFAULT, \"_swift_unknownObjectWeakLoadStrong\") 是否还以字符串字面量形式存在"
        exit 1; }
 
-# 功能 3（v1.1.1）：网页增强注入层
+# 功能 3（v1.1.2）：网页增强注入层
 # 前 4 条是 ObjC 侧：类方法 hook 的 selector、幂等标记、类名常量。
-# 后 6 条来自内联的 kOkaWebJS / kOkaWebCSS —— 丢了说明 gen-webassets.py 的
-# 产物没被编进来，页面会照常打开但拖放/批量移动全部不存在，属于"静默功能缺失"。
-# v1.1.1 的交互是「全页面拖放 + 复用原版 #move-modal」，所以指纹换成
-# oka-list-tools / onMoveButtonCapture / HTML_MOVE_ENHANCE / move-confirm，
-# 不再用 v1.1.0 的 oka-dropzone / oka-move-modal。
+# 其余来自内联的 kOkaWebJS / kOkaWebCSS —— 丢了说明 gen-webassets.py 的
+# 产物没被编进来，页面会照常打开但增强功能全部不存在，属于"静默功能缺失"。
+# v1.1.1 的交互是「全页面拖放 + 复用原版 #move-modal」；
+# v1.1.2 再加两条：sortListingInPlace（列表排序）与 oka-compact（顶部紧凑）。
 for sym in responseWithHTMLTemplate:variables: initWithHTMLTemplate:variables: \
            OKA-WIFI-INJECTED GCDWebServerDataResponse \
            oka-list-tools onMoveButtonCapture HTML_MOVE_ENHANCE move-confirm \
-           oka-drag-overlay webkitGetAsEntry dirAlreadyExists; do
+           oka-drag-overlay webkitGetAsEntry dirAlreadyExists \
+           sortListingInPlace isListingArray isDirEntry origAjax oka-compact; do
   grep -aqF "$sym" "$BUILD/$NAME.dylib" \
     || { echo "✗ dylib 缺 ${sym}（网页增强会静默失效）"; exit 1; }
 done

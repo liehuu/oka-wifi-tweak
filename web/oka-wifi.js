@@ -1,5 +1,5 @@
 /*
- * OkaWiFi v1.1.1 — GCDWebUploader 网页端增强层
+ * OkaWiFi v1.1.2 — GCDWebUploader 网页端增强层
  *
  * 注入方式：由 Tweak.xm hook +[GCDWebServerDataResponse responseWithHTMLTemplate:variables:]
  *          把本文件 + oka-wifi.css 追加到 epilogue 变量里，随首页 HTML 一起下发。
@@ -12,6 +12,12 @@
  *   · 移动**复用原版入口**：点行末的 .button-move，弹出的仍是原版 #move-modal，
  *     只是把「只能手填地址」替换成目录浏览 + 批量选中 + 结果反馈。
  *     不再有独立的「移动选中项」按钮和独立弹窗。
+ *
+ * v1.1.2 两处补齐（按真机反馈）：
+ *   · 列表排序：原版按服务端返回顺序直接渲染，目录和文件穿插；在 GET list
+ *     的响应源头原地 sort，文件夹置顶、组内按名称自然序。
+ *   · 顶部紧凑：header 模板变量那行大标题 + 30px 工具栏上边距把文件列表顶得太靠下，
+ *     用 body.oka-compact 作用域收紧，标题保留为一行小字。
  *
  * 设计约束：
  *   1. 原生 "Upload Files" 按钮 / #fileupload 的点击选择流程完全不动；
@@ -34,6 +40,84 @@
 
   var $ = window.jQuery;
   if (!$) { return; }
+
+  // ---------------------------------------------------------------------
+  // 0a. 列表排序：文件夹置顶，组内按名称自然序
+  //
+  // 原版 _reload() 拿到 GET list 的数组后直接按索引 append 行，不做任何排序；
+  // 服务端给的是文件系统顺序，于是目录和文件穿插着显示。这里在**数据源头**
+  // 修：给 jqXHR 注册第一个 done 回调，对数组原地 sort，原版随后注册的
+  // .done(function(data){...}) 拿到的是同一个数组对象，渲染出来就是有序的。
+  // 不用 DOM 重排，是因为重排会二次触发 MutationObserver，还会看到先乱后齐的闪烁。
+  //
+  // ★ 包装必须放在 IIFE 顶层、不能放进 $(document).ready()：
+  //   原版 index.js 的 ready 回调里就会调 _reload("/")。本注入脚本位于
+  //   epilogue 占位符（第 92 行），在 index.js（第 53 行）之后加载、但一定早于
+  //   DOMContentLoaded，所以在此处包装能连首屏列表一起覆盖。
+  //
+  // 判据用「结构特征」而不是 URL 白名单：只处理每一项都形如
+  // {path:string, name:string, size:number|null} 的数组。upload/create/move
+  // 返回的是对象，不会误伤；将来服务端换个 list 地址也不会漏。
+  // URL 只用来缩小注册范围（减少无关回调），不作为唯一判据。
+  // ---------------------------------------------------------------------
+  function isListingArray(data) {
+    if (!Array.isArray(data) || data.length === 0) { return false; }
+    for (var i = 0; i < data.length; ++i) {
+      var o = data[i];
+      if (!o || typeof o.path !== 'string' || typeof o.name !== 'string') {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function isDirEntry(o) {
+    var p = o.path || '';
+    // 目录项 path 以 "/" 结尾且 size 为 null；两者互为佐证，取并集更抗服务端差异
+    return p.charAt(p.length - 1) === '/' || o.size == null;
+  }
+
+  function compareEntry(a, b) {
+    var da = isDirEntry(a), db = isDirEntry(b);
+    if (da !== db) { return da ? -1 : 1; }        // 文件夹永远排最上面
+    var an = String(a.name || ''), bn = String(b.name || '');
+    var c = 0;
+    try {
+      // numeric:true 让 "2.log" 排在 "10.log" 前面；sensitivity:'base' 忽略大小写
+      c = an.localeCompare(bn, undefined, { numeric: true, sensitivity: 'base' });
+    } catch (e) {
+      var al = an.toLowerCase(), bl = bn.toLowerCase();
+      c = al < bl ? -1 : (al > bl ? 1 : 0);
+    }
+    if (c !== 0) { return c; }
+    // 同名但大小写不同时给个稳定次序，避免不同浏览器 sort 结果抖动
+    return an < bn ? -1 : (an > bn ? 1 : 0);
+  }
+
+  function sortListingInPlace(data) {
+    if (!isListingArray(data)) { return false; }
+    data.sort(compareEntry);
+    return true;
+  }
+
+  function isListGet(args) {
+    var a0 = args[0], a1 = args[1];
+    var opts = (typeof a0 === 'string') ? (a1 || {}) : (a0 || {});
+    var url = (typeof a0 === 'string') ? a0 : (opts.url || '');
+    if (String(opts.type || 'GET').toUpperCase() !== 'GET') { return false; }
+    var clean = String(url).split('?')[0].split('#')[0];
+    return /(^|\/)list$/i.test(clean);
+  }
+
+  var origAjax = $.ajax;
+  $.ajax = function () {
+    var jq = origAjax.apply(this, arguments);
+    if (isListGet(arguments) && jq && typeof jq.done === 'function') {
+      // 先于原版的 .done 注册，jQuery Deferred 按注册顺序执行
+      jq.done(function (data) { sortListingInPlace(data); });
+    }
+    return jq;
+  };
 
   // ---------------------------------------------------------------------
   // 0. 工具
@@ -82,17 +166,21 @@
   // ---------------------------------------------------------------------
   // 1. DOM 片段：都是默认隐藏 / 塞进原容器，不占额外版面
   // ---------------------------------------------------------------------
-  // 上传任务面板：插在原 .uploading 面板之后，默认 display:none
+  // 上传任务面板：插在原 .uploading 面板之后。
+  // 整块默认 display:none；有任务时只显示**一条折叠的头部**，明细区要点
+  // 「展开」才出现 —— 用户反馈任务明细框太占地方，看的时候再点开即可。
+  // 头部仍带汇总与三个操作按钮，折叠状态下进度/失败反馈照样看得到、也能重试。
   var HTML_TASKS = [
-    '<div id="oka-tasks-wrap" class="oka-tasks-wrap panel panel-default" style="display:none">',
+    '<div id="oka-tasks-wrap" class="oka-tasks-wrap panel panel-default oka-tasks-collapsed" style="display:none">',
     '  <div class="panel-heading oka-tasks-head">',
+    '    <button type="button" class="btn btn-xs btn-default oka-tasks-toggle" id="oka-tasks-toggle" aria-expanded="false">&#9656; 展开</button>',
     '    <strong id="oka-tasks-title">上传任务</strong>',
     '    <span id="oka-tasks-summary" class="oka-hint"></span>',
     '    <button type="button" class="btn btn-xs btn-default pull-right" id="oka-tasks-clear">清除记录</button>',
     '    <button type="button" class="btn btn-xs btn-default pull-right" id="oka-tasks-retry">重试失败项</button>',
     '    <button type="button" class="btn btn-xs btn-warning pull-right" id="oka-tasks-stop">停止剩余</button>',
     '  </div>',
-    '  <div id="oka-tasks" class="oka-tasks"></div>',
+    '  <div id="oka-tasks" class="oka-tasks" style="display:none"></div>',
     '</div>'
   ].join('\n');
 
@@ -138,9 +226,23 @@
   var tasks = [];
   var running = false;
   var cancelled = false;
+  var tasksExpanded = false;   // 明细区默认折叠，只有用户主动点「展开」才显示
   var batchBase = '/';   // 本批次目标根目录：用户中途切换目录后重试仍回原处
 
   function tasksVisible(v) { $('#oka-tasks-wrap').toggle(!!v); }
+
+  function setTasksExpanded(v) {
+    tasksExpanded = !!v;
+    $('#oka-tasks').toggle(tasksExpanded);
+    $('#oka-tasks-wrap').toggleClass('oka-tasks-collapsed', !tasksExpanded);
+    $('#oka-tasks-toggle')
+      .html(tasksExpanded ? '&#9662; 收起' : '&#9656; 展开')
+      .attr('aria-expanded', tasksExpanded ? 'true' : 'false');
+    if (tasksExpanded) {
+      var box = $('#oka-tasks');
+      if (box.length) { box.scrollTop(box[0].scrollHeight); }
+    }
+  }
 
   function renderTasks() {
     var done = 0, failed = 0, active = 0, waiting = 0;
@@ -424,6 +526,7 @@
     cancelled = false;
     running = true;
     tasksVisible(true);
+    setTasksExpanded(false);   // 每一批开始都回到折叠，需要明细再点开
     showResult('info', '<strong>开始上传</strong> 目录 ' + collected.dirs.length +
       ' 个 · 文件 ' + collected.files.length + ' 个 → ' + esc(batch.base));
     renderTasks();
@@ -727,6 +830,10 @@
   // ---------------------------------------------------------------------
   $(document).ready(function () {
     try {
+      // 紧凑顶部：body 上加作用域 class，CSS 只压 .container 的直接子元素。
+      // 用 class 而不是直接改内联样式，关掉 EnableWebEnhance 时页面自然回到原版。
+      $('body').addClass('oka-compact');
+
       // 任务面板插在原 .uploading 之后；默认隐藏，只有上传时才出现
       var up = $('.uploading').first();
       if (up.length) { up.after(HTML_TASKS); }
@@ -755,6 +862,11 @@
       document.addEventListener('dragleave', onDragLeave, true);
       document.addEventListener('drop', onDrop, true);
       window.addEventListener('dragend', hideDragUI, true);
+
+      $('#oka-tasks-toggle').on('click', function () {
+        setTasksExpanded(!tasksExpanded);
+      });
+      setTasksExpanded(false);
 
       $('#oka-tasks-clear').on('click', function () {
         if (running) { return; }
