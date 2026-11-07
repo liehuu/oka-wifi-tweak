@@ -62,14 +62,14 @@ bl   _GCDWebServerGetPrimaryIPAddress
 cbz  x0, 0xef3c        ; ← 拿到 nil 就直接返回 nil（连 port 都不拼）
 ```
 
-热点下接口名是 `bridge100`、蜂窝是 `pdp_ip0`，**都不是 `en0`** → 函数返回 nil → `serverURL` 返回 nil → 页面地址栏空白、二维码内容是 `null`。
+热点下接口名是 `bridge100`、蜂窝是 `pdp_ip0`，**都不是 `en0`** → 函数返回 nil → `serverURL` 返回 nil → `Helper.uploaderUrl` 返回常量 `"unknown"`，地址栏、二维码、复制按钮全都用它（v1.0.2 静态逆向确认，见「功能 2b」）。
 
 > 这就是为什么单破解 WWAN 判定还不够：**必须在同一份补丁里修正 IP 获取**，否则「能开启但看不到地址」，等于没用。
 
 ### 4. 顺带确认的运行时事实
 
 - Swift 类在 ObjC 运行时注册的名字是 **mangled 形式**：`_TtC7Blinker16BNHttpServerPage`（直接从 `class_ro_t.name` 读出来的）。用 `NSClassFromString(@"Blinker.BNHttpServerPage")` **取不到**，代码里做了 mangled → Swift 名 → 后缀遍历三级兜底。
-- `BNFileSharingHelper` 的 `isRunning` / `serverURL` / `stop` 是**纯 Swift 方法，没有 ObjC 导出**（方法表里只有 delegate 方法）。但它 `ivar uploader @0x08` 是 `GCDWebUploader : GCDWebServer`，后者有完整 ObjC 接口（`isRunning` / `port` / `serverURL` / `stop`），所以一律走 uploader。
+- `BNFileSharingHelper` 自己的 `uploaderUrl` / `uploaderRunning` / `stopUploader` 是**纯 Swift 方法，没有 ObjC 导出**，但它们内部对 `ivar uploader @0x08`（`GCDWebUploader : GCDWebServer`）发送 `serverURL` / `isRunning` / `stop` 三个 **ObjC selector** —— `__objc_selrefs` 槽 `0xCA50` / `0xCA58` / `0xCA60` 已逐个解出确认。所以 hook 点要放在 `GCDWebServer` 上。
 - `BNHttpServerPage` 的 `changeWifiTransferStateAction:` 里有大量 Swift 强制解包，`0x100013e24` 起全是 `brk #1`。outlet 缺一个就崩，所以「无界面创建页面」时逐个校验 6 个 outlet 全部非空才继续。
 - `Info.plist` 没有 `UIApplicationShortcutItems`，也不能改（破坏签名）→ 用运行时 `UIApplication.sharedApplication.shortcutItems` 注入动态菜单项。
 - `AppDelegate` **没有**实现 `application:performActionForShortcutItem:completionHandler:` → 由插件 `class_addMethod` 补上。
@@ -100,11 +100,54 @@ if (IsWWAN) -> 不可用;  if (!w9) -> 不可用
 
 **层 2（兜底）** hook `-reachabilityChangedWithNote:` 与 `-viewDidLoad`，跑完原逻辑后强制 `startBtn.hidden = NO`、`connectionView.hidden = NO`。即便某系统版本 flag 语义有差异，按钮也一定可点。
 
-### 功能 2b —— 热点 IP 修正
+### 功能 2b —— 热点下 `unknown` 地址修正
 
-hook `_GCDWebServerGetPrimaryIPAddress(BOOL)`：**只有原函数返回真正的合法 IP（`inet_pton` 能解析）才透传**，WiFi 场景完全不受影响；返回 nil、`unknown`、`localhost` 之类占位串时，自己遍历 `getifaddrs` 按接口名打分挑地址。
+#### 真正的根因（v1.0.2 静态逆向确认）
 
-> v1.0.1 起不再用「非空就采信」——真机反馈蜂窝下显示 `unknown`，正是非空占位串把 fallback 挡住了。日志固定打一行 `GetPrimaryIPAddress orig=... (判定=IP/非IP/空)`，用来区分「没打上桩」和「原函数返回了垃圾」。
+`unknown` **不是 App 渲染出的占位文案，而是 `BNFileSharingService.Helper.uploaderUrl` 的默认值**。
+反汇编 `BNFileSharingService.framework` 的共享实现 `0x713C`：
+
+```asm
+0x715C  mov  x19, #0x6e75             ; "un"
+0x7160  movk x19, #0x6e6b, lsl #16   ; "kn"
+0x7164  movk x19, #0x776f, lsl #32   ; "ow"
+0x7168  movk x19, #0x6e,   lsl #48   ; "n"   → Swift 小字符串 "unknown"
+0x71D8  ldr  x20, #0xca50             ; __objc_selrefs 槽 -> "serverURL"
+0x71EC  bl   objc_msgSend(uploader, serverURL)     ; 返回 NSURL?
+0x7240  (serverURL == nil) → 直接返回 x19 = "unknown"
+0x7268  bl   _$s10Foundation3URLVSgWOb             ; Foundation.URL? 转换
+```
+
+同 framework 的 `0xCA58 → isRunning`、`0xCA60 → stop` 也一并确认。完整链路：
+
+```
+_GCDWebServerGetPrimaryIPAddress 硬编码 strcmp(ifa_name,"en0")
+  → 热点下没有 en0 → 返回 nil
+  → -[GCDWebServer serverURL] 在 0xEE94 cbz 后 0xEF3C 返回 nil
+  → Helper.uploaderUrl 返回常量 "unknown"
+  → 「服务器地址」文字 / 二维码 / 复制按钮全部用它
+```
+
+**前两版一直在改 UI 控件（`ipAddress.text`），没打中源头**：Swift `weak` outlet 能否读到、控件用的是 `text` 还是 `attributedText`、App 何时刷新文案，全是不确定因素。
+
+#### 主力修复：hook `-[GCDWebServer serverURL]`
+
+`serverURL` 是 ObjC 方法，`method_setImplementation` 一定命中（`GCDWebUploader` 继承 `GCDWebServer`），不依赖 `MSHookFunction` 对 C 函数是否打桩成功。原 URL 的 host 是合法 IP 时原样返回，**WiFi 下零副作用**；URL 为 nil 或 host 非法时，用 `getifaddrs` 选出的本机 IP 拼一个新 NSURL 返回。端口与运行状态直接从实例取，不用猜、不用扫：
+
+| 取值 | 来源（按优先级） |
+|---|---|
+| 端口 | `[self port]`（`GCDWebServer` 公开 `NSUInteger`）→ `[url port]` → `gServerPort` → 8080 |
+| 是否运行 | `[self isRunning]`（Helper 自己也在用这个 selector）|
+
+地址文字、二维码、复制按钮**一次性全部正确**；`my_stop` 会清掉端口/运行状态，停服后不会凭空造地址。
+日志：`serverURL 修正: 原=[(null)] -> 新=[http://172.20.10.1:8080/] (port=8080 running=1)`。
+
+#### 保留的两层兜底
+
+1. `_GCDWebServerGetPrimaryIPAddress` hook：只采信 `inet_pton` 能解析的 IP（v1.0.1 的修正）。日志 `GetPrimaryIPAddress orig=... (判定=IP/非IP/空)` 用来区分「没打上桩」与「原函数返回垃圾」。
+2. UI 层写回（v1.0.1）：`changeWifiTransferStateAction:` / `viewDidLoad` / reachability 之后延迟检查 `ipAddress.text` 并校正。**v1.0.2 起降为兜底**，且放宽了端口门槛——connect 探测只用于优先拿真实端口，只要 `port` / `isRunning` 有证据，探测不到也允许写回，避免把「传输本来就正常」的场景硬卡死。
+
+本机 IP 按接口名打分（`getifaddrs`）：
 
 | 接口 | 分数 | 说明 |
 |---|---|---|
@@ -113,16 +156,6 @@ hook `_GCDWebServerGetPrimaryIPAddress(BOOL)`：**只有原函数返回真正的
 | `pdp_ip*` | 80 | 蜂窝 |
 | 其它 | 10 | 兜底 |
 | `lo0` / `utun*` / `ipsec*` / `awdl*` / `llw*` | 排除 | 回环、VPN 隧道、AirDrop，电脑连不上 |
-
-**UI 层兜底（v1.0.1）**：上面的符号 hook 有两个失效点（framework 内联调用导致 `MSHookFunction` 没真正打上；App 自己另算状态文案），所以再加一层不依赖任何 hook 的修正——`changeWifiTransferStateAction:` / `viewDidLoad` / `reachabilityChangedWithNote:` 之后延迟校正，发现 `ipAddress.text` 是占位词或非法 host，就直接写回 `http://<本机IP>:<端口>`。
-
-写回前要过三个判据，缺一不改：
-
-1. 地址确实是坏的（空 / `unknown` / `(null)` / 非 `http://` / host 不是合法 IP）；
-2. `getifaddrs` 能枚举到本机 IP；
-3. **端口实测在 LISTEN**：对 `127.0.0.1` 和本机 IP 逐个候选端口（`gServerPort` > 文案里抠出的 > 8080 / 8081）做一次 TCP connect，连得上才写；连不上但 `startWithPort:` hook 亲手记过端口时仍采信，否则判定「服务没在跑」并放弃修正。
-
-第 3 条是刻意加的：`gServerPort` 会在手动停服时清零，只看它就会在「服务已停止、界面残留 `unknown`」时拼一个根本连不上的假地址。端口探测是不依赖 hook 是否生效的第三个独立观测。日志会打 `端口自证: ...` 与 `地址修正: 原=[...] -> 新=[...]`。
 
 ### 功能 1 —— 桌面长按
 
@@ -142,9 +175,9 @@ hook `_GCDWebServerGetPrimaryIPAddress(BOOL)`：**只有原函数返回真正的
 **不需要 Theos。** 构建是一台装了 Xcode 的 macOS（或 GitHub Actions 的 `macos-latest`）上跑三条命令：
 
 ```bash
-sh devkit/build.sh arm64e iphoneos-arm64e 1.0.1   # RootHide / roothide
-sh devkit/build.sh arm64  iphoneos-arm64  1.0.1   # rootless（Dopamine / palera1n）
-sh devkit/build.sh arm64  iphoneos-arm    1.0.1   # 传统 rootful
+sh devkit/build.sh arm64e iphoneos-arm64e 1.0.2   # RootHide / roothide
+sh devkit/build.sh arm64  iphoneos-arm64  1.0.2   # rootless（Dopamine / palera1n）
+sh devkit/build.sh arm64  iphoneos-arm    1.0.2   # 传统 rootful
 ```
 
 产物在 `.build/out/com.oka.wifitweak_<ver>_<arch>.deb`。
@@ -271,6 +304,9 @@ arm64e 设备（A12 及以上 + RootHide）用 `roothide` 那条命令，
 idevicesyslog | grep OkaWiFi
 # 期望：[OkaWiFi] 载入 pid=xxxx
 #       [OkaWiFi] ✓ hook _GCDWebServerGetPrimaryIPAddress
+#       [OkaWiFi] ✓ hook -[GCDWebServer serverURL]        ← v1.0.2 主力，必须有
+#       [OkaWiFi] ✓ hook -[GCDWebServer startWithPort:bonjourName:]
+#       [OkaWiFi] ✓ hook -[GCDWebServer stop]
 #       [OkaWiFi] ✓ hook SCNetworkReachabilityGetFlags
 #       [OkaWiFi] 页面类 = _TtC7Blinker16BNHttpServerPage
 #       [OkaWiFi] AppDelegate = _TtC7Blinker11AppDelegate
@@ -285,12 +321,13 @@ idevicesyslog | grep OkaWiFi
 #       [OkaWiFi] GCDWebServer 已启动 port=8080 ...
 #       [OkaWiFi] 最终地址: http://172.20.10.1:8080
 
-# 3) 功能 2：关 WiFi，开个人热点，进 App 的 WiFi 传输页
-#    期望：开始按钮可见、状态显示 Connected、二维码有内容、地址是热点网段 IP
+# 3) 功能 2：关 WiFi，开个人热点，进 App 的 WiFi 传输页，点「开启 WiFi 传输」
+#    期望：按钮可见、状态 Connected、二维码有内容，
+#          服务器地址 = http://172.20.10.1:8080/（不再是 unknown）
 #    日志应有：
 #       [OkaWiFi] flags 0x00040002 -> 0x00000002 (cleared IsWWAN)
 #       [OkaWiFi] iface bridge100 -> 172.20.10.1 (score 100)
-#       [OkaWiFi] GetPrimaryIPAddress fallback -> 172.20.10.1
+#       [OkaWiFi] serverURL 修正: 原=[(null)] -> 新=[http://172.20.10.1:8080/] (port=8080 running=1)
 ```
 
 排错对照：
@@ -301,16 +338,17 @@ idevicesyslog | grep OkaWiFi
 | 有「载入」但 hook 全打 `×` | 类名/符号没找到 | 看日志里打出来的实际类名，改 `PAGE_CLASS_MANGLED` |
 | 长按没菜单项 | `didFinishLaunching` 没被 hook 到 | 确认 AppDelegate 类名（日志会打）；确认不是从后台恢复（此时不会重走 didFinishLaunching，重启 App 即可） |
 | 点了崩溃（`brk`） | Swift 强解包 trap（`brk #1`） | 代码已按「只有 `httpServer` 必须为真」判断，其余 6 个 outlet 是 Swift `weak`，页面没上屏时本来就该是 nil。若仍崩，抓 crash log 里 `0x100013e2x` 附近的 pc 定位到具体强解包点 |
-| 能开但地址空 / 显示 `unknown` | 源头 hook 与 UI 写回都没生效 | 依次看：`GetPrimaryIPAddress orig=...`（源头 hook 是否真的被调用）、`端口自证: ...`（服务是否真在 LISTEN）、`地址修正: ...`（UI 是否写回）、`✓ 解析到 _swift_unknownObjectWeakLoadStrong`（outlet 是否读得到）。四行缺哪行，问题就在哪一层 |
+| 能开但地址显示 `unknown` | `serverURL` hook 没生效 / 类没找到 | 第一判据是日志里有没有 `✓ hook -[GCDWebServer serverURL]`；有 hook 再看有没有 `serverURL 修正: 原=[(null)] -> 新=[http://...]`。这两行齐了，地址文字、二维码、复制按钮会一起正确。UI 层写回只是兜底，不必看它 |
 | 开了但电脑连不上 | 进程被挂起 | 看是否有「后台保活音频 已启动」；没有说明 `Happy Dreams.mp3` 找不到，需换素材 |
 | 蜂窝下按钮还是不出现 | flags 没被改写 | 看是否有 `flags 0x... -> ...` 日志；没有说明 `SCNetworkReachabilityGetFlags` 的 hook 没命中（可能是 App 静态链接了 SystemConfiguration 的私有副本，改用层 2 兜底，看 `viewDidLoad` 是否被 hook） |
 | 日志没有 `✓ 解析到 _swift_unknownObjectWeakLoadStrong` | libswiftCore 没解析到该符号 | 此时所有 Swift weak outlet 都读不到（`GetIvar` 返回 nil），功能降级为「仅按钮放行」，不崩。检查 App 是否确实用 Swift weak 存 outlet（1.7.5 是） |
 | 快捷菜单点了没反应，日志停在「已在运行」 | `gServerPort` 未清零 | 已 hook `-[GCDWebServer stop]` 清零。若 App 走了别的停服路径，会误判为已在运行；日志会打 `已在运行 (url=... port=...)`，据此判断 |
 | CI 报 `CPU: unbound variable`，但编译和签名都成功了 | 某行 `echo` 里写了 `$CPU，`（后跟全角标点） | macOS 的 bash 3.2 把 `0xEF` 吞进变量名。改 `${CPU}`，并跑 `python3 devkit/check-shell.py .` 扫全仓库 |
 | CI 的 Verify deb 步骤报 `IndentationError` 或 YAML `ScannerError` | 在 `run: \|` 里内嵌了 Python heredoc | 这两个错误互斥、无解：YAML 要缩进、Python 要顶格。校验逻辑必须外置成 `.py` 文件 |
-| 蜂窝/热点下能开启，但服务器地址显示 `unknown` | `_GCDWebServerGetPrimaryIPAddress` 硬编码找 `en0`，热点下返回 nil；`serverURL` 在 `0xEE94` 判空后 `0xEF3C` 直接返回 nil，App 把「没地址」渲染成占位词 | 多半**只是显示问题**，服务器其实在跑：电脑浏览器直接开 `http://172.20.10.1:8080`；或用长按快捷菜单开启，弹窗会给正确地址并复制到剪贴板。v1.0.1 起插件会在 `changeWifiTransferStateAction:` / `viewDidLoad` / reachability 之后把 `ipAddress.text` 写回正确 URL（不依赖 `MSHookFunction` 是否打桩成功），日志应依次出现 `端口自证: 8080 正在 LISTEN` 和 `地址修正: 原=[unknown] -> 新=[http://172.20.10.1:8080]` |
-| 日志里没有 `GetPrimaryIPAddress orig=...` | `MSHookFunction` 在该 framework 上没真正打上桩（`✓ hook` 只代表 `dlsym` 找到符号） | 不影响 v1.0.1 的 UI 层写回；若写回也没生效，看有没有 `地址修正:` 与 `✓ 解析到 _swift_unknownObjectWeakLoadStrong`（后者缺失＝ outlet 读不到，所有 UI 修正都会静默跳过） |
-| 日志出现 `端口自证: 无端口在 LISTEN 且无 start 记录 → 判定服务未运行，不改地址` | 服务真的没起来，或监听端口不在候选列表（8080/8081 之外且 `startWithPort:` hook 没命中，例如 App 走了 `startWithOptions:error:`） | 这是**故意不写假地址**。先看 App 界面是否提示启动失败；若电脑实测能连上，把真实端口告诉我，加进 `ResolveLivePort` 的候选表即可 |
+| 蜂窝/热点下能开启，但服务器地址显示 `unknown` | `Helper.uploaderUrl` 在 `serverURL == nil` 时返回 Swift 常量 `"unknown"`（framework `0x713C` 的 `mov/movk` 立即数已确认）。前两版改 UI 控件没打中源头 | **v1.0.2 直接 hook `-[GCDWebServer serverURL]`** 返回正确 NSURL。日志应有 `✓ hook -[GCDWebServer serverURL]` 与 `serverURL 修正: 原=[(null)] -> 新=[http://172.20.10.1:8080/] (port=8080 running=1)`。应急仍可用电脑浏览器直接开 `http://172.20.10.1:8080` |
+| 日志里没有 `GetPrimaryIPAddress orig=...` | `MSHookFunction` 在该 framework 上没真正打上桩（`✓ hook` 只代表 `dlsym` 找到符号） | **v1.0.2 起不影响主修复**：`serverURL` 是 ObjC 方法，走 `method_setImplementation`，与本 C 函数 hook 完全独立 |
+| 日志没有 `✓ hook -[GCDWebServer serverURL]` | `GCDWebServer` 类没找到（framework 未加载 / 类名不同） | 构造函数已改为 `dlopen(..., RTLD_LAZY)` 主动加载两种路径。若仍缺，看是否打印 `× 找不到 GCDWebServer 类`；此时只剩 UI 层写回兜底 |
+| 日志出现 `端口自证: 无端口在 LISTEN，且 port / isRunning 都无证据 → 不改地址` | 服务确实没在跑，或 hook 没拿到实例状态 | 这是**故意不写假地址**。v1.0.2 起端口由 `[self port]` 直取，探测不到也会采信；若电脑实测能连上却仍显示 unknown，把整段日志发来改判据 |
 
 ---
 
@@ -318,9 +356,9 @@ idevicesyslog | grep OkaWiFi
 
 1. **编译环境是 macOS，本机（Windows）无法验证真实编译。** 代码做了静态审查（括号平衡、函数定义顺序、函数指针签名与赋值、ARC 桥接配对、格式串类型）。本机已用「桩替换 `xcrun`」把 `build.sh` 三个变体从编译一路跑到打包全部 `exit=0`，并在本地用 `verify-deb.py` 把三个 deb 的 22 项检查全部跑通；`shell` 语法、打包链路、校验判据的正反方向都已实测。但**真正的 `clang` 编译与 `codesign` 只能在 macOS 上发生**——桩产出的 dylib 不是可运行代码，本地 deb 也**不能装到手机上**。唯一可交付产物必须来自 CI。
 2. **后台保活依赖音频后台模式。** App 的 `UIBackgroundModes` 是 `audio`/`fetch`，用音频钉住进程是可行的，但 iOS 会占一个「正在播放」状态（音量 0，听不到）。若你介意，可在 prefs 里关掉——但那会导致切后台后端口失效。
-3. **`_GCDWebServerGetPrimaryIPAddress` 靠符号名 hook。** 若 App 后续版本换了 GCDWebServer 版本或静态链接，符号可能找不到（日志会明确报 `×`）。此时源头修正失效，但 v1.0.1 的 UI 层写回仍可独立工作；两层都失效才退化为「能开但地址空」，功能 2a 与功能 1 始终不受影响。
+3. **`_GCDWebServerGetPrimaryIPAddress` 靠符号名 hook。** 若 App 换 GCDWebServer 版本或静态链接，符号可能找不到（日志会报 `×`）。这层失效**不影响 v1.0.2 的主力修复**（`serverURL` 是 ObjC 方法 hook）；只有 `GCDWebServer` 类本身找不到时才会退化到 UI 层写回。功能 2a 与功能 1 始终不受影响。
 4. **地址优先级是启发式。** `bridge* > en* > pdp_ip*` 覆盖了绝大多数场景；若你同时开了 VPN 且 VPN 也建了 `bridge` 接口，可能选错。日志会打印所有候选接口和分数，便于判断。
-5. **端口是 App 自己定的，插件不改。** `gServerPort` 来自 `-[GCDWebServer startWithPort:bonjourName:]` hook（再读一次实例的 `port`），`stop` 时清零；UI 层写回另有端口 LISTEN 探测兜底。如果 App 用随机端口、且走的不是 `startWithPort:`，探测只覆盖 8080/8081，需要按真机日志补候选——这正是「点一下就把地址复制到剪贴板」存在的原因。
+5. **端口是 App 自己定的，插件不改。** v1.0.2 直接从 `[self port]` 读真实端口（`GCDWebServer` 公开属性）、`isRunning` 读运行状态，`stop` 时清零；不再靠猜 8080，也不再依赖 `startWithPort:` 是否被命中。端口 LISTEN 探测只保留为 UI 兜底层的补充手段。
 
 ---
 

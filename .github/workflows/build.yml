@@ -25,7 +25,7 @@ on:
 
 env:
   # 版本号单一来源，禁止在别处硬编码（否则会出现「包名 v1.0、内容 v1.1」）。
-  VERSION: ${{ github.event.inputs.version || '1.0.1' }}
+  VERSION: ${{ github.event.inputs.version || '1.0.2' }}
   HOMEBREW_NO_AUTO_UPDATE: 1
 
 jobs:

@@ -144,8 +144,11 @@ static void RetainObject(id o) {
     [gRetained addObject:o];
 }
 
-// 捕获到的 GCDWebServer 监听端口
+// 捕获到的 GCDWebServer 监听端口 / 运行状态。
+// v1.0.2：两者都由 -[GCDWebServer serverURL] hook 用实例自己的
+// port / isRunning 更新，比 startWithPort: hook 可靠（App 可能走 startWithOptions:）。
 static NSUInteger gServerPort = 0;
+static BOOL gServerRunning = NO;
 
 // ===========================================================================
 //  〇、后台保活
@@ -330,6 +333,69 @@ static NSString *my_GetPrimaryIPAddress(BOOL includeIPv6) {
     if (ip) { LOG("GetPrimaryIPAddress fallback -> %@", ip); return ip; }
     LOG("× BestLocalIPAddress 也没拿到地址，只能返回原值");
     return r;
+}
+
+// ===========================================================================
+//  ★★★ v1.0.2 主力修复：hook -[GCDWebServer serverURL] ★★★
+// ===========================================================================
+//  这才是 "unknown" 的真正源头，前两版改 UI 控件都没打中。
+//
+//  静态证据（BNFileSharingService.framework，Helper.uploaderUrl 共享实现 0x713C）：
+//    0x715C  mov  x19, #0x6e75              "un"
+//    0x7160  movk x19, #0x6e6b, lsl #16    "kn"
+//    0x7164  movk x19, #0x776f, lsl #32    "ow"
+//    0x7168  movk x19, #0x6e,   lsl #48    "n"     → Swift 小字符串 "unknown"
+//    0x71EC  bl   objc_msgSend(uploader, serverURL)   → NSURL?
+//    0x7240  (serverURL == nil) → 直接返回 x19 = "unknown"
+//    0x7268  bl   _$s10Foundation3URLVSgWOb           → Foundation.URL? 转换
+//
+//  即：Helper.uploaderUrl 在 serverURL 为 nil 时返回常量 "unknown"，
+//  App 的「服务器地址」文字、二维码、复制按钮用的都是这个字符串。
+//  _GCDWebServerGetPrimaryIPAddress 硬编码 en0 → 热点下 serverURL 返回 nil
+//  → uploaderUrl == "unknown"。所以只要让 serverURL 返回正确 NSURL，
+//  整条 UI 链路（含二维码）一次性全对，不必碰任何 outlet / 时序 / 控件类型。
+//
+//  为什么不用 MSHookFunction 那层：它改的是 C 函数入口，对 framework 内部
+//  调用是否生效无法从代码证明；而 serverURL 是 ObjC 方法，method_setImplementation
+//  一定命中（GCDWebUploader 继承 GCDWebServer，方法查找走到父类 IMP）。
+//  另外 GCDWebServer 公开 port(NSUInteger) / isRunning(BOOL)，
+//  真实端口和运行状态都能直接从实例取，不用猜 8080、不用扫端口。
+static NSURL *(*orig_serverURL)(id, SEL);
+static NSURL *my_serverURL(id self, SEL _cmd) {
+    NSURL *url = orig_serverURL ? orig_serverURL(self, _cmd) : nil;
+    if (!gEnableIPFix) return url;
+
+    // 运行状态是权威判据（不再靠 gServerPort 猜）
+    SEL selRun = @selector(isRunning);
+    if ([self respondsToSelector:selRun]) {
+        gServerRunning = ((BOOL (*)(id, SEL))objc_msgSend)(self, selRun);
+    }
+
+    // WiFi 下原 URL 的 host 本来就是合法 IP —— 原样返回，零副作用。
+    NSString *host = [url host];
+    if (IsPlausibleIPAddress(host)) return url;
+
+    // 真实端口：实例自己的 port 属性 > 原 URL 的 port > hook 记录 > 8080
+    NSUInteger port = 0;
+    SEL selPort = @selector(port);
+    if ([self respondsToSelector:selPort]) {
+        port = ((NSUInteger (*)(id, SEL))objc_msgSend)(self, selPort);
+    }
+    if (!port) port = [[url port] unsignedIntegerValue];
+    if (port) gServerPort = port;
+
+    // 服务没在跑就别造地址：此时 unknown / 空白是正确状态。
+    if (!gServerRunning && !port) return url;
+
+    NSString *ip = BestLocalIPAddress(NO);
+    if (!ip) { LOG("× serverURL 修正跳过：枚举不到本机 IP"); return url; }
+    if (!port) port = gServerPort ? gServerPort : 8080;
+
+    NSURL *fixed = [NSURL URLWithString:
+                    [NSString stringWithFormat:@"http://%@:%lu/", ip, (unsigned long)port]];
+    LOG("serverURL 修正: 原=[%@] -> 新=[%@] (port=%lu running=%d)",
+        url, fixed, (unsigned long)port, gServerRunning);
+    return fixed;
 }
 
 // ===========================================================================
@@ -668,6 +734,7 @@ static BOOL my_startWithPort(id self, SEL _cmd, NSUInteger port, NSString *name)
 
     NSUInteger real = ((NSUInteger (*)(id, SEL))objc_msgSend)(self, @selector(port));
     if (real) gServerPort = real;
+    if (ok) gServerRunning = YES;
     LOG("GCDWebServer startWithPort:%lu name=%@ ok=%d realPort=%lu",
         (unsigned long)port, name, ok, (unsigned long)gServerPort);
     return ok;
@@ -681,7 +748,8 @@ static void (*orig_stop)(id, SEL);
 static void my_stop(id self, SEL _cmd) {
     if (orig_stop) orig_stop(self, _cmd);
     gServerPort = 0;
-    LOG("GCDWebServer stop -> gServerPort 清零");
+    gServerRunning = NO;
+    LOG("GCDWebServer stop -> gServerPort 清零 / running=NO");
 }
 
 // 兜底算地址：自己的 IP + 记录到的端口
@@ -749,15 +817,14 @@ static NSUInteger PortFromText(NSString *s) {
 }
 
 // ---------------------------------------------------------------------------
-//  端口自证：只有「真的有服务在 LISTEN」才允许把地址写回界面
+//  端口自证：优先用「实测 LISTEN」拿真实端口，但不再把它当硬门槛
 // ---------------------------------------------------------------------------
-//  为什么需要第三个观测源：
-//    gServerPort 只由 -[GCDWebServer startWithPort:bonjourName:] 记录；App 若走
-//    startWithOptions:error: 就抓不到，而 my_stop 又会在手动停止后把它清零。
-//    只看这一个量会出两种错：
-//      (1) 服务明明在跑却判成没跑 → 不修地址，界面继续 unknown；
-//      (2) 服务已停止、界面残留 unknown → 拼一个根本连不上的假地址写回去。
-//    本机 TCP connect 是不依赖任何 hook 是否生效的独立证据：连得上 = 端口在听。
+//  v1.0.1 把 connect 探测设成不让步的前置条件，结果可能把修复卡死：
+//  GCDWebServer 若只绑热点接口、或端口不是 8080/8081，探测全失败 → 直接不改。
+//  v1.0.2 起 gServerPort / gServerRunning 由 serverURL hook 从实例直接读，
+//  本身就是比 connect 更硬的证据；探测退化为「优先拿真实端口」的手段。
+//  真正要防的只有一种情况：服务已停止、界面残留 unknown 时凭空填假地址，
+//  这由 my_stop 清零 gServerPort / gServerRunning 来兜住。
 static BOOL PortIsListeningAddr(struct in_addr a, NSUInteger port) {
     if (!port || port > 65535) return NO;
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -808,14 +875,18 @@ static NSUInteger ResolveLivePort(NSString *cur, NSString *localIP) {
             return cand[i];
         }
     }
-    // 一个都没连上：若 start hook 亲手记过端口仍采信（hook 是直接证据）；
-    // 但 stop hook 已把它清零时绝不能凭空补一个地址。
+    // 探测不到 ≠ 服务没跑。serverURL hook 读到的实例 port / isRunning
+    // 是直接证据，有其一就允许写回（用户实测「传输功能一直正常」）。
     if (gServerPort) {
-        LOG("端口自证: 未探测到 LISTEN，但 start hook 记录过 %lu，采信",
+        LOG("端口自证: 未探测到 LISTEN，但实例 port=%lu 是直接证据，采信",
             (unsigned long)gServerPort);
         return gServerPort;
     }
-    LOG("端口自证: 无端口在 LISTEN 且无 start 记录 → 判定服务未运行，不改地址");
+    if (gServerRunning) {
+        LOG("端口自证: 未探测到 LISTEN，但 isRunning=YES，用 8080 兜底");
+        return 8080;
+    }
+    LOG("端口自证: 无端口在 LISTEN，且 port / isRunning 都无证据 → 不改地址");
     return 0;
 }
 
@@ -832,9 +903,8 @@ static BOOL AddressLooksBroken(NSString *s) {
     return !IsPlausibleIPAddress(host);
 }
 
-// 在 App 写完地址之后调用。三个条件缺一不可：
-//   ① 地址本身是坏的（占位词 / 非法 IP）  ② 枚举得到本机 IP
-//   ③ 端口实测在 LISTEN（或 start hook 有直接记录）
+// 在 App 写完地址之后调用（v1.0.2 起降为**兜底**，主力是 my_serverURL）。
+// 三个条件：① 地址本身是坏的  ② 枚举得到本机 IP  ③ 端口/运行状态有证据。
 // 绝不覆盖 WiFi 下本来就正常的地址，也绝不在停止服务后凭空填地址。
 static void RewriteAddressIfNeeded(id page) {
     if (!page || !gEnableIPFix) return;
@@ -1056,25 +1126,28 @@ static void OkaWiFiInit(void) {
                 LOG("× 找不到 _GCDWebServerGetPrimaryIPAddress（IP 修正不可用）");
             }
 
-            // 顺便记端口
+            // ★ v1.0.2 主力：ObjC 方法层修正 serverURL。
+            // 不用 RTLD_NOLOAD —— 那就只是「查一下」，类没注册时不会真的加载；
+            // 用 RTLD_LAZY 才能确保 framework 被加载、类被 runtime 注册。
             Class gws = NSClassFromString(@"GCDWebServer");
             if (!gws) {
-                // GCDWebServer 在独立 framework 里，主类可能还没被 runtime 注册。
-                // Bundle 已经链接它（LC_LOAD_DYLIB 里有 @rpath/GCDWebServer.framework），
-                // 所以 dlopen 只是保险，不做也没关系。
-                dlopen("@rpath/GCDWebServer.framework/GCDWebServer", RTLD_LAZY | RTLD_NOLOAD);
+                dlopen("@rpath/GCDWebServer.framework/GCDWebServer", RTLD_LAZY);
+                dlopen("Frameworks/GCDWebServer.framework/GCDWebServer", RTLD_LAZY);
                 gws = NSClassFromString(@"GCDWebServer");
             }
             if (gws) {
+                HookInstanceMethod(gws, @selector(serverURL),
+                                   (IMP)my_serverURL, (void **)&orig_serverURL,
+                                   "-[GCDWebServer serverURL]");
                 HookInstanceMethod(gws, @selector(startWithPort:bonjourName:),
                                    (IMP)my_startWithPort, (void **)&orig_startWithPort,
                                    "-[GCDWebServer startWithPort:bonjourName:]");
-                // 同时挂 stop，用于清 gServerPort（见 my_stop 的注释）
+                // 同时挂 stop，用于清 gServerPort / gServerRunning
                 HookInstanceMethod(gws, @selector(stop),
                                    (IMP)my_stop, (void **)&orig_stop,
                                    "-[GCDWebServer stop]");
             } else {
-                LOG("× 找不到 GCDWebServer 类（端口记录不可用，将用兜底 8080）");
+                LOG("× 找不到 GCDWebServer 类（serverURL 修正不可用，只剩 UI 兜底）");
             }
 
             // ---- 2b 兜底：UI 层地址写回 ----
