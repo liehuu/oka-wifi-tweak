@@ -4,7 +4,7 @@
 # deb 的 ar 归档格式非常简单，Python 标准库即可生成。
 # 用法：sh devkit/mkdeb.sh <arch> <version> <cpu>
 #   arch    : iphoneos-arm | iphoneos-arm64 | iphoneos-arm64e
-#   version : 1.1.3（与 .github/workflows/build.yml 的 env.VERSION 保持一致）
+#   version : 1.1.4（与 .github/workflows/build.yml 的 env.VERSION 保持一致）
 #   cpu     : arm64 | arm64e（仅用于产物命名，不参与打包逻辑）
 set -eu
 

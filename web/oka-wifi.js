@@ -1,5 +1,5 @@
 /*
- * OkaWiFi v1.1.2 — GCDWebUploader 网页端增强层
+ * OkaWiFi v1.1.4 — GCDWebUploader 网页端增强层
  *
  * 注入方式：由 Tweak.xm hook +[GCDWebServerDataResponse responseWithHTMLTemplate:variables:]
  *          把本文件 + oka-wifi.css 追加到 epilogue 变量里，随首页 HTML 一起下发。
@@ -18,6 +18,16 @@
  *     的响应源头原地 sort，文件夹置顶、组内按名称自然序。
  *   · 顶部紧凑：header 模板变量那行大标题 + 30px 工具栏上边距把文件列表顶得太靠下，
  *     用 body.oka-compact 作用域收紧，标题保留为一行小字。
+ *
+ * v1.1.4 修复（真机反馈：勾选 A 删除/移动后，下次勾选 B 点移动，「已选择项目」里仍有 A）：
+ *   根因是 selected 保存的是完整 path，而列表重建后没有清空它：
+ *     · 原版「删除」按钮走的是原版 _reload，我们的包装只排序、不清选择；
+ *     · 移动后文件 path 已变，旧 path 匹配不到新行 —— DOM 上看不到勾选，
+ *       但集合里还留着，下次移动就把它一起列出来（幽灵项）。
+ *   修法两道：
+ *     ① 每次 GET list 响应到达（删除/移动/上传/新建/切目录/手动刷新都会走）
+ *        就重置选择，DOM 与集合始终一致；
+ *     ② 打开移动弹窗时只认当前列表里真实存在的行，幽灵项顺手剔除。
  *
  * 设计约束：
  *   1. 原生 "Upload Files" 按钮 / #fileupload 的点击选择流程完全不动；
@@ -114,7 +124,13 @@
     var jq = origAjax.apply(this, arguments);
     if (isListGet(arguments) && jq && typeof jq.done === 'function') {
       // 先于原版的 .done 注册，jQuery Deferred 按注册顺序执行
-      jq.done(function (data) { sortListingInPlace(data); });
+      jq.done(function (data) {
+        sortListingInPlace(data);
+        // 列表即将被原版重建：选择必须一起重置。
+        // 删除（原版 .button-delete）/ 移动 / 上传 / 新建 / 切目录 / Refresh
+        // 都会走这条路径，漏一次就会留下"幽灵选中"。
+        resetSelectionOnReload();
+      });
     }
     return jq;
   };
@@ -618,6 +634,32 @@
   // ---------------------------------------------------------------------
   var selected = {};   // path -> {path,name,isDir}
 
+  // 列表每次重建都重置选择。selected 存的是完整 path，删除/移动后这些 path
+  // 可能已经不存在；不清空的话，下次打开移动弹窗仍会把它们列成"已选择项目"。
+  // 由 $.ajax 的 list done 统一调用，覆盖删除/移动/上传/新建/切目录/刷新。
+  function resetSelectionOnReload() {
+    selected = {};
+    syncSelectionUI();
+  }
+
+  // 只返回当前列表里真实存在的选中项，并顺手剔除幽灵 path。
+  // 第二道防线：即使某条刷新路径漏了重置，也不会把已不存在的文件带进移动批次。
+  function liveSelectedItems() {
+    var keys = Object.keys(selected);
+    var present = {};
+    $('#listing').find('tr.row-file').each(function () {
+      var d = $(this).data() || {};
+      if (d.path) { present[d.path] = true; }
+    });
+    var live = [];
+    for (var i = 0; i < keys.length; ++i) {
+      var it = selected[keys[i]];
+      if (it && present[it.path]) { live.push(it); }
+      else { delete selected[it.path]; }
+    }
+    return live;
+  }
+
   function injectChecks() {
     var listing = document.getElementById('listing');
     if (!listing) { return; }
@@ -688,7 +730,16 @@
       });
       syncSelectionUI();
     });
-    $('#oka-select-none').on('click', function () { selected = {}; syncSelectionUI(); });
+    $('#oka-select-none').on('click', function () { resetSelectionOnReload(); });
+
+    // 关闭移动弹窗即视为这次操作结束：清掉选择与待移动清单。
+    // 否则「勾 A → 开弹窗看一眼 → 关掉 → 勾 B → 再开」会看到 A 还在里面。
+    $('#move-modal').on('hidden.bs.modal', function () {
+      resetSelectionOnReload();
+      pendingMove = [];
+      $('#oka-move-items').html('<span class="oka-hint">未选中任何项目</span>');
+      $('#oka-move-count').text(0);
+    });
   }
 
   // ---------------------------------------------------------------------
@@ -762,9 +813,10 @@
 
   function openEnhancedMove(tr) {
     var d = $(tr).data() || {};
-    var keys = Object.keys(selected);
-    if (keys.length) {
-      pendingMove = keys.map(function (k) { return selected[k]; });
+    // 只认当前列表里真实存在的选中项：删除/移动后残留的旧 path 不能带进来。
+    var live = liveSelectedItems();
+    if (live.length) {
+      pendingMove = live;
     } else if (d.path) {
       pendingMove = [{ path: d.path, name: d.name || baseName(d.path), isDir: (d.size == null) }];
     } else {
@@ -802,8 +854,7 @@
         var cls = fail ? 'danger' : 'success';
         $('#oka-move-result').html('<div class="alert alert-' + cls + '">' + msg + '</div>');
         showResult(cls, msg);
-        selected = {};
-        syncSelectionUI();
+        resetSelectionOnReload();
         // 不调用 renderMoveItems()：把「本次移动 N 项」保留为刚移动的批次，
         // 清零成「未选中任何项目」会和上面的成功汇总并排看着像失败。
         reload();
