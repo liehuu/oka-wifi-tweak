@@ -86,8 +86,12 @@ codesign --force --sign - "$BUILD/$NAME.dylib"
 
 # ---------- 3) 架构硬闸门 ----------
 echo "--- dylib ---"
-file "$BUILD/$NAME.dylib"
-xcrun lipo -info "$BUILD/$NAME.dylib"
+# ★ 这两条**只**是诊断输出，不是判据，必须容错：
+#   set -e 下，命令不存在（例如 Windows Git Bash 没有 file）会让整个
+#   构建在这一行直接退出，而它本来根本不该有否决权。
+#   真判据在下面的 verify-deb.py --check-macho。
+command -v file >/dev/null 2>&1 && file "$BUILD/$NAME.dylib" || true
+xcrun lipo -info "$BUILD/$NAME.dylib" 2>/dev/null || true
 
 # ★★ 不能用 `lipo -info | grep -q "$CPU"`：
 #   arm64e 的 lipo 输出是 "Non-fat file: x is architecture: arm64e"，
@@ -100,26 +104,30 @@ xcrun lipo -info "$BUILD/$NAME.dylib"
 # 老版本 cctools 没有 -archs，退化为解析 lipo -info（取最后一个词）。
 # ★ 两个变量都要在 if 之前初始化：set -u 下引用未定义变量会直接退出，
 #   而这条路径只在旧工具链上才走到，平时测不出来。
+#
+# ★★ lipo 的输出只用来**记录**，不再作为判据。
+#   真正的判据交给 devkit/verify-deb.py 里的 read_macho()：
+#   直接读 Mach-O 头的 cputype/cpusubtype 做整数比较。
+#   原因有两个：
+#     1) lipo -info 输出是句子，`grep -q arm64` 对 arm64e 必然假通过
+#        （"arm64e" 包含 "arm64"）—— 这个假闸门本工程已经栽过一次；
+#     2) lipo 只在 macOS 有，本地无法复现，判据等于只在 CI 生效。
+#   多个架构时 lipo -archs 可能输出 "arm64 arm64e" 也可能 "arm64,arm64e"，
+#   tr ' ' '\n' 对付不了逗号，所以连这个解析都不该依赖。
 ARCH_LIST=""
-ARCH_ACTUAL=""
 if ARCH_LIST="$(xcrun lipo -archs "$BUILD/$NAME.dylib" 2>/dev/null)" && [ -n "$ARCH_LIST" ]; then
-  ARCH_ACTUAL="$(printf '%s' "$ARCH_LIST" | tr ' ' '\n' | tail -1)"
+  :
 else
-  ARCH_LIST="$(xcrun lipo -info "$BUILD/$NAME.dylib" | sed 's/.*: *//')"
-  ARCH_ACTUAL="$(printf '%s' "$ARCH_LIST" | tr ' ' '\n' | tail -1)"
+  ARCH_LIST="$(xcrun lipo -info "$BUILD/$NAME.dylib" | sed 's/.*: *//' || echo '?')"
 fi
+echo "lipo 报告: [$ARCH_LIST]（仅供参考，判据见下方 verify-deb.py）"
 
-echo "ARCH_LIST=[$ARCH_LIST] ARCH_ACTUAL=$ARCH_ACTUAL (expect $CPU)"
-
-NARCH="$(printf '%s' "$ARCH_LIST" | wc -w | tr -d ' ')"
-# 单架构产物必须是**恰好一个**架构名，且与预期整词相等。
-# 这里不用"包含"判断，避免 arm64 / arm64e 互相冒充。
-if [ "$ARCH_ACTUAL" != "$CPU" ] || [ "$NARCH" != "1" ]; then
-  echo "✗ 架构不匹配：列表=[$ARCH_LIST] 共 $NARCH 个，末项='$ARCH_ACTUAL'，期望单个 '$CPU'"
-  echo "  （arm64e 与 arm64 是不同的 cpusubtype，混了会装了不加载）"
-  exit 1
-fi
-echo "✓ 架构精确匹配（$CPU，单切片）"
+# 权威判据：读 Mach-O 头，cpusubtype 整值相等（arm64=0 / arm64e=2，
+# 且 arm64e 的真实值带 capability 高位 0x80000002，查低 24 位）。
+# 这一段与 CI 的 Verify deb 步骤用的是**同一份代码**，不会出现
+# 「本地过了 CI 挂」或「CI 过了真机不加载」。
+python3 "$ROOT/devkit/verify-deb.py" --check-macho "$BUILD/$NAME.dylib" --expect-cpu "$CPU" \
+  || { echo "✗ dylib 架构/签名不合预期，中止"; exit 1; }
 
 # 额外核验 cpusubtype：arm64e 的 Mach-O cpusubtype 实测为 0x80000002
 # （高字节是 capability 位），otool 只显示 2。仅作记录，不做硬判据 ——

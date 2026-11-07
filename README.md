@@ -184,8 +184,45 @@ sh devkit/build.sh arm64  iphoneos-arm    1.0.0   # 传统 rootful
 7. **dylib 必须 755 且带 `LC_CODE_SIGNATURE`。** 644 或无签名的 dylib 会被
    ellekit / RootHide 加载器静默跳过，表现是「装了完全没反应」而 dpkg 不报错。
 
-`devkit/build.sh` 里这四条闸门全部是**硬失败**（`exit 1`），不是警告。
-且都做过反向注入验证：注入缺陷 → 必须报错且不产出坏包 → 还原 → 复跑干净。
+8. **`$CPU，` 在 macOS 上会 `unbound variable`。** 这是 CI run `42346759489`
+   的真实失败：编译和 codesign 都成功了，卡在 `build.sh` 的一行 `echo`。
+
+   ```sh
+   echo "✓ 架构精确匹配（$CPU，单切片）"     # ✗ 炸
+   echo "✓ 架构精确匹配（${CPU}，单切片）"   # ✓ 好
+   ```
+
+   bash 3.2（macOS 自带）用 `legal_variable_char()` → BSD libc 的 `isalnum()`
+   判断变量名边界，UTF-8 locale 下把中文全角标点的首字节 `0xEF` 判成「字母」，
+   于是变量名被解析成 `CPU\xEF`；`set -u` 一查没有这个变量就退出。
+   报错文本里 `0xEF` 不可打印，显示成 `CPU: unbound variable`，
+   看起来就像变量名本来就叫 `CPU`，极难定位。
+   **本机 bash 5 / dash 的变量名解析是严格 ASCII，本地跑不出来**，
+   只有 macOS 会炸。→ 一律写 `${VAR}`；并加 `devkit/check-shell.py` 静态兜住。
+
+9. **YAML 里不能内嵌带缩进的 Python heredoc。** 曾经把 deb 校验写在
+   `run: |` 的 `<<'PY'` 里，两个要求互斥：
+   YAML block scalar 以「第一个非空行的缩进」为基准，内容顶格会让块立即结束
+   （`ScannerError`）；而 Python heredoc 体带缩进又必然
+   `IndentationError`。→ 校验逻辑外置成 `devkit/verify-deb.py`，
+   workflow 里只留一行调用，本地也能直接跑。
+
+### 闸门（全部硬失败，不是警告）
+
+| 脚本 | 作用 | 在哪跑 |
+|---|---|---|
+| `devkit/check-shell.py` | 拦 `$VAR` 后紧跟非 ASCII、以及 bash 4+ 专有语法（`declare -A`、`${v,,}`、`&>>`、`\|&`、`mapfile`、`wait -n`） | CI 独立步骤；本地可跑 |
+| `devkit/verify-deb.py --check-macho` | 编译后立刻读 Mach-O 头的 `cputype/cpusubtype` 做**整数比较**，并检查 `LC_CODE_SIGNATURE` | `build.sh` 内；CI 同代码 |
+| `devkit/verify-deb.py <deb> <scheme> <arch>` | 校验 deb 的 ar 结构、Architecture、载荷路径、DEBIAN 隔离、PAX 头、架构、签名、权限（共 22 项） | CI 的 Verify deb 步骤；本地可跑 |
+| `devkit/selftest-verify.py` | **证明上面这个校验器会失败**：15 个用例（正向 3 / 反向 12），用代码拼出的 Mach-O 与 deb，含「arm64e 冒充 arm64」「缺签名」「PAX」「权限错」等 | CI 独立步骤；本地可跑 |
+
+`verify-deb.py` 用纯标准库自己解析 Mach-O，不调 `lipo`/`otool`：
+`lipo -info` 输出的是句子，`grep -q arm64` 对 `arm64e` 必然假通过（坑 2），
+而且 `lipo` 只有 macOS 有，判据等于只在 CI 生效。`--check-macho` 与 CI 的
+deb 校验共用同一份代码，不会出现「本地过了 CI 挂」或「CI 过了真机不加载」。
+
+所有闸门都做过**反向注入三段式**：注入缺陷 → 必须报错且不产出坏包 →
+还原 → 复跑干净。`selftest-verify.py` 把这件事固化成可重复执行的测试。
 
 ### GitHub Actions
 
@@ -257,12 +294,14 @@ idevicesyslog | grep OkaWiFi
 | 蜂窝下按钮还是不出现 | flags 没被改写 | 看是否有 `flags 0x... -> ...` 日志；没有说明 `SCNetworkReachabilityGetFlags` 的 hook 没命中（可能是 App 静态链接了 SystemConfiguration 的私有副本，改用层 2 兜底，看 `viewDidLoad` 是否被 hook） |
 | 日志没有 `✓ 解析到 _swift_unknownObjectWeakLoadStrong` | libswiftCore 没解析到该符号 | 此时所有 Swift weak outlet 都读不到（`GetIvar` 返回 nil），功能降级为「仅按钮放行」，不崩。检查 App 是否确实用 Swift weak 存 outlet（1.7.5 是） |
 | 快捷菜单点了没反应，日志停在「已在运行」 | `gServerPort` 未清零 | 已 hook `-[GCDWebServer stop]` 清零。若 App 走了别的停服路径，会误判为已在运行；日志会打 `已在运行 (url=... port=...)`，据此判断 |
+| CI 报 `CPU: unbound variable`，但编译和签名都成功了 | 某行 `echo` 里写了 `$CPU，`（后跟全角标点） | macOS 的 bash 3.2 把 `0xEF` 吞进变量名。改 `${CPU}`，并跑 `python3 devkit/check-shell.py .` 扫全仓库 |
+| CI 的 Verify deb 步骤报 `IndentationError` 或 YAML `ScannerError` | 在 `run: \|` 里内嵌了 Python heredoc | 这两个错误互斥、无解：YAML 要缩进、Python 要顶格。校验逻辑必须外置成 `.py` 文件 |
 
 ---
 
 ## 五、已知限制（如实说明）
 
-1. **编译环境是 macOS，本机（Windows）无法验证真实编译。** 代码做了静态审查（括号平衡、函数定义顺序、函数指针签名与赋值、ARC 桥接配对、格式串类型），`devkit/build.sh` / `devkit/mkdeb.sh` 的 shell 语法与打包链路已在本地实测通过（三种 scheme 的 deb 结构、Architecture 字段、载荷路径、权限全部核验），但 `clang` 编译与 `codesign` 只能在 macOS 上发生。首次 CI 可能还有个别 warning 级别的类型问题。
+1. **编译环境是 macOS，本机（Windows）无法验证真实编译。** 代码做了静态审查（括号平衡、函数定义顺序、函数指针签名与赋值、ARC 桥接配对、格式串类型）。本机已用「桩替换 `xcrun`」把 `build.sh` 三个变体从编译一路跑到打包全部 `exit=0`，并在本地用 `verify-deb.py` 把三个 deb 的 22 项检查全部跑通；`shell` 语法、打包链路、校验判据的正反方向都已实测。但**真正的 `clang` 编译与 `codesign` 只能在 macOS 上发生**——桩产出的 dylib 不是可运行代码，本地 deb 也**不能装到手机上**。唯一可交付产物必须来自 CI。
 2. **后台保活依赖音频后台模式。** App 的 `UIBackgroundModes` 是 `audio`/`fetch`，用音频钉住进程是可行的，但 iOS 会占一个「正在播放」状态（音量 0，听不到）。若你介意，可在 prefs 里关掉——但那会导致切后台后端口失效。
 3. **`_GCDWebServerGetPrimaryIPAddress` 靠符号名 hook。** 若 App 后续版本换了 GCDWebServer 版本或静态链接，符号可能找不到（日志会明确报 `×`）。此时功能 2b 降级为「能开但地址空」，功能 2a 与功能 1 不受影响。
 4. **地址优先级是启发式。** `bridge* > en* > pdp_ip*` 覆盖了绝大多数场景；若你同时开了 VPN 且 VPN 也建了 `bridge` 接口，可能选错。日志会打印所有候选接口和分数，便于判断。
@@ -277,11 +316,14 @@ wifitweak/
 ├── Tweak.xm                    # 全部实现（约 860 行，含逐条逆向依据注释）
 ├── OkaWiFi.plist               # CydiaSubstrate 过滤：只注入 com.blinker.documents
 ├── devkit/
-│   ├── build.sh                # 零 Theos 编译：xcrun clang + codesign + 4 组闸门
+│   ├── build.sh                # 零 Theos 编译：xcrun clang + codesign + 闸门
 │   ├── mkdeb.sh                # 纯 Python 拼 ar 归档（不依赖 dpkg-deb）
+│   ├── check-shell.py          # 静态闸门：bash 3.2 兼容性（本地也能跑）
+│   ├── verify-deb.py           # deb / 裸 dylib 校验（纯标准库，自己读 Mach-O）
+│   ├── selftest-verify.py      # 上面这个校验器的自测：15 用例，证明它会失败
 │   └── include/
 │       └── substrate.h         # 最小 MSHookFunction 声明（Theos 的 vendor/include 替代）
-├── .github/workflows/build.yml # 三变体矩阵 CI
+├── .github/workflows/build.yml # 三变体矩阵 CI（不内嵌 Python heredoc）
 ├── legacy/                     # 旧 Theos 方案，已弃用仅作参考
 │   ├── Makefile
 │   ├── build-theos.sh

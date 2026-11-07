@@ -61,6 +61,26 @@ jobs:
           xcrun --sdk iphoneos --show-sdk-path
           xcrun --sdk iphoneos --show-sdk-version
           clang --version | head -2
+          # bash 版本也是诊断信息：CI 是 3.2，本机是 5.x，
+          # 两者变量名解析规则不同（见 devkit/check-shell.py 的说明）
+          bash --version | head -1
+
+      # 静态闸门：本机是 bash 5 / dash，跑不出 macOS bash 3.2 的问题，
+      # 只能靠静态检查兜住。本次真实事故就是 $CPU 后跟全角逗号导致
+      # "CPU: unbound variable"（编译和签名都成功了，卡在这一行）。
+      - name: Shell compatibility gate (bash 3.2)
+        run: |
+          set -eu
+          python3 devkit/check-shell.py .
+
+      # 校验器自身的自测：证明 verify-deb.py 的判定**会失败**。
+      # 一个从不失败的检查等于没有检查 —— 这条就是为了防这个。
+      # 15 个用例（正向 3 / 反向 12）全部用代码里拼出来的 Mach-O 与 deb，
+      # 不依赖 lipo/otool，因此在 macOS 与本地 Windows 上结果一致。
+      - name: Verify-deb selftest
+        run: |
+          set -eu
+          python3 devkit/selftest-verify.py
 
       - name: Build ${{ matrix.scheme }}
         run: |
@@ -85,7 +105,8 @@ jobs:
                 echo "::error::${line//%/%%}"
               done < errs.txt
             else
-              # 没有 error: 关键字说明卡在 shell 层（例如 [ -f ] 检查），
+              # 没有 error: 关键字说明卡在 shell 层（例如 set -u 触发的
+              # unbound variable，或 [ -f ] 之类的检查），
               # 这种情况把最后几行原样抛出来。
               while IFS= read -r line; do
                 echo "::error::[shell] ${line//%/%%}"
@@ -103,114 +124,21 @@ jobs:
           grep -nE "warning:" build.log | head -40 || echo "（无警告）"
 
       # 产物校验：不只看"文件生成了"，要看 deb 内部结构真的对。
+      #
+      # ★★ 判据全部放在 devkit/verify-deb.py 里，这里只调一行。
+      #   为什么不在 YAML 里内嵌 heredoc：YAML 的 run: | block scalar
+      #   以「第一个非空行的缩进」为基准，内容顶格会让块立即结束（ScannerError）；
+      #   而 Python heredoc 体又不能带缩进（IndentationError）。
+      #   这两个要求互斥，无法在 YAML 里同时满足，只能外置成脚本。
+      #   附带好处：本地能拿 .build/out/*.deb 直接跑，判据与 CI 完全一致。
       - name: Verify deb
         run: |
           set -eu
           DEB=$(ls .build/out/*.deb | head -1)
           echo "deb: $DEB"
           ls -l "$DEB"
-
-          # 1) Architecture 字段必须与预期一致，否则用户机器上装不上
-          ARCH=$(python3 - "$DEB" <<'PY'
-          import sys, tarfile, gzip, io
-          raw = open(sys.argv[1], 'rb').read()
-          # ar 归档：全局头 8 字节，然后每个成员 60 字节头
-          off = 8
-          while off + 60 <= len(raw):
-              hdr = raw[off:off+60]
-              name = hdr[0:16].decode().strip()
-              size = int(hdr[48:58].decode().strip())
-              body = raw[off+60:off+60+size]
-              if name.startswith('control.tar'):
-                  tf = tarfile.open(fileobj=io.BytesIO(gzip.decompress(body)))
-                  ctl = tf.extractfile('./control').read().decode()
-                  for line in ctl.splitlines():
-                      if line.startswith('Architecture:'):
-                          print(line.split(':', 1)[1].strip())
-                          sys.exit(0)
-              off += 60 + size + (size % 2)
-          sys.exit(1)
-          PY
-          )
-          echo "Architecture = $ARCH (expect ${{ matrix.arch }})"
-          if [ "$ARCH" != "${{ matrix.arch }}" ]; then
-            echo "::error::Architecture mismatch: got '$ARCH', want '${{ matrix.arch }}'"
-            exit 1
-          fi
-
-          # 2) 载荷路径必须符合该 scheme
-          if [ "${{ matrix.scheme }}" = "rootless" ]; then
-            EXPECT_PATH="./var/jb/Library/MobileSubstrate/DynamicLibraries/OkaWiFi.dylib"
-          else
-            EXPECT_PATH="./Library/MobileSubstrate/DynamicLibraries/OkaWiFi.dylib"
-          fi
-          echo "expect payload: $EXPECT_PATH"
-          python3 - "$DEB" "$EXPECT_PATH" <<'PY'
-          import sys, tarfile, gzip, lzma, io
-          deb, want = sys.argv[1], sys.argv[2]
-          raw = open(deb, 'rb').read()
-          off = 8
-          names = []
-          while off + 60 <= len(raw):
-              hdr = raw[off:off+60]
-              name = hdr[0:16].decode().strip()
-              size = int(hdr[48:58].decode().strip())
-              body = raw[off+60:off+60+size]
-              if name.startswith('data.tar'):
-                  if name.endswith('.xz'):
-                      blob = lzma.decompress(body)
-                  elif name.endswith('.gz'):
-                      blob = gzip.decompress(body)
-                  else:
-                      blob = body
-                  tf = tarfile.open(fileobj=io.BytesIO(blob))
-                  names = [m.name for m in tf.getmembers()]
-              off += 60 + size + (size % 2)
-          for n in names:
-              print('   ', n)
-          if want not in names:
-              print('::error::data.tar 里没有 %s' % want); sys.exit(1)
-          if './DEBIAN/postinst' in names:
-              print('::error::DEBIAN 混进了 data.tar（rootless 上会整个包装不上）'); sys.exit(1)
-          print('  ✓ 载荷路径正确')
-          PY
-
-          # 3) dylib 必须是目标 CPU 切片（arch 不对 → 装了不加载）
-          rm -rf .verify && mkdir -p .verify
-          python3 - "$DEB" <<'PY'
-          import sys, tarfile, lzma, gzip, io
-          raw = open(sys.argv[1], 'rb').read()
-          off = 8
-          while off + 60 <= len(raw):
-              hdr = raw[off:off+60]
-              name = hdr[0:16].decode().strip()
-              size = int(hdr[48:58].decode().strip())
-              body = raw[off+60:off+60+size]
-              if name.startswith('data.tar'):
-                  # 按扩展名选解压器，别写死 lzma：mkdeb.sh 哪天改成 .gz 就会崩在这里
-                  if name.endswith('.xz'):
-                      blob = lzma.decompress(body)
-                  elif name.endswith('.gz'):
-                      blob = gzip.decompress(body)
-                  else:
-                      blob = body
-                  tf = tarfile.open(fileobj=io.BytesIO(blob))
-                  for m in tf.getmembers():
-                      if m.name.endswith('OkaWiFi.dylib'):
-                          open('.verify/OkaWiFi.dylib','wb').write(tf.extractfile(m).read())
-                          sys.exit(0)
-              off += 60 + size + (size % 2)
-          sys.exit(1)
-          PY
-          xcrun lipo -info .verify/OkaWiFi.dylib
-          xcrun lipo -info .verify/OkaWiFi.dylib | grep -q "${{ matrix.cpu }}" \
-            || { echo "::error::dylib 缺 ${{ matrix.cpu }} 切片"; exit 1; }
-
-          # 4) 签名必须存在（无 LC_CODE_SIGNATURE 的 dylib 会被 ellekit 跳过）
-          xcrun codesign -dv .verify/OkaWiFi.dylib 2>&1 | head -5 || true
-          xcrun otool -l .verify/OkaWiFi.dylib | grep -q LC_CODE_SIGNATURE \
-            || { echo "::error::dylib 没有 LC_CODE_SIGNATURE，装上去不会被加载"; exit 1; }
-          echo "✓ deb 校验全部通过"
+          python3 devkit/verify-deb.py "$DEB" "${{ matrix.scheme }}" "${{ matrix.arch }}" \
+            --expect-cpu "${{ matrix.cpu }}"
 
       - name: Report packages
         run: |

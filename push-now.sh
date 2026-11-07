@@ -45,7 +45,9 @@ case "$CODE" in
       exit 1
       ;;
   *)
-      echo "? 非预期状态码 $CODE，仍尝试推送"
+      # ★ ${CODE} 必须带花括号：裸 $CODE 后紧跟全角标点时，
+      #   macOS 的 bash 3.2 会把标点的首字节吞进变量名 → unbound variable
+      echo "? 非预期状态码 ${CODE}，仍尝试推送"
       ;;
 esac
 echo
@@ -62,7 +64,8 @@ if [ $RC -eq 0 ]; then
   echo "    gh run list --limit 3"
   echo "    gh run watch"
 else
-  echo "✗ 推送失败（exit $RC）。若提示认证问题，先修凭据："
+  # ★ 同上：${RC} 带花括号，避免全角标点被吞进变量名
+  echo "✗ 推送失败（exit ${RC}）。若提示认证问题，先修凭据："
   echo "    git config --system credential.helper manager"
   exit $RC
 fi

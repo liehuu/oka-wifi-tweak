@@ -12,6 +12,10 @@ obj/
 .build/
 .verify/
 
+# Python 字节码（devkit/*.py 被 py_compile / import 后产生）
+__pycache__/
+*.pyc
+
 # 系统
 .DS_Store
 Thumbs.db
