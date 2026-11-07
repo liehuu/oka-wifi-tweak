@@ -73,11 +73,24 @@ jobs:
           RC=${PIPESTATUS[0]:-$?}
           echo "build.sh exit=$RC"
           if [ "$RC" -ne 0 ]; then
-            # 把编译器报错逐条打成 ::error::，否则 GitHub 只显示 "exit code 1"，
-            # 真实原因藏在折叠的日志里 —— 排查时全靠它。
-            echo "::group::编译器错误摘要"
-            grep -nE "error:|fatal error|✗" build.log | head -40 || echo "(build.log 里没有 error: 关键字)"
+            # ★ 必须逐行用 ::error:: 前缀输出，普通 echo 不会进 annotations，
+            #   而 annotations 是唯一不展开日志也能看到的内容（上一版就栽在这）。
+            echo "::group::build.log 尾部 60 行"
+            tail -60 build.log || true
             echo "::endgroup::"
+
+            grep -nE "error:|fatal error|✗|Failed" build.log | head -15 > errs.txt || true
+            if [ -s errs.txt ]; then
+              while IFS= read -r line; do
+                echo "::error::${line//%/%%}"
+              done < errs.txt
+            else
+              # 没有 error: 关键字说明卡在 shell 层（例如 [ -f ] 检查），
+              # 这种情况把最后几行原样抛出来。
+              while IFS= read -r line; do
+                echo "::error::[shell] ${line//%/%%}"
+              done <<< "$(tail -8 build.log)"
+            fi
             echo "::error::build.sh 退出码 $RC"
             exit "$RC"
           fi
