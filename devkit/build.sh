@@ -182,12 +182,13 @@ grep -aq "_swift_unknownObjectWeakLoadStrong" "$BUILD/$NAME.dylib" \
        echo "  排查：Tweak.xm 里 dlsym(RTLD_DEFAULT, \"_swift_unknownObjectWeakLoadStrong\") 是否还以字符串字面量形式存在"
        exit 1; }
 
-# 功能 3（v1.1.2）：网页增强注入层
+# 功能 3（v1.1.3）：网页增强注入层（前端资源自 v1.1.2 起未改动）
 # 前 4 条是 ObjC 侧：类方法 hook 的 selector、幂等标记、类名常量。
 # 其余来自内联的 kOkaWebJS / kOkaWebCSS —— 丢了说明 gen-webassets.py 的
 # 产物没被编进来，页面会照常打开但增强功能全部不存在，属于"静默功能缺失"。
 # v1.1.1 的交互是「全页面拖放 + 复用原版 #move-modal」；
 # v1.1.2 再加两条：sortListingInPlace（列表排序）与 oka-compact（顶部紧凑）。
+# v1.1.3 不动前端，只移除诊断日志（见下方负向闸门）。
 for sym in responseWithHTMLTemplate:variables: initWithHTMLTemplate:variables: \
            OKA-WIFI-INJECTED GCDWebServerDataResponse \
            oka-list-tools onMoveButtonCapture HTML_MOVE_ENHANCE move-confirm \
@@ -206,6 +207,22 @@ for stale in oka-dropzone oka-move-modal oka-move-open oka-batch-bar; do
   fi
 done
 echo "✓ 无 v1.1.0 独立拖放框 / 独立移动弹窗残留"
+
+# ---------- 4b) 诊断日志负向闸门（v1.1.3） ----------
+# 使用者不需要诊断日志：源码里不能有 LOG( / NSLog，编译产物里不能有
+# "[OkaWiFi]" 日志前缀，也不能再引用 _NSLog 未定义符号。
+# 光看源码"没写 NSLog"不算数 —— 必须从 dylib 原始字节反查，防止宏回流。
+if grep -nE '(^|[^A-Za-z_])LOG\(' "$ROOT/Tweak.xm" || grep -n 'NSLog' "$ROOT/Tweak.xm"; then
+  echo "✗ Tweak.xm 仍有诊断日志调用（v1.1.3 起已移除）"
+  exit 1
+fi
+for stale in '[OkaWiFi]' NSLog; do
+  if grep -aqF "$stale" "$BUILD/$NAME.dylib"; then
+    echo "✗ dylib 仍有诊断日志残留 ${stale}"
+    exit 1
+  fi
+done
+echo "✓ 无诊断日志残留（源码 + 产物双向）"
 
 # 目标 App 的过滤条件（写在 plist 里，但 dylib 里也应有类名常量）
 for sym in Blinker BNHttpServerPage; do

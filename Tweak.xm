@@ -91,7 +91,8 @@
 
 static NSString *const kPrefsPath = @"/var/mobile/Library/Preferences/com.oka.wifitweak.plist";
 
-#define LOG(fmt, ...) NSLog(@"[OkaWiFi] " fmt, ##__VA_ARGS__)
+// 诊断日志已移除（v1.1.3）：插件运行时不输出任何系统日志。
+// 功能逻辑不依赖日志，排错以实际功能表现为准。
 
 // 类查找：先试 mangled，再试 Swift 写法，最后按后缀遍历兜底
 static Class LookupClass(NSString *mangled, NSString *swiftName) {
@@ -137,9 +138,6 @@ static void LoadPrefs(void) {
     if (d[@"EnableIPFix"])       gEnableIPFix       = [d[@"EnableIPFix"] boolValue];
     if (d[@"EnableWebEnhance"])  gEnableWebEnhance  = [d[@"EnableWebEnhance"] boolValue];
     if (d[@"CopyURLOnShortcut"]) gCopyURLOnShortcut = [d[@"CopyURLOnShortcut"] boolValue];
-    LOG("prefs: shortcut=%d cellular=%d ipfix=%d web=%d copy=%d",
-        gEnableShortcut, gEnableCellular, gEnableIPFix,
-        gEnableWebEnhance, gCopyURLOnShortcut);
 }
 
 // 保存一份强引用，避免"无界面实例"被提前释放导致 httpServer 消失
@@ -163,7 +161,7 @@ static BOOL gServerRunning = NO;
 //  从桌面快捷方式开启后如果直接切后台，系统几秒内就挂起进程，
 //  GCDWebServer 的监听 socket 也随之停摆 —— 电脑就连不上了。
 //  这里用"后台播一段静音音频"把它钉在活跃态。App 包里自带 "Happy Dreams.mp3"，
-//  直接复用它（不用往包里加文件），拿不到就放弃并记日志。
+//  直接复用它（不用往包里加文件），拿不到就静默跳过。
 // ===========================================================================
 static void *gKeepAlivePlayer = NULL;   // AVAudioPlayer*
 static BOOL gKeepAliveOn = NO;
@@ -188,7 +186,7 @@ static void StartBackgroundKeepAlive(void) {
     }
 
     Class playerCls = NSClassFromString(@"AVAudioPlayer");
-    if (!playerCls) { LOG("× 没有 AVAudioPlayer，跳过保活"); return; }
+    if (!playerCls) { return; }
 
     NSString *path = [[NSBundle mainBundle] pathForResource:@"Happy Dreams" ofType:@"mp3"];
     id player = nil;
@@ -203,11 +201,8 @@ static void StartBackgroundKeepAlive(void) {
         ((void (*)(id, SEL, NSInteger))objc_msgSend)(player, @selector(setNumberOfLoops:), -1);
         ((void (*)(id, SEL, float))objc_msgSend)(player, @selector(setVolume:), 0.0f);
         BOOL ok = ((BOOL (*)(id, SEL))objc_msgSend)(player, @selector(play));
-        LOG("后台保活音频 %@ (path=%@)", ok ? @"已启动" : @"启动失败", path);
         gKeepAlivePlayer = (__bridge_retained void *)player;
         gKeepAliveOn = ok;
-    } else {
-        LOG("× 找不到 Happy Dreams.mp3，保活未启用");
     }
 }
 
@@ -225,7 +220,6 @@ static void StopBackgroundKeepAlive(void) {
         gKeepAlivePlayer = NULL;
     }
     gKeepAliveOn = NO;
-    LOG("后台保活已停止");
 }
 
 // ===========================================================================
@@ -297,12 +291,10 @@ static NSString *BestLocalIPAddress(BOOL includeIPv6) {
         if ([ip hasPrefix:@"127."]) continue;
         if ([ip hasPrefix:@"fe80:"]) continue;   // 链路本地，跨设备不可用
 
-        LOG("iface %.10s -> %@ (score %d)", ifa->ifa_name, ip, s);
         if (s > bestScore) { bestScore = s; best = ip; }
     }
     freeifaddrs(head);
 
-    if (best) LOG("BestLocalIPAddress = %@ (score %d)", best, bestScore);
     return best;
 }
 
@@ -327,17 +319,11 @@ static BOOL IsPlausibleIPAddress(NSString *s) {
 
 static NSString *my_GetPrimaryIPAddress(BOOL includeIPv6) {
     NSString *r = orig_GetPrimaryIPAddress ? orig_GetPrimaryIPAddress(includeIPv6) : nil;
-    // ★ 这条日志是定位「地址显示 unknown」的关键证据：
-    //   完全没有这行 → MSHookFunction 没打上 / 函数根本没被调用；
-    //   orig=(null) 且没有 fallback → BestLocalIPAddress 在真机上没枚举到可用接口。
-    LOG("GetPrimaryIPAddress orig=%@ (判定=%s)",
-        r, IsPlausibleIPAddress(r) ? "IP" : "非IP/空");
     if (!gEnableIPFix) return r;
     if (IsPlausibleIPAddress(r)) return r;     // 是合法 IP，原逻辑正常，不动
 
     NSString *ip = BestLocalIPAddress(includeIPv6);
-    if (ip) { LOG("GetPrimaryIPAddress fallback -> %@", ip); return ip; }
-    LOG("× BestLocalIPAddress 也没拿到地址，只能返回原值");
+    if (ip) { return ip; }
     return r;
 }
 
@@ -394,13 +380,11 @@ static NSURL *my_serverURL(id self, SEL _cmd) {
     if (!gServerRunning && !port) return url;
 
     NSString *ip = BestLocalIPAddress(NO);
-    if (!ip) { LOG("× serverURL 修正跳过：枚举不到本机 IP"); return url; }
+    if (!ip) { return url; }
     if (!port) port = gServerPort ? gServerPort : 8080;
 
     NSURL *fixed = [NSURL URLWithString:
                     [NSString stringWithFormat:@"http://%@:%lu/", ip, (unsigned long)port]];
-    LOG("serverURL 修正: 原=[%@] -> 新=[%@] (port=%lu running=%d)",
-        url, fixed, (unsigned long)port, gServerRunning);
     return fixed;
 }
 
@@ -436,10 +420,8 @@ static Boolean my_SCNRGetFlags(void *target, void *flags) {
     uint32_t f = *(uint32_t *)flags;
     if (!(f & (1u << 18))) return ok;          // 本来就不是蜂窝，不动
 
-    uint32_t before = f;
     f &= ~(1u << 18);                          // kSCNetworkReachabilityFlagsIsWWAN
     *(uint32_t *)flags = f;
-    LOG("flags 0x%08x -> 0x%08x (cleared IsWWAN)", before, f);
     return ok;
 }
 
@@ -693,16 +675,14 @@ static UIViewController *FindPage(UIViewController *root, int depth) {
 //  所以 `[[cls alloc] init]` 就是 App 自己创建这个页面的唯一正确方式。
 static UIViewController *MakeHeadlessPage(void) {
     Class cls = LookupClass(PAGE_CLASS_MANGLED, PAGE_CLASS_SWIFT);
-    if (!cls) { LOG("× 找不到 BNHttpServerPage 类"); return nil; }
-    LOG("找到页面类 %s", class_getName(cls));
+    if (!cls) { return nil; }
 
     UIViewController *page = nil;
     @try {
         // 走 -init（App 自己的 designated init），绝不能换成 initWithNibName:bundle:
         page = [[cls alloc] init];
         (void)page.view;                       // 触发 viewDidLoad，连好所有 outlet
-    } @catch (NSException *e) {
-        LOG("× 创建无界面页面失败: %@", e);
+    } @catch (NSException *e __unused) {
         return nil;
     }
     if (!page) return nil;
@@ -716,17 +696,9 @@ static UIViewController *MakeHeadlessPage(void) {
     //   changeWifiTransferStateAction: 真正强解包的是 httpServer。
     id hs = GetIvar(page, "httpServer");
     if (!hs) {
-        LOG("× httpServer 为空，放弃无界面页面（避免 brk）");
         return nil;
     }
     RetainObject(page);                        // 保住它，别被释放
-    // ★ ARC 下 id → void* 必须显式 __bridge，不能裸强转：
-    //     "cast of Objective-C pointer type 'id' to C pointer type 'void *'
-    //      requires a bridged cast"
-    //   这条是硬 error，不是 warning。（我上一轮为了消 -Wformat 加的
-    //   (void *)hs 就栽在这里，CI 直接编译失败。）
-    //   %p 只读地址、不做所有权转移，所以用 __bridge（不是 __bridge_retained）。
-    LOG("✓ 已创建无界面 BNHttpServerPage (httpServer=%p)", (__bridge void *)hs);
     return page;
 }
 
@@ -741,8 +713,6 @@ static BOOL my_startWithPort(id self, SEL _cmd, NSUInteger port, NSString *name)
     NSUInteger real = ((NSUInteger (*)(id, SEL))objc_msgSend)(self, @selector(port));
     if (real) gServerPort = real;
     if (ok) gServerRunning = YES;
-    LOG("GCDWebServer startWithPort:%lu name=%@ ok=%d realPort=%lu",
-        (unsigned long)port, name, ok, (unsigned long)gServerPort);
     return ok;
 }
 
@@ -755,7 +725,6 @@ static void my_stop(id self, SEL _cmd) {
     if (orig_stop) orig_stop(self, _cmd);
     gServerPort = 0;
     gServerRunning = NO;
-    LOG("GCDWebServer stop -> gServerPort 清零 / running=NO");
 }
 
 // 兜底算地址：自己的 IP + 记录到的端口
@@ -773,8 +742,8 @@ static NSString *FallbackServerURLString(void) {
 //  为什么必须有这一层：
 //    上面 hook _GCDWebServerGetPrimaryIPAddress 是「从源头修」，但它有两个
 //    失效点任何一个命中都会让界面停留在占位文案（真机实测显示 "unknown"）：
-//      1) MSHookFunction 在该 framework 上没真正打上桩（日志里仍会打 ✓ hook，
-//         因为那只代表 dlsym 找到了符号）；
+//      1) MSHookFunction 在该 framework 上没真正打上桩（dlsym 找到符号
+//         不等于桩已生效）；
 //      2) App 显示地址时压根不走 serverURL，而是自己另算了一个状态文案。
 //    而 serverURL 拿到 nil 就返回 nil（反汇编 0xEE94 / 0xEF3C 已确认），
 //    App 把「没有地址」渲染成占位词。
@@ -876,23 +845,17 @@ static NSUInteger ResolveLivePort(NSString *cur, NSString *localIP) {
     for (int i = 0; i < n; i++) {
         if (PortIsListeningAddr(lo, cand[i]) ||
             (hasLan && PortIsListeningAddr(lan, cand[i]))) {
-            LOG("端口自证: %lu 正在 LISTEN（候选第 %d 个）",
-                (unsigned long)cand[i], i + 1);
             return cand[i];
         }
     }
     // 探测不到 ≠ 服务没跑。serverURL hook 读到的实例 port / isRunning
     // 是直接证据，有其一就允许写回（用户实测「传输功能一直正常」）。
     if (gServerPort) {
-        LOG("端口自证: 未探测到 LISTEN，但实例 port=%lu 是直接证据，采信",
-            (unsigned long)gServerPort);
         return gServerPort;
     }
     if (gServerRunning) {
-        LOG("端口自证: 未探测到 LISTEN，但 isRunning=YES，用 8080 兜底");
         return 8080;
     }
-    LOG("端口自证: 无端口在 LISTEN，且 port / isRunning 都无证据 → 不改地址");
     return 0;
 }
 
@@ -921,14 +884,12 @@ static void RewriteAddressIfNeeded(id page) {
     if (!AddressLooksBroken(cur)) return;          // 正常，别动
 
     NSString *ip = BestLocalIPAddress(NO);
-    if (!ip) { LOG("× 地址修正跳过：枚举不到本机 IP"); return; }
+    if (!ip) { return; }
 
     NSUInteger port = ResolveLivePort(cur, ip);
     if (!port) return;   // 服务没在跑：unknown / 空白是正确状态，不造假地址
 
     NSString *url = [NSString stringWithFormat:@"http://%@:%lu", ip, (unsigned long)port];
-    LOG("地址修正: 原=[%@] -> 新=[%@] (port=%lu, 已自证)",
-        cur, url, (unsigned long)port);
 
     SEL setText = @selector(setText:);
     if ([tv respondsToSelector:setText]) {
@@ -990,7 +951,6 @@ static void StartWiFiTransfer(BOOL fromShortcut) {
     if (!page) page = MakeHeadlessPage();
 
     if (!page) {
-        LOG("× 没有可用页面，无法开启");
         if (fromShortcut) ShowResultAlert(nil, NO);
         return;
     }
@@ -999,8 +959,6 @@ static void StartWiFiTransfer(BOOL fromShortcut) {
     NSString *existing = URLTextFromPage(page);
     BOOL portLive = (gServerPort != 0);
     if (existing.length || portLive) {
-        LOG("已在运行 (url=%@ port=%lu)，不重复开启",
-            existing, (unsigned long)gServerPort);
         NSString *s = existing.length ? existing : FallbackServerURLString();
         if (fromShortcut && gCopyURLOnShortcut && s.length)
             UIPasteboard.generalPasteboard.string = s;
@@ -1012,12 +970,10 @@ static void StartWiFiTransfer(BOOL fromShortcut) {
 
     SEL toggle = NSSelectorFromString(@"changeWifiTransferStateAction:");
     if (![page respondsToSelector:toggle]) {
-        LOG("页面不响应 changeWifiTransferStateAction:");
         if (fromShortcut) ShowResultAlert(nil, NO);
         return;
     }
     ((void (*)(id, SEL, id))objc_msgSend)(page, toggle, nil);
-    LOG("已触发 changeWifiTransferStateAction:");
 
     // 如果是快捷方式启动的，用户在浏览器里传文件期间 App 会一直被切到后台，
     // 必须立刻挂上保活，否则进程被挂起、端口就断了。
@@ -1034,7 +990,6 @@ static void StartWiFiTransfer(BOOL fromShortcut) {
         NSString *s = URLTextFromPage(p);
         if (!s.length) s = FallbackServerURLString();
         if (s.length && gCopyURLOnShortcut) UIPasteboard.generalPasteboard.string = s;
-        LOG("最终地址: %@ (port=%lu)", s, (unsigned long)gServerPort);
         ShowResultAlert(s, gCopyURLOnShortcut && s.length);
     });
 }
@@ -1055,7 +1010,6 @@ static BOOL my_didFinishLaunching(id self, SEL _cmd, UIApplication *app, NSDicti
     if (!exists) {
         [items insertObject:MakeShortcutItem() atIndex:0];
         app.shortcutItems = items;
-        LOG("已注入快捷菜单项 (%lu 项)", (unsigned long)items.count);
     }
     return r;
 }
@@ -1064,7 +1018,6 @@ static BOOL my_didFinishLaunching(id self, SEL _cmd, UIApplication *app, NSDicti
 static void my_performAction(id self, SEL _cmd, UIApplication *app,
                             UIApplicationShortcutItem *item, void (^completion)(BOOL)) {
     if (item && [item.type isEqualToString:SHORTCUT_TYPE]) {
-        LOG("快捷菜单点击 -> 开启 WiFi 传输");
         StartWiFiTransfer(YES);
         if (completion) completion(YES);
         return;
@@ -1084,13 +1037,12 @@ static void my_performAction(id self, SEL _cmd, UIApplication *app,
 //   但这一步在 C 里是常见的 out-parameter 写法，且我们只做一次写入，
 //   不通过它回读，不存在 aliasing 问题。
 //   （MSHookFunction 的第三个参数本身就是 void **，这里保持同一约定。）
-static void HookInstanceMethod(Class cls, SEL sel, IMP newImp, void **outOrig, const char *tag) {
+static void HookInstanceMethod(Class cls, SEL sel, IMP newImp, void **outOrig, const char *tag __unused) {
     if (!cls) return;
     Method m = class_getInstanceMethod(cls, sel);
-    if (!m) { LOG("  × 找不到方法 %s", tag); return; }
+    if (!m) { return; }
     if (outOrig) *outOrig = (void *)method_getImplementation(m);
     method_setImplementation(m, newImp);
-    LOG("  ✓ hook %s", tag);
 }
 
 // ===========================================================================
@@ -1165,19 +1117,17 @@ static id my_initHTMLTemplate(id self, SEL _cmd, NSString *path, NSDictionary *v
                                  OkaAugmentVariables(path, vars));
 }
 
-static void HookClassMethod(Class cls, SEL sel, IMP newImp, void **outOrig, const char *tag) {
+static void HookClassMethod(Class cls, SEL sel, IMP newImp, void **outOrig, const char *tag __unused) {
     if (!cls) return;
     Method m = class_getClassMethod(cls, sel);
-    if (!m) { LOG("  × 找不到类方法 %s", tag); return; }
+    if (!m) { return; }
     if (outOrig) *outOrig = (void *)method_getImplementation(m);
     method_setImplementation(m, newImp);
-    LOG("  ✓ hook %s", tag);
 }
 
 __attribute__((constructor))
 static void OkaWiFiInit(void) {
     @autoreleasepool {
-        LOG("载入 pid=%d", getpid());
         LoadPrefs();
 
         // Swift weak 槽的读取函数。App 链接了 libswiftCore，正常必能解析到；
@@ -1190,12 +1140,6 @@ static void OkaWiFiInit(void) {
             if (!h) h = dlopen("libswiftCore.dylib", RTLD_LAZY);
             if (h) gWeakLoadStrong = (WeakLoadStrong_t)dlsym(h, "_swift_unknownObjectWeakLoadStrong");
         }
-        // ★ 不能把三元表达式直接塞进 LOG(...)：
-        //   LOG 展开是 NSLog(@"[OkaWiFi] " fmt, ...)，代入后变成
-        //   @"..." ? "..." : "..."，字符串字面量被当成条件 → 语法错。
-        //   三元要作为**参数**传进去，而不是占满整个 fmt 位置。
-        LOG("%s", gWeakLoadStrong ? "✓ 解析到 _swift_unknownObjectWeakLoadStrong"
-                                  : "× 未找到 _swift_unknownObjectWeakLoadStrong（outlet 读取不可用）");
 
         // ---- 2b: 热点 IP ----
         if (gEnableIPFix) {
@@ -1208,9 +1152,6 @@ static void OkaWiFiInit(void) {
             if (sym) {
                 MSHookFunction(sym, (void *)my_GetPrimaryIPAddress,
                                (void **)&orig_GetPrimaryIPAddress);
-                LOG("✓ hook _GCDWebServerGetPrimaryIPAddress");
-            } else {
-                LOG("× 找不到 _GCDWebServerGetPrimaryIPAddress（IP 修正不可用）");
             }
 
             // ★ v1.0.2 主力：ObjC 方法层修正 serverURL。
@@ -1233,8 +1174,6 @@ static void OkaWiFiInit(void) {
                 HookInstanceMethod(gws, @selector(stop),
                                    (IMP)my_stop, (void **)&orig_stop,
                                    "-[GCDWebServer stop]");
-            } else {
-                LOG("× 找不到 GCDWebServer 类（serverURL 修正不可用，只剩 UI 兜底）");
             }
 
             // ---- 2b 兜底：UI 层地址写回 ----
@@ -1246,8 +1185,6 @@ static void OkaWiFiInit(void) {
                                    NSSelectorFromString(@"changeWifiTransferStateAction:"),
                                    (IMP)my_changeWiFiState, (void **)&orig_changeWiFiState,
                                    "-[BNHttpServerPage changeWifiTransferStateAction:]");
-            } else {
-                LOG("× 找不到 BNHttpServerPage 类（UI 地址修正不可用）");
             }
         }
 
@@ -1256,14 +1193,10 @@ static void OkaWiFiInit(void) {
             void *sym = dlsym(RTLD_DEFAULT, "SCNetworkReachabilityGetFlags");
             if (sym) {
                 MSHookFunction(sym, (void *)my_SCNRGetFlags, (void **)&orig_SCNRGetFlags);
-                LOG("✓ hook SCNetworkReachabilityGetFlags");
-            } else {
-                LOG("× 找不到 SCNetworkReachabilityGetFlags");
             }
 
             Class pageCls = LookupClass(PAGE_CLASS_MANGLED, PAGE_CLASS_SWIFT);
             if (pageCls) {
-                LOG("页面类 = %s", class_getName(pageCls));
                 HookInstanceMethod(pageCls, NSSelectorFromString(@"reachabilityChangedWithNote:"),
                                    (IMP)my_reachabilityChanged,
                                    (void **)&orig_reachabilityChanged,
@@ -1271,8 +1204,6 @@ static void OkaWiFiInit(void) {
                 HookInstanceMethod(pageCls, @selector(viewDidLoad),
                                    (IMP)my_viewDidLoad, (void **)&orig_viewDidLoad,
                                    "-[BNHttpServerPage viewDidLoad]");
-            } else {
-                LOG("× 找不到 BNHttpServerPage 类");
             }
         }
 
@@ -1280,7 +1211,6 @@ static void OkaWiFiInit(void) {
         if (gEnableShortcut) {
             Class appDel = LookupClass(APPDEL_CLASS_MANGLED, APPDEL_CLASS_SWIFT);
             if (appDel) {
-                LOG("AppDelegate = %s", class_getName(appDel));
                 HookInstanceMethod(appDel,
                                    @selector(application:didFinishLaunchingWithOptions:),
                                    (IMP)my_didFinishLaunching,
@@ -1291,12 +1221,7 @@ static void OkaWiFiInit(void) {
                 if (!class_addMethod(appDel, sel, (IMP)my_performAction, "v@:@@@?")) {
                     Method m = class_getInstanceMethod(appDel, sel);
                     if (m) method_setImplementation(m, (IMP)my_performAction);
-                    LOG("✓ 覆盖 performActionForShortcutItem:completionHandler:");
-                } else {
-                    LOG("✓ 新增 performActionForShortcutItem:completionHandler:");
                 }
-            } else {
-                LOG("× 找不到 AppDelegate");
             }
         }
 
@@ -1321,15 +1246,8 @@ static void OkaWiFiInit(void) {
                                    (IMP)my_initHTMLTemplate,
                                    (void **)&orig_initHTMLTemplate,
                                    "-[GCDWebServerDataResponse initWithHTMLTemplate:variables:]");
-                LOG("网页增强注入层已挂载（JS=%lu CSS=%lu 字节）",
-                    (unsigned long)strlen(kOkaWebJS), (unsigned long)strlen(kOkaWebCSS));
-            } else {
-                LOG("× 找不到 GCDWebServerDataResponse 类（网页增强不可用）");
             }
-        } else {
-            LOG("网页增强已通过 prefs 关闭");
         }
 
-        LOG("初始化完成");
     }
 }

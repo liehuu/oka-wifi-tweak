@@ -6,7 +6,13 @@
 |---|---|---|
 | 1 | 桌面长按快捷开启 | 长按图标出现「开启 WiFi 传输」，点一下直接启动服务，地址自动复制到剪贴板并弹窗提示。不用进 App、不用点按钮 |
 | 2 | 蜂窝 / 热点可开启 | 用手机流量或个人热点时，WiFi 传输页面的「开始」按钮正常出现，可正常开启；且显示的地址是手机在热点网段的真实 IP（`172.20.10.1` 这类），不再是 `unknown` |
-| 3 | 电脑网页端增强（v1.1.2） | 保留原 `Upload Files` 按钮；**整个页面就是放置区**（没有独立拖放框），把单个/多个文件、整个文件夹拖进网页任意位置即可上传（拖入时全屏提示 + 成功/失败汇总 + 失败重试）；**复用原版行末「移动」按钮与原弹窗**，增强为目录浏览 + 可勾选批量移动 + 结果反馈。v1.1.2 另加：**文件夹排在最上面**（组内按名称自然序，不再与文件穿插）、**顶部设备名大标题收成一行小字**（文件列表上移约 100px）、**上传任务面板默认折叠成一条**，要看明细再点「展开」 |
+| 3 | 电脑网页端增强（v1.1.2 定型，v1.1.3 同款） | 保留原 `Upload Files` 按钮；**整个页面就是放置区**（没有独立拖放框），把单个/多个文件、整个文件夹拖进网页任意位置即可上传（拖入时全屏提示 + 成功/失败汇总 + 失败重试）；**复用原版行末「移动」按钮与原弹窗**，增强为目录浏览 + 可勾选批量移动 + 结果反馈。v1.1.2 另加：**文件夹排在最上面**（组内按名称自然序，不再与文件穿插）、**顶部设备名大标题收成一行小字**（文件列表上移约 100px）、**上传任务面板默认折叠成一条**，要看明细再点「展开」 |
+
+> **v1.1.3：诊断日志已全部移除。** 插件运行时不再输出任何 `NSLog` / `[OkaWiFi] ...` 行；
+> 功能 1 / 2 / 3 完全不变，前端资源与 v1.1.2 逐字节相同。
+> 判断插件是否生效请直接看功能表现（长按菜单、蜂窝下能开启且地址正常、网页增强），
+> 不要再去抓 syslog。构建闸门会从 `Tweak.xm` 源码和编译出的 dylib 原始字节两侧反查
+> `LOG(` / `NSLog` / `[OkaWiFi]`，防止日志回流。
 
 ---
 
@@ -141,11 +147,11 @@ _GCDWebServerGetPrimaryIPAddress 硬编码 strcmp(ifa_name,"en0")
 | 是否运行 | `[self isRunning]`（Helper 自己也在用这个 selector）|
 
 地址文字、二维码、复制按钮**一次性全部正确**；`my_stop` 会清掉端口/运行状态，停服后不会凭空造地址。
-日志：`serverURL 修正: 原=[(null)] -> 新=[http://172.20.10.1:8080/] (port=8080 running=1)`。
+判定以界面显示为准（v1.1.3 起不再输出日志）。
 
 #### 保留的两层兜底
 
-1. `_GCDWebServerGetPrimaryIPAddress` hook：只采信 `inet_pton` 能解析的 IP（v1.0.1 的修正）。日志 `GetPrimaryIPAddress orig=... (判定=IP/非IP/空)` 用来区分「没打上桩」与「原函数返回垃圾」。
+1. `_GCDWebServerGetPrimaryIPAddress` hook：只采信 `inet_pton` 能解析的 IP（v1.0.1 的修正）。这层失效不影响 v1.0.2 的 `serverURL` 主力修复。
 2. UI 层写回（v1.0.1）：`changeWifiTransferStateAction:` / `viewDidLoad` / reachability 之后延迟检查 `ipAddress.text` 并校正。**v1.0.2 起降为兜底**，且放宽了端口门槛——connect 探测只用于优先拿真实端口，只要 `port` / `isRunning` 有证据，探测不到也允许写回，避免把「传输本来就正常」的场景硬卡死。
 
 本机 IP 按接口名打分（`getifaddrs`）：
@@ -169,7 +175,7 @@ _GCDWebServerGetPrimaryIPAddress 硬编码 strcmp(ifa_name,"en0")
    - 挂**后台保活**（`AVAudioSession` Playback + 循环播放 App 自带的 `Happy Dreams.mp3`，音量 0）——否则切到后台几秒后进程被挂起、端口就断了；
    - 等 1.5s 读 App 自己写进 `ipAddress.text` 的 URL（`Helper` 是纯 Swift 类，ObjC runtime 反射不到 `uploader`）；读不到再用「本机 IP + 端口」兜底，复制到剪贴板并弹窗显示。
 
-### 功能 3 —— 电脑网页端增强（v1.1.2）
+### 功能 3 —— 电脑网页端增强（v1.1.2 定型，v1.1.3 未改前端）
 
 **约束**：不能改 App 包内 `GCDWebUploader.bundle/Contents/Resources/` 的任何文件，那会破坏代码签名。所以采用「构建期把前端资源编进 dylib + 运行时注入 HTML」。
 
@@ -197,6 +203,17 @@ _GCDWebServerGetPrimaryIPAddress 硬编码 strcmp(ifa_name,"en0")
 | `POST delete` / `GET download` | `path` | 原页面逻辑，不改 |
 
 路径都经 `_GCDWebServerNormalizePath` 规范化。因为 `create` **不递归**，文件夹上传必须把目录按深度升序**逐级创建**，再逐个上传文件到对应子目录；重复拖入同名文件夹时，`create` 会失败，此时用 `list` 反查同名目录是否真的已存在，存在就当"目录已就绪"继续走，不吞掉真实失败。
+
+#### v1.1.3：移除诊断日志（按使用者要求）
+
+| 原来 | 现在 |
+|---|---|
+| 构造函数、hook、地址修正等共 55 处 `LOG()`，向 syslog 打 `[OkaWiFi] ...` | 全部删除；`LOG` 宏、`NSLog` 调用、`[OkaWiFi]` 字面量一并从源码和产物里消失 |
+
+功能语句逐句保留（返回的 URL、flags 改写、hook 注册、弹窗、前端注入都没动）。
+代价是**不能再靠日志确认插件是否加载**——改为看功能：长按图标有没有出现「开启 WiFi 传输」、
+蜂窝下按钮与地址是否正常、电脑网页有没有注入标记。构建期 `devkit/build.sh` 的
+「诊断日志负向闸门」会从 dylib 原始字节反查 `NSLog` 与 `[OkaWiFi]`，一旦回流直接构建失败。
 
 #### v1.1.2 三项补齐（按真机使用反馈改的）
 
@@ -235,9 +252,9 @@ v1.1.0 曾单独放了一块占大半个页面的虚线拖放框，又另起了�
 **不需要 Theos。** 构建是一台装了 Xcode 的 macOS（或 GitHub Actions 的 `macos-latest`）上跑三条命令：
 
 ```bash
-sh devkit/build.sh arm64e iphoneos-arm64e 1.1.2   # RootHide / roothide
-sh devkit/build.sh arm64  iphoneos-arm64  1.1.2   # rootless（Dopamine / palera1n）
-sh devkit/build.sh arm64  iphoneos-arm    1.1.2   # 传统 rootful
+sh devkit/build.sh arm64e iphoneos-arm64e 1.1.3   # RootHide / roothide
+sh devkit/build.sh arm64  iphoneos-arm64  1.1.3   # rootless（Dopamine / palera1n）
+sh devkit/build.sh arm64  iphoneos-arm    1.1.3   # 传统 rootful
 ```
 
 产物在 `.build/out/com.oka.wifitweak_<ver>_<arch>.deb`。
@@ -360,82 +377,53 @@ arm64e 设备（A12 及以上 + RootHide）用 `roothide` 那条命令，
 
 ## 四、验证步骤
 
+v1.1.3 起插件**不输出任何系统日志**，所以判据一律看功能表现，不要再抓 syslog。
+
 装好后按顺序看：
 
-```bash
-# 1) 插件是否加载（关键：构造函数必须打出这行）
-idevicesyslog | grep OkaWiFi
-# 期望：[OkaWiFi] 载入 pid=xxxx
-#       [OkaWiFi] ✓ hook _GCDWebServerGetPrimaryIPAddress
-#       [OkaWiFi] ✓ hook -[GCDWebServer serverURL]        ← v1.0.2 主力，必须有
-#       [OkaWiFi] ✓ hook -[GCDWebServer startWithPort:bonjourName:]
-#       [OkaWiFi] ✓ hook -[GCDWebServer stop]
-#       [OkaWiFi] ✓ hook SCNetworkReachabilityGetFlags
-#       [OkaWiFi] 页面类 = _TtC7Blinker16BNHttpServerPage
-#       [OkaWiFi] AppDelegate = _TtC7Blinker11AppDelegate
-#       [OkaWiFi] ✓ 新增 performActionForShortcutItem:completionHandler:
+1. **插件是否加载** —— 回桌面长按 App 图标，快捷菜单里应出现「开启 WiFi 传输」。
+   菜单出现即说明 dylib 已注入、构造函数已跑完。没有菜单 → 检查 `OkaWiFi.plist`
+   的 Bundles 过滤与 `dpkg -L` 里 dylib 路径是否匹配越狱类型（rootless 要在 `/var/jb` 下），
+   装完重启 App。
+2. **功能 1** —— 点「开启 WiFi 传输」，稍等 1~2 秒应弹出结果窗，地址已复制到剪贴板；
+   电脑浏览器打开该地址能连上。
+3. **功能 2** —— 关 WiFi、开个人热点，进 App 的 WiFi 传输页点「开启 WiFi 传输」：
+   按钮可见、状态 Connected、二维码有内容，服务器地址是 `http://172.20.10.1:8080/`
+   （不再是 `unknown`）；电脑浏览器能打开。
+4. **功能 3** —— 电脑浏览器打开 `http://<手机IP>:8080`：
+   - 默认外观与原版几乎一致：没有独立拖放框、没有多出来的面板；顶部设备名是一行小字，
+     文件列表明显比原版靠上；原按钮那行多了「全选 / 取消选择」，列表每行前面多了复选框；
+     `Upload Files` 按钮照常可用。
+   - 从文件管理器拖 1 个文件 / 多个文件 / 整个文件夹到页面**任意位置**：拖入时浮出全屏
+     「松开即可上传」提示 → 任务面板只出现**一条折叠小条**（汇总 + 展开 + 清除/重试/停止），
+     点「展开」才看逐项进度 → 原 `#alerts` 位置显示成功/失败数 → 列表自动刷新。
+     文件夹在手机上保留完整目录结构。
+   - 勾选多项 → 点**任意一行的原版「移动」按钮** → 仍是原版弹窗，但多了「本次移动 N 项」
+     和目录浏览 → 选目录或填 `#move-input` → 点「移动」：弹窗内显示成功/失败汇总，
+     列表刷新，文件出现在目标目录。
+   - 排序：文件夹全部排在文件上方，组内按名称自然序（`2.log` 在 `10.log` 前）；
+     新建文件/文件夹后点 Refresh 仍保持有序。
+   - 浏览器「查看网页源代码」：`<body>` 里有且仅有一处 `<!-- OKA-WIFI-INJECTED -->`，
+     源码里不应出现独立拖放框或第二个移动弹窗。
 
-# 2) 功能 1：回桌面长按图标 → 应出现「开启 WiFi 传输」
-#    点击后看日志：
-#       [OkaWiFi] 快捷菜单点击 -> 开启 WiFi 传输
-#       [OkaWiFi] ✓ 已创建无界面 BNHttpServerPage   （或直接找到现成页面）
-#       [OkaWiFi] 已触发 changeWifiTransferStateAction:
-#       [OkaWiFi] 后台保活音频 已启动
-#       [OkaWiFi] GCDWebServer 已启动 port=8080 ...
-#       [OkaWiFi] 最终地址: http://172.20.10.1:8080
-
-# 3) 功能 2：关 WiFi，开个人热点，进 App 的 WiFi 传输页，点「开启 WiFi 传输」
-#    期望：按钮可见、状态 Connected、二维码有内容，
-#          服务器地址 = http://172.20.10.1:8080/（不再是 unknown）
-#    日志应有：
-#       [OkaWiFi] flags 0x00040002 -> 0x00000002 (cleared IsWWAN)
-#       [OkaWiFi] iface bridge100 -> 172.20.10.1 (score 100)
-#       [OkaWiFi] serverURL 修正: 原=[(null)] -> 新=[http://172.20.10.1:8080/] (port=8080 running=1)
-
-# 4) 功能 3：电脑浏览器打开 http://<手机IP>:8080
-#    a) 页面默认外观应与原版几乎一致：没有独立拖放框、没有多出来的面板；
-#       顶部设备名（xhub 那行）应是一行小字，文件列表明显比原版靠上；
-#       只是原按钮那一行多了「全选 / 取消选择」，文件列表每行前面多了复选框。
-#       原 Upload Files 按钮照常可用。
-#    b) 从电脑文件管理器拖 1 个文件 / 多个文件 / 整个文件夹到页面**任意位置**
-#       期望：拖入时浮出全屏「松开即可上传」提示 → 任务面板只出现**一条折叠小条**
-#             （上面有汇总、展开、清除/重试/停止），点「展开」才看到逐项进度
-#             → 原 #alerts 位置显示成功/失败数 → 列表自动刷新
-#       文件夹：手机上应保留完整目录结构（含多级子目录）
-#    c) 在文件列表勾选多项 → 点**任意一行的原版「移动」按钮** → 弹出的仍是原版弹窗，
-#       但多了「本次移动 N 项」和目录浏览 → 点目录或直接填 #move-input → 点「移动」
-#       期望：弹窗内显示成功/失败汇总，列表自动刷新，文件出现在目标目录
-#       （不勾选时只移动你点击的那一项；移动后按钮保持置灰，关掉再打开才恢复）
-#    d) 排序：随便进一个同时有文件夹和文件的目录，文件夹应全部排在文件上方，
-#       组内按名称排（2.log 在 10.log 前）。新建文件/文件夹后点 Refresh 仍保持有序
-#    插件加载时日志应有：
-#       [OkaWiFi] ✓ hook +[GCDWebServerDataResponse responseWithHTMLTemplate:variables:]
-#       [OkaWiFi] ✓ hook -[GCDWebServerDataResponse initWithHTMLTemplate:variables:]
-#       [OkaWiFi] 网页增强注入层已挂载（JS=... CSS=... 字节）
-#    浏览器里查看源码，<body> 里应有且仅有一处 <!-- OKA-WIFI-INJECTED -->；
-#    源码里不应出现独立拖放框或第二个移动弹窗
-```
-
-排错对照：
+排错对照（v1.1.3 起判据全部看功能表现 / 网页源码）：
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| 完全没有 `[OkaWiFi] 载入` | 插件没被注入 | 检查 `OkaWiFi.plist` 的 Bundles 过滤、确认 `dpkg -L` 里 dylib 路径与越狱类型匹配（rootless 要在 `/var/jb` 下） |
-| 有「载入」但 hook 全打 `×` | 类名/符号没找到 | 看日志里打出来的实际类名，改 `PAGE_CLASS_MANGLED` |
-| 长按没菜单项 | `didFinishLaunching` 没被 hook 到 | 确认 AppDelegate 类名（日志会打）；确认不是从后台恢复（此时不会重走 didFinishLaunching，重启 App 即可） |
+| 长按图标没有快捷菜单 | 插件没被注入 | 检查 `OkaWiFi.plist` 的 Bundles 过滤、确认 `dpkg -L` 里 dylib 路径与越狱类型匹配（rootless 要在 `/var/jb` 下）；装完重启 App |
+| 菜单有，但蜂窝下按钮仍不出现 / 地址仍 `unknown` | 类名/符号没找到（App 版本不是 1.7.5） | 本工程的类名与偏移都按 1.7.5 反汇编得出；换版本需重新定位 `PAGE_CLASS_MANGLED` 等常量 |
+| 长按没菜单项 | `didFinishLaunching` 没被 hook 到 | 确认不是从后台恢复（此时不会重走 didFinishLaunching，重启 App 即可）；确认 AppDelegate 类名 |
 | 点了崩溃（`brk`） | Swift 强解包 trap（`brk #1`） | 代码已按「只有 `httpServer` 必须为真」判断，其余 6 个 outlet 是 Swift `weak`，页面没上屏时本来就该是 nil。若仍崩，抓 crash log 里 `0x100013e2x` 附近的 pc 定位到具体强解包点 |
-| 能开但地址显示 `unknown` | `serverURL` hook 没生效 / 类没找到 | 第一判据是日志里有没有 `✓ hook -[GCDWebServer serverURL]`；有 hook 再看有没有 `serverURL 修正: 原=[(null)] -> 新=[http://...]`。这两行齐了，地址文字、二维码、复制按钮会一起正确。UI 层写回只是兜底，不必看它 |
-| 开了但电脑连不上 | 进程被挂起 | 看是否有「后台保活音频 已启动」；没有说明 `Happy Dreams.mp3` 找不到，需换素材 |
-| 蜂窝下按钮还是不出现 | flags 没被改写 | 看是否有 `flags 0x... -> ...` 日志；没有说明 `SCNetworkReachabilityGetFlags` 的 hook 没命中（可能是 App 静态链接了 SystemConfiguration 的私有副本，改用层 2 兜底，看 `viewDidLoad` 是否被 hook） |
-| 日志没有 `✓ 解析到 _swift_unknownObjectWeakLoadStrong` | libswiftCore 没解析到该符号 | 此时所有 Swift weak outlet 都读不到（`GetIvar` 返回 nil），功能降级为「仅按钮放行」，不崩。检查 App 是否确实用 Swift weak 存 outlet（1.7.5 是） |
-| 快捷菜单点了没反应，日志停在「已在运行」 | `gServerPort` 未清零 | 已 hook `-[GCDWebServer stop]` 清零。若 App 走了别的停服路径，会误判为已在运行；日志会打 `已在运行 (url=... port=...)`，据此判断 |
+| 能开但地址显示 `unknown` | `serverURL` hook 没生效 / 类没找到 | 直接看功能：地址文字、二维码、复制按钮应一起正确。v1.0.2 的主力是 hook `-[GCDWebServer serverURL]`；应急可直接在电脑浏览器开 `http://172.20.10.1:8080` |
+| 开了但电脑连不上 / 切后台就断 | 进程被挂起 | App 包内自带 `Happy Dreams.mp3` 用于静音后台保活；确认该素材存在、且 prefs 没关掉保活 |
+| 蜂窝下按钮还是不出现 | flags 没被改写 | 确认 prefs 的 `EnableCellular` 未被关掉；确认 App 是 1.7.5；重启 App 再试（层 2 兜底是 `viewDidLoad` / reachability 后强制显示按钮） |
+| 快捷菜单点了没反应 | `gServerPort` 未清零，被误判成「已在运行」 | 已 hook `-[GCDWebServer stop]` 清零；若 App 走别的停服路径会误判，重启 App 再试 |
+| 系统日志里还能看到 `[OkaWiFi]` | 装的不是 v1.1.3 | v1.1.3 起源码和产物里都不会有 `NSLog` / `[OkaWiFi]`；确认装的是 1.1.3 的包并重启 App |
 | CI 报 `CPU: unbound variable`，但编译和签名都成功了 | 某行 `echo` 里写了 `$CPU，`（后跟全角标点） | macOS 的 bash 3.2 把 `0xEF` 吞进变量名。改 `${CPU}`，并跑 `python3 devkit/check-shell.py .` 扫全仓库 |
 | CI 的 Verify deb 步骤报 `IndentationError` 或 YAML `ScannerError` | 在 `run: \|` 里内嵌了 Python heredoc | 这两个错误互斥、无解：YAML 要缩进、Python 要顶格。校验逻辑必须外置成 `.py` 文件 |
-| 蜂窝/热点下能开启，但服务器地址显示 `unknown` | `Helper.uploaderUrl` 在 `serverURL == nil` 时返回 Swift 常量 `"unknown"`（framework `0x713C` 的 `mov/movk` 立即数已确认）。前两版改 UI 控件没打中源头 | **v1.0.2 直接 hook `-[GCDWebServer serverURL]`** 返回正确 NSURL。日志应有 `✓ hook -[GCDWebServer serverURL]` 与 `serverURL 修正: 原=[(null)] -> 新=[http://172.20.10.1:8080/] (port=8080 running=1)`。应急仍可用电脑浏览器直接开 `http://172.20.10.1:8080` |
-| 日志里没有 `GetPrimaryIPAddress orig=...` | `MSHookFunction` 在该 framework 上没真正打上桩（`✓ hook` 只代表 `dlsym` 找到符号） | **v1.0.2 起不影响主修复**：`serverURL` 是 ObjC 方法，走 `method_setImplementation`，与本 C 函数 hook 完全独立 |
-| 日志没有 `✓ hook -[GCDWebServer serverURL]` | `GCDWebServer` 类没找到（framework 未加载 / 类名不同） | 构造函数已改为 `dlopen(..., RTLD_LAZY)` 主动加载两种路径。若仍缺，看是否打印 `× 找不到 GCDWebServer 类`；此时只剩 UI 层写回兜底 |
-| 日志出现 `端口自证: 无端口在 LISTEN，且 port / isRunning 都无证据 → 不改地址` | 服务确实没在跑，或 hook 没拿到实例状态 | 这是**故意不写假地址**。v1.0.2 起端口由 `[self port]` 直取，探测不到也会采信；若电脑实测能连上却仍显示 unknown，把整段日志发来改判据 |
-| 网页里没有复选框 / 拖了没反应 | 模板注入没生效（v1.1.1 默认外观本就与原版几乎一致，**不要拿「有没有新增面板」当判据**） | 先看日志有没有两条 `✓ hook ...HTMLTemplate:variables:` 与 `网页增强注入层已挂载`；再在浏览器「查看网页源代码」搜 `OKA-WIFI-INJECTED`，并确认 `#listing tr.row-file` 行首有没有 `.oka-checkbox`。日志齐但页面没有 → 强刷（Ctrl+F5）排除缓存；日志缺 → 说明 `GCDWebServerDataResponse` 类没找到，看是否打印 `× 找不到 ...` |
+| 蜂窝/热点下能开启，但服务器地址显示 `unknown` | `Helper.uploaderUrl` 在 `serverURL == nil` 时返回 Swift 常量 `"unknown"`（framework `0x713C` 的 `mov/movk` 立即数已确认）。前两版改 UI 控件没打中源头 | **v1.0.2 直接 hook `-[GCDWebServer serverURL]`** 返回正确 NSURL。应急仍可用电脑浏览器直接开 `http://172.20.10.1:8080` |
+| 服务没在跑时地址保持空白 / `unknown` | 故意不写假地址 | 这是正确状态；v1.0.2 起端口由 `[self port]` 直取，探测不到也会采信 |
+| 网页里没有复选框 / 拖了没反应 | 模板注入没生效（v1.1.1 默认外观本就与原版几乎一致，**不要拿「有没有新增面板」当判据**） | 浏览器「查看网页源代码」搜 `OKA-WIFI-INJECTED`，控制台确认 `window.__okaWiFiLoaded` 为真；再看 `#listing tr.row-file` 行首有没有 `.oka-checkbox`。源码有但页面没变 → 强刷（Ctrl+F5）排除缓存；源码没有 → 说明 `GCDWebServerDataResponse` 类没找到，确认 App 内 framework 已加载 |
 | 文件夹和文件还是穿插着排 | 列表排序没生效 | 先在控制台确认 `window.__okaWiFiLoaded` 为真，再在网页源码里搜 `sortListingInPlace`；都没有说明注入层根本没加载。**首屏就乱**通常是包装 `$.ajax` 的时机被改到了 `$(document).ready()` 里（必须留在 IIFE 顶层，才能赶在原版 ready 里的 `_reload("/")` 之前）。若只有某个目录乱，把该目录 `GET list` 的原始 JSON 发来——排序只认「每项都有 `path`/`name` 字符串」的数组，结构不符会原样放过 |
 | 顶部还是很空 / 上传任务框还是占地方 | `body.oka-compact` 没加上，或注入的 CSS 被缓存了 | 控制台看 `document.body.classList.contains('oka-compact')`；为真但样式没变就强刷（Ctrl+F5）。任务面板的折叠由 `setTasksExpanded(false)` 控制，若上传后明细直接展开，检查 `startUpload()` 里那行是否被删；也可直接点头部「展开 / 收起」验证切换是否可用 |
 | 页面源码里出现两次 `OKA-WIFI-INJECTED` | 幂等标记失效（类方法 + 实例方法双 hook 都注入了） | 正常情况下 `OkaAugmentVariables` 会在第二次命中时直接返回原 variables。若重复，检查 `rangeOfString:@"OKA-WIFI-INJECTED"` 是否被改掉 |
@@ -445,14 +433,15 @@ idevicesyslog | grep OkaWiFi
 | 移动完成后按钮点不动 | 故意设计：结果留在弹窗里给用户看，确认按钮保持禁用以防重复提交 | 关掉弹窗，重新点任意一行的「移动」按钮即可恢复 |
 | 批量移动全部报失败 | `newPath` 目标已存在，或目标目录不存在 | 弹窗里逐项列出失败原因。服务端 `move` 在目标已存在时返回 `Destination ... already exists`；目录浏览只列 `GET list` 里真实存在的目录，手动输入路径时先确认它存在 |
 
+
 ---
 
 ## 五、已知限制（如实说明）
 
 1. **编译环境是 macOS，本机（Windows）无法验证真实编译。** 代码做了静态审查（括号平衡、函数定义顺序、函数指针签名与赋值、ARC 桥接配对、格式串类型）。本机已用「桩替换 `xcrun`」把 `build.sh` 三个变体从编译一路跑到打包全部 `exit=0`，并在本地用 `verify-deb.py` 把三个 deb 的 22 项检查全部跑通；`shell` 语法、打包链路、校验判据的正反方向都已实测。但**真正的 `clang` 编译与 `codesign` 只能在 macOS 上发生**——桩产出的 dylib 不是可运行代码，本地 deb 也**不能装到手机上**。唯一可交付产物必须来自 CI。
 2. **后台保活依赖音频后台模式。** App 的 `UIBackgroundModes` 是 `audio`/`fetch`，用音频钉住进程是可行的，但 iOS 会占一个「正在播放」状态（音量 0，听不到）。若你介意，可在 prefs 里关掉——但那会导致切后台后端口失效。
-3. **`_GCDWebServerGetPrimaryIPAddress` 靠符号名 hook。** 若 App 换 GCDWebServer 版本或静态链接，符号可能找不到（日志会报 `×`）。这层失效**不影响 v1.0.2 的主力修复**（`serverURL` 是 ObjC 方法 hook）；只有 `GCDWebServer` 类本身找不到时才会退化到 UI 层写回。功能 2a 与功能 1 始终不受影响。
-4. **地址优先级是启发式。** `bridge* > en* > pdp_ip*` 覆盖了绝大多数场景；若你同时开了 VPN 且 VPN 也建了 `bridge` 接口，可能选错。日志会打印所有候选接口和分数，便于判断。
+3. **`_GCDWebServerGetPrimaryIPAddress` 靠符号名 hook。** 若 App 换 GCDWebServer 版本或静态链接，符号可能找不到。这层失效**不影响 v1.0.2 的主力修复**（`serverURL` 是 ObjC 方法 hook）；只有 `GCDWebServer` 类本身找不到时才会退化到 UI 层写回。功能 2a 与功能 1 始终不受影响。
+4. **地址优先级是启发式。** `bridge* > en* > pdp_ip*` 覆盖了绝大多数场景；若你同时开了 VPN 且 VPN 也建了 `bridge` 接口，可能选错；此时界面上显示的地址会不是热点网段，只能从地址本身判断（v1.1.3 起不再输出接口打分日志）。
 5. **端口是 App 自己定的，插件不改。** v1.0.2 直接从 `[self port]` 读真实端口（`GCDWebServer` 公开属性）、`isRunning` 读运行状态，`stop` 时清零；不再靠猜 8080，也不再依赖 `startWithPort:` 是否被命中。端口 LISTEN 探测只保留为 UI 兜底层的补充手段。
 6. **网页增强依赖电脑浏览器的 `DataTransferItem.webkitGetAsEntry()`。** Chrome / Edge / Safari 支持整个文件夹递归；不提供该 API 的浏览器会自动降级为「单文件 / 多文件」拖放上传，文件夹结构无法保留（点 `Upload Files` 选文件始终可用）。另外服务端 `create` 不递归、也不允许目标已存在，所以文件夹上传是**串行**的：先逐级建目录，再逐个传文件，大文件夹会比一次多文件选择慢。
 7. **注入层依赖 `responseWithHTMLTemplate:variables:` 这条渲染路径。** 已在 1.7.5 的 `GCDWebServer` 二进制里反汇编确认（6 个 variables key 的字典 + `0x1D210` 的类方法调用）。若 App 升级换了 GCDWebServer 版本、改走别的 HTML 渲染方法，注入会静默不生效——但功能 1 / 2 完全不受影响，网页也会保持原版可用状态。
@@ -465,7 +454,7 @@ idevicesyslog | grep OkaWiFi
 wifitweak/
 ├── Tweak.xm                    # 全部实现（约 1230 行，含逐条逆向依据注释）
 ├── OkaWiFi.plist               # CydiaSubstrate 过滤：只注入 com.blinker.documents
-├── web/                        # v1.1.2 电脑网页端增强前端资源（构建期内联进 dylib）
+├── web/                        # v1.1.2 起的网页端增强前端资源（v1.1.3 未改动，构建期内联进 dylib）
 │   ├── oka-wifi.js             # 列表排序 / 全页拖放 / 文件夹递归 / 折叠任务面板 / 复用原版移动弹窗
 │   └── oka-wifi.css            # oka- 前缀样式 + body.oka-compact 作用域的顶部紧凑布局
 ├── devkit/
