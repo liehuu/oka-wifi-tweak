@@ -28,19 +28,24 @@ jobs:
       - id: pick
         shell: bash
         run: |
-          ALL='[
-            {"scheme":"rootful", "theos_repo":"https://github.com/theos/theos.git",    "arch":"iphoneos-arm"},
-            {"scheme":"rootless","theos_repo":"https://github.com/theos/theos.git",    "arch":"iphoneos-arm64"},
-            {"scheme":"roothide","theos_repo":"https://github.com/roothide/theos.git", "arch":"iphoneos-arm64e"}
-          ]'
+          set -euo pipefail
+          # $GITHUB_OUTPUT 的 key=value 只能是单行，多行 JSON 会被截断成
+          # "Invalid format" 报错。所以这里用 python 一次性生成压缩后的单行 JSON。
           WANT="${{ github.event.inputs.scheme }}"
-          if [ -n "$WANT" ]; then
-            OUT=$(echo "$ALL" | python3 -c "import sys,json; s='$WANT'; print(json.dumps([x for x in json.load(sys.stdin) if x['scheme']==s]))")
-          else
-            OUT="$ALL"
-          fi
-          echo "matrix={\"include\":$OUT}" >> "$GITHUB_OUTPUT"
-          echo "will build: $OUT"
+          python3 - "$WANT" <<'PY' >> "$GITHUB_OUTPUT"
+          import json, sys
+          want = sys.argv[1] if len(sys.argv) > 1 else ""
+          all_variants = [
+              {"scheme": "rootful",  "theos_repo": "https://github.com/theos/theos.git",    "arch": "iphoneos-arm"},
+              {"scheme": "rootless", "theos_repo": "https://github.com/theos/theos.git",    "arch": "iphoneos-arm64"},
+              {"scheme": "roothide", "theos_repo": "https://github.com/roothide/theos.git", "arch": "iphoneos-arm64e"},
+          ]
+          picked = [v for v in all_variants if v["scheme"] == want] if want else all_variants
+          if not picked:
+              picked = all_variants
+          print("matrix=" + json.dumps({"include": picked}, separators=(",", ":")))
+          PY
+          grep '^matrix=' "$GITHUB_OUTPUT" | head -c 400; echo
 
   build:
     needs: plan
