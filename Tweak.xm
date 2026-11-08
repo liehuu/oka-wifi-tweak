@@ -1127,6 +1127,7 @@ static void HookClassMethod(Class cls, SEL sel, IMP newImp, void **outOrig, cons
 
 // ===========================================================================
 //  四、v1.1.8 内联读取接口 GET /oka-raw
+//      v1.1.9 目录时间接口 GET /oka-stat（列表显示最后修改时间）
 // ===========================================================================
 //  【为什么必须动服务端】
 //  用户实测三个问题，全部来自同一个根因：
@@ -1149,11 +1150,20 @@ static void HookClassMethod(Class cls, SEL sel, IMP newImp, void **outOrig, cons
 //        IDM 把每一条都当成一次下载任务 → 一个目录 N 个文件弹 N 个窗。
 //
 //  【解法】
-//  新增 GET /oka-raw?path=<相对路径>，用 `isAttachment:NO` 返回同一份文件：
-//      Content-Disposition: inline; filename="..."
-//  inline 的响应不会被 IDM 当作下载任务，也不会触发 Chrome 的
-//  「不安全下载」拦截（它压根不是下载，是普通 XHR 响应）。
-//  前端所有「把字节读进页面」的路径（预览 / 目录打包 / Blob 下载）全部改走它。
+//  新增 GET /oka-raw?path=<相对路径>，用 `isAttachment:NO` 返回同一份文件。
+//
+//  ★ 注意 isAttachment:NO 的真实语义（v1.1.9 实测更正，别再照抄旧描述）：
+//    它不是「发 Content-Disposition: inline」，而是**根本不发这个响应头**。
+//    证据两重：
+//      ① GCDWebServer.framework 二进制里 `inline` 出现 0 次，
+//         `Content-Disposition` 只出现 1 次，值是
+//         `attachment; filename="%@"; filename*=UTF-8''%@`（纯 attachment 分支）；
+//      ② 上游 GCDWebServerFileResponse.m 是
+//         `if (attachment) { ... setValue:... forAdditionalHeader:@"Content-Disposition" }`
+//         —— NO 时该分支整个跳过。
+//    行为上这正好是我们想要的：没有 Content-Disposition，IDM 不当下载任务接管，
+//    Chrome 也不走「不安全下载」判定（它就是一次普通 XHR 响应）。
+//    旧注释写的 `Content-Disposition: inline; filename="..."` 是错的，已改。
 //
 //  【为什么不直接把 /download 改成 inline】
 //  /download 是原版页面「点文件名下载」在用的接口，也是别的客户端
@@ -1192,22 +1202,33 @@ static NSString *OkaUploadDirectoryOf(id server) {
     return [dir isKindOfClass:[NSString class]] ? (NSString *)dir : nil;
 }
 
-// /oka-raw 的实际处理：把 path 解析成上传根目录内的绝对路径，用
-// isAttachment:NO 返回，从而得到 Content-Disposition: inline。
-static id OkaRawFileResponse(id server, id request) {
-    NSString *root = OkaUploadDirectoryOf(server);
-    if (root.length == 0) { return OkaClientError(500, @"no upload directory"); }
-
-    NSString *rel = nil;
+// 从 request 的 query 里取 path 参数（原样返回，不做归一化）。
+// /oka-raw 与 /oka-stat 共用：两者必须按同一个语义解析 path。
+static NSString *OkaQueryPath(id request) {
     SEL selQuery = NSSelectorFromString(@"query");
-    if ([request respondsToSelector:selQuery]) {
-        id q = ((id (*)(id, SEL))objc_msgSend)(request, selQuery);
-        if ([q isKindOfClass:[NSDictionary class]]) {
-            id v = [(NSDictionary *)q objectForKey:@"path"];
-            if ([v isKindOfClass:[NSString class]]) { rel = (NSString *)v; }
-        }
-    }
-    if (rel.length == 0) { return OkaClientError(400, @"missing path"); }
+    if (![request respondsToSelector:selQuery]) { return nil; }
+    id q = ((id (*)(id, SEL))objc_msgSend)(request, selQuery);
+    if (![q isKindOfClass:[NSDictionary class]]) { return nil; }
+    id v = [(NSDictionary *)q objectForKey:@"path"];
+    return [v isKindOfClass:[NSString class]] ? (NSString *)v : nil;
+}
+
+// 把 query 里的相对 path 解析成上传根目录内的绝对路径。
+// 返回 nil = 失败，*outCode 带回 HTTP 状态码：
+//   400 缺 path 参数 / 403 越界 / 404 不存在 / 500 拿不到上传根。
+//
+// ★ 围栏逻辑只在这里实现一次，/oka-raw 与 /oka-stat 共用。
+//   两份拷贝慢慢长歪是经典事故：改了一处忘了另一处，于是「一个接口拦住、
+//   另一个接口放行目录穿越」。共用之后没有第二种可能。
+static NSString *OkaResolveInRoot(id server, id request,
+                                  NSInteger *outCode, BOOL *outIsDir) {
+    if (outCode) { *outCode = 0; }
+
+    NSString *root = OkaUploadDirectoryOf(server);
+    if (root.length == 0) { if (outCode) { *outCode = 500; } return nil; }
+
+    NSString *rel = OkaQueryPath(request);
+    if (rel.length == 0) { if (outCode) { *outCode = 400; } return nil; }
 
     // ★ 不依赖 GCDWebServer 内部的 _GCDWebServerNormalizePath：
     //   那是 framework 私有 C 符号，有没有导出不确定，用 -undefined
@@ -1234,24 +1255,107 @@ static id OkaRawFileResponse(id server, id request) {
     NSString *rootSlash = [rootStd hasSuffix:@"/"] ? rootStd
                                                    : [rootStd stringByAppendingString:@"/"];
     BOOL inside = [abs isEqualToString:rootStd] || [abs hasPrefix:rootSlash];
-    if (!inside) { return OkaClientError(403, @"invalid path"); }
+    if (!inside) { if (outCode) { *outCode = 403; } return nil; }
 
     BOOL isDir = NO;
     if (![[NSFileManager defaultManager] fileExistsAtPath:abs isDirectory:&isDir]) {
-        return OkaClientError(404, @"not found");
+        if (outCode) { *outCode = 404; } return nil;
+    }
+    if (outIsDir) { *outIsDir = isDir; }
+    return abs;
+}
+
+// /oka-raw 的实际处理：把 path 解析成上传根目录内的绝对路径，用
+// isAttachment:NO 返回。注意 NO 的实际效果是**不发 Content-Disposition 头**
+// （不是发 inline，见上面 【解法】 里更正过的说明）。
+static id OkaRawFileResponse(id server, id request) {
+    NSInteger code = 0;
+    BOOL isDir = NO;
+    NSString *abs = OkaResolveInRoot(server, request, &code, &isDir);
+    if (!abs) {
+        if (code == 400) { return OkaClientError(400, @"missing path"); }
+        if (code == 403) { return OkaClientError(403, @"invalid path"); }
+        if (code == 404) { return OkaClientError(404, @"not found"); }
+        return OkaClientError(500, @"no upload directory");
     }
     // 目录不在这里返回内容：目录交给前端的 ZIP 打包（它自己递归 list）。
     if (isDir) { return OkaClientError(400, @"is a directory"); }
 
     // ★★ 这一行就是三个问题的共同解药：
-    //    isAttachment:NO → Content-Disposition: inline
-    //    inline 响应不会被 IDM 当成下载任务抢走，也不会触发 Chrome 的
-    //    「已阻止不安全的下载」。
+    //    isAttachment:NO → 响应不带 Content-Disposition 头
+    //    （不是「带 inline」，见文件上方【解法】里的实测更正）。
+    //    不带该头的响应：IDM 不当成下载任务抢走；Chrome 也不走
+    //    「已阻止不安全的下载」判定，因为它只是普通 XHR 响应。
     Class fileResp = NSClassFromString(@"GCDWebServerFileResponse");
     SEL sel = NSSelectorFromString(@"responseWithFile:isAttachment:");
     if (!fileResp || ![fileResp respondsToSelector:sel]) { return nil; }
     typedef id (*OkaFileResp_t)(id, SEL, NSString *, BOOL);
     return ((OkaFileResp_t)(void *)objc_msgSend)((id)fileResp, sel, abs, NO);
+}
+
+// /oka-stat 的实际处理：返回**一个目录下所有条目**的最后修改时间。
+//
+//  【为什么要新开接口而不是改 list】
+//  原版 listDirectory: 的返回项只有 path / name / size 三个键，没有时间字段
+//  （已用 GCDWebUploader.m 第 246-262 行逐行核对）。那个 JSON 结构是原版
+//  页面的契约，往里加键虽然一般无害，但属于改原版接口语义；新开一个只读
+//  接口更安全，出问题不注册即可，原版行为一字不动。
+//
+//  【为什么按目录批量而不是按文件】
+//  列表一屏几十上百行，按文件逐个请求会把页面拖垮（N 次往返）。
+//  这里一次返回整个目录的 {相对path: unix秒} 映射，前端只发一次请求。
+//
+//  【key 必须与 list 的 path 字段逐字节一致】
+//  原版 list 用 [relativePath stringByAppendingPathComponent:item] 拼 path，
+//  目录再补一个 "/"；这里照同样的方式拼，前端才能用 $(tr).data("path") 直接查表。
+static id OkaStatResponse(id server, id request) {
+    NSInteger code = 0;
+    BOOL isDir = NO;
+    NSString *abs = OkaResolveInRoot(server, request, &code, &isDir);
+    if (!abs) {
+        if (code == 400) { return OkaClientError(400, @"missing path"); }
+        if (code == 403) { return OkaClientError(403, @"invalid path"); }
+        if (code == 404) { return OkaClientError(404, @"not found"); }
+        return OkaClientError(500, @"no upload directory");
+    }
+    if (!isDir) { return OkaClientError(400, @"is not a directory"); }
+
+    NSString *rel = OkaQueryPath(request);
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray *items = [fm contentsOfDirectoryAtPath:abs error:NULL];
+    // 目录读不出来（权限等）就回空表，而不是报错：
+    // 前端拿不到时间只该少显示一列，不该把整个列表打成失败。
+    if (![items isKindOfClass:[NSArray class]]) { items = nil; }
+
+    NSUInteger cap = items ? [items count] : 0;
+    NSMutableDictionary *out = [NSMutableDictionary dictionaryWithCapacity:cap];
+    for (NSString *item in items) {
+        if (![item isKindOfClass:[NSString class]] || item.length == 0) { continue; }
+        NSString *childAbs = [abs stringByAppendingPathComponent:item];
+        NSDictionary *attr = [fm attributesOfItemAtPath:childAbs error:NULL];
+        if (![attr isKindOfClass:[NSDictionary class]]) { continue; }
+        NSDate *mtime = [attr objectForKey:NSFileModificationDate];
+        if (![mtime isKindOfClass:[NSDate class]]) { continue; }
+
+        BOOL childIsDir = [[attr objectForKey:NSFileType]
+                           isEqualToString:NSFileTypeDirectory];
+        NSString *key = [rel stringByAppendingPathComponent:item];
+        if (childIsDir) { key = [key stringByAppendingString:@"/"]; }
+
+        // 用 numberWithDouble 而不是 @( ... ) 装箱表达式：
+        // .xm 先过 Logos 预处理，少一层语法就不必赌它的解析边界。
+        [out setObject:[NSNumber numberWithDouble:[mtime timeIntervalSince1970]]
+                forKey:key];
+    }
+
+    // responseWithJSONObject: 是 GCDWebServerDataResponse 的 Extensions
+    // 分类方法（二进制里确认存在 6 处），不是主类原生接口，所以仍要
+    // respondsToSelector 兜一层：拿不到就返回 nil，前端按「接口不可用」处理。
+    Class dataCls = NSClassFromString(@"GCDWebServerDataResponse");
+    SEL selJson = NSSelectorFromString(@"responseWithJSONObject:");
+    if (!dataCls || ![dataCls respondsToSelector:selJson]) { return nil; }
+    typedef id (*OkaJSONResp_t)(id, SEL, id);
+    return ((OkaJSONResp_t)(void *)objc_msgSend)((id)dataCls, selJson, out);
 }
 
 // handler 只注册一次。reload 插件、App 反复 init uploader 都可能重复进入，
@@ -1262,6 +1366,12 @@ static id OkaRawFileResponse(id server, id request) {
 //   会被误判成「已注册」而跳过，接口就静默失效了。
 static NSHashTable *gOkaRawRegistered = nil;
 
+// 注册两个只读接口：GET /oka-raw（取字节）与 GET /oka-stat（取修改时间）。
+//
+// 两个接口各自 addHandler，各用**独立的 block**，不要用同一个 block 靠
+// request.path 分派：GCDWebServer 的 processBlock 签名不含 path，block 里
+// 拿不到「这次是哪个路由命中」，只能从 request 反查 —— 多一层猜测，
+// handler 是分别注册的，直接分开写就没有这个问题。
 static void OkaRegisterRawHandler(id server) {
     if (!server) { return; }
 
@@ -1288,20 +1398,34 @@ static void OkaRegisterRawHandler(id server) {
     //   server → handler → block → server 的环，server 永远不释放。
     typedef id (^OkaProcessBlock_t)(id);
     __weak id weakServer = server;
-    OkaProcessBlock_t block = ^id(id request) {
+
+    OkaProcessBlock_t rawBlock = ^id(id request) {
         id strong = weakServer;
         if (!strong) { return OkaClientError(500, @"server gone"); }
         return OkaRawFileResponse(strong, request);
     };
 
+    OkaProcessBlock_t statBlock = ^id(id request) {
+        id strong = weakServer;
+        if (!strong) { return OkaClientError(500, @"server gone"); }
+        return OkaStatResponse(strong, request);
+    };
+
     @try {
-        fn(server, selAdd, @"GET", @"/oka-raw", reqCls, (id)block);
+        fn(server, selAdd, @"GET", @"/oka-raw", reqCls, (id)rawBlock);
+        fn(server, selAdd, @"GET", @"/oka-stat", reqCls, (id)statBlock);
         [gOkaRawRegistered addObject:server];
     } @catch (NSException *e) {
         // 注册失败不能让 App 崩。
         // 这里刻意不输出任何诊断日志：v1.1.3 起产物里禁止日志调用与前缀常量，
         // build.sh 对源码与产物做双向负向检查，写了会让整个构建失败。
-        // 前端探测不到 /oka-raw 会自动回退到 /download，功能不丢。
+        //
+        // ★ 两个 addHandler 放在同一个 @try 里是有意的：/oka-stat 在
+        //   /oka-raw 之后注册，前一个抛异常时后一个也跟着跳过。
+        //   失败面收窄成「两个都没有」，前端就能用同一条降级判据处理
+        //   （探测到没有就不显示时间列 / 回退 download），
+        //   不会出现「raw 有、stat 没有」这种半残状态导致的逻辑分叉。
+        //   前端探测不到 /oka-raw 会自动回退到 /download，功能不丢。
     }
 }
 

@@ -1,4 +1,4 @@
-/* OkaWiFi v1.1.8 — 网页增强层样式
+/* OkaWiFi v1.1.9 — 网页增强层样式
  * v1.1.5 新增文件夹琥珀黄配色与行内重命名按钮 / 输入框样式；
  * v1.1.6 新增左侧选中热区（图标按钮改为纯视觉、不再可点）、独立下载按钮列，
  *         并把重命名列与下载列的宽度收窄，保持删除按钮在最右。
@@ -206,6 +206,22 @@ body.oka-compact .container > p.footer { margin-top: 6px; }
 #listing tr.row-file .column-name { cursor: pointer; }
 #listing tr.row-file .column-name:hover .oka-name { text-decoration: underline; }
 #listing tr.row-file .oka-rename-input { cursor: text; }
+
+/* --- v1.1.9 最后修改时间列 --- */
+/* 时间紧挨文件大小右侧，用等宽数字与次级灰色，避免和文件名抢注意力。
+ * tabular-nums 让 15:04 与 09:41 等宽对齐，几十行扫下来是整齐的一列。 */
+#listing tr.row-file .oka-mtime-cell {
+  color: #8a949e;
+  font-size: 12px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+}
+/* 窄屏优先牺牲时间列：手机上文件名和操作按钮更常用。
+ * 用 display:none 而不是 visibility，让表格宽度重新分配。 */
+@media (max-width: 560px) {
+  #listing tr.row-file .oka-mtime-cell { display: none !important; }
+}
 
 #oka-preview-modal .modal-body {
   min-height: 100px;

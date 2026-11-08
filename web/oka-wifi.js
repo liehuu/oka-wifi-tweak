@@ -1,5 +1,5 @@
 /*
- * OkaWiFi v1.1.8 — GCDWebUploader 网页端增强层
+ * OkaWiFi v1.1.9 — GCDWebUploader 网页端增强层
  *
  * 注入方式：由 Tweak.xm hook +[GCDWebServerDataResponse responseWithHTMLTemplate:variables:]
  *          把本文件 + oka-wifi.css 追加到 epilogue 变量里，随首页 HTML 一起下发。
@@ -20,6 +20,33 @@
  *   v1.1.6 行末按钮重排 / 左侧选中热区 / 每行下载按钮 / 目录 ZIP。
  *   v1.1.7 点目录进入 / 点文件预览 / ZIP 保留顶层文件夹 / 按类型换图标。
  *   v1.1.8 下载改 Blob 保存 / PDF 换 embed 容器 / 新增 inline 读取接口 /oka-raw。
+ *   v1.1.9 彻底删除导航式下载（IDM 接管与「不安全下载」的唯一来源），
+ *          空响应不再当成功，读取过程带进度；新增每行最后修改时间列。
+ *
+ * v1.1.9 两项修正（按真机反馈改）：
+ *   ① **删掉导航式下载这条退路**。v1.1.8 虽然主路径改成 Blob，但仍在
+ *      「文件超过 512 MB」和「取字节失败」两处 `window.location = 'download?...'`。
+ *      实测（非安全源 A/B）这条导航在 http://<局域网IP> 上必然被 Chrome
+ *      判为「已阻止不安全的下载」，且要先读完整个响应才判定类型 ——
+ *      正好就是「点一下要等二三十秒才出现在下载列表、还得手动点保留」。
+ *      而 IDM 这类下载管理器也是靠「下载事件 + Content-Disposition」接管的，
+ *      所以只要触发一次就一定会被接管。宁可明确报错，也不走这条路。
+ *   ② **空响应不再当成功**。服务端回 200 但 0 字节（被中间层吞掉、出错页等）
+ *      以前会被当成「下载成功」，存下一个 0 字节文件；现在按失败处理并提示。
+ *      同时给行内图标按钮摘掉原版 .button-download 类，断掉原版
+ *      `window.location` 那条绑定，作为第二道防线。
+ *
+ * v1.1.9 新增：每行显示最后修改时间。
+ *   原版 list 的返回项只有 path / name / size（已对 GCDWebUploader.m 逐行核对），
+ *   没有时间字段，所以插件侧新增只读接口 GET /oka-stat?path=<dir>，
+ *   一次返回整个目录的 { 相对path: unix秒 }。前端把它渲染成一列，
+ *   紧挨文件大小右侧。三个必须注意的点（都有对应闸门）：
+ *   ① 渲染必须幂等：本列由 MutationObserver 与 600ms 定时器反复调用，
+ *      写 textContent 本身会产生 mutation，无条件赋值就是自激死循环。
+ *   ② 插入必须锚在 .column-size 之后，否则排到删除按钮右边、被挤出屏幕。
+ *   ③ 必须在原版 done 之后刷新：原版在那时才执行 `_path = path` 并重建行，
+ *      抢跑会取到上一个目录的时间、并写进即将被丢弃的旧 DOM。
+ *   降级：老插件没有 /oka-stat 时 404，整列消失，其余功能不受影响。
  *
  * v1.1.6 三项交互（按真机反馈改）：
  *   ① 行末按钮重排：删除按钮必须在最右，重命名按钮紧挨它左边；
@@ -172,6 +199,16 @@
         // 删除（原版 .button-delete）/ 移动 / 上传 / 新建 / 切目录 / Refresh
         // 都会走这条路径，漏一次就会留下"幽灵选中"。
         resetSelectionOnReload();
+
+        // ★ v1.1.9：时间列要在**原版 done 跑完之后**再刷新。
+        //   两个原因，缺一个都会出错：
+        //   ① 原版 done 里才执行 `_path = path`。我们这条回调注册在前，
+        //      此刻 window._path 还是**上一个目录**，直接读 curPath()
+        //      会去请求旧目录的时间，新列表一行都对不上。
+        //   ② 原版 done 才 append 新的 tr。这里同步调 applyRowTimes()
+        //      只能在旧 DOM 上写，随后的 DOM 重建会把结果全冲掉。
+        //   setTimeout(0) 排在当前同步栈之后，两个条件都满足。
+        setTimeout(function () { invalidateStat(); refreshRowTimes(); }, 0);
       });
     }
     return jq;
@@ -328,11 +365,20 @@
     return new Blob(parts, { type: 'application/zip' });
   }
 
-  function xhrGet(url, binary) {
+  function xhrGet(url, binary, onProgress) {
     return new Promise(function (resolve, reject) {
       var xhr = new XMLHttpRequest();
       xhr.open('GET', url, true);
       if (binary) { xhr.responseType = 'arraybuffer'; }
+      // ★ v1.1.9：进度回调。局域网传几十 MB 要几秒，不给反馈就成了
+      //   「点了没反应」—— 用户会以为卡死，其实是在读。
+      if (onProgress) {
+        xhr.onprogress = function (ev) {
+          if (ev && ev.lengthComputable) {
+            onProgress(ev.loaded, ev.total);
+          }
+        };
+      }
       xhr.onload = function () {
         if (xhr.status >= 200 && xhr.status < 300) {
           resolve(binary ? new Uint8Array(xhr.response) : xhr.responseText);
@@ -346,6 +392,10 @@
         }
       };
       xhr.onerror = function () { reject(new Error('网络错误')); };
+      // ★ v1.1.9：超时要能被感知，否则真机上被中间层吞掉的请求会一直挂着，
+      //   用户看到的就是「点了没反应」。60 秒对局域网传文件足够宽。
+      xhr.ontimeout = function () { reject(new Error('请求超时')); };
+      xhr.timeout = 60000;
       xhr.send();
     });
   }
@@ -371,15 +421,157 @@
     return 'oka-raw?path=' + encodeURIComponent(path);
   }
 
-  // ★ 只有「接口确实不存在」才把 rawUsable 钉成 false。
-//   404 有两种可能：接口没注册，或文件/目录真的没了。
-//   判定方式：用 download 重试一次 —— 它也失败 = 文件问题（保持探测态）；
-//   它成功 = 接口问题（钉成 false，后续一律走 download）。
-  function fetchBytes(path) {
-    if (rawUsable === false) {
-      return xhrGet('download?path=' + encodeURIComponent(path), true);
+  // ---------------------------------------------------------------------
+  // v1.1.9 修改时间列：GET /oka-stat?path=<dir> → { "<相对path>": <unix秒>, ... }
+  //
+  // 原版 list 的返回项只有 path / name / size，没有时间字段（已对
+  // GCDWebUploader.m 的 listDirectory: 逐行核对）。要显示「最后修改时间」
+  // 就必须有新的数据来源，这里用插件注册的只读接口 /oka-stat。
+  //
+  // 为什么按目录批量取、而不是每行一个请求：
+  //   一屏几十上百行，逐行请求就是 N 次往返，列表会明显卡住。
+  //   服务端一次返回整个目录的映射，前端只发一次。
+  //
+  // 为什么用 path 当 key：原版 list 的每一项都带 path，而行元素上也挂了
+  //   $(tr).data("path")，两边字符串完全一致（服务端按同样的规则拼），
+  //   可以直接查表，不需要按名字匹配（同名文件、重命名后都更安全）。
+  //
+  // 兼容：老插件没有 /oka-stat → 404。此时 statUsable 定死为 false，
+  //       时间列整体不出现，其余功能一行不受影响。
+  // ---------------------------------------------------------------------
+  var statUsable = null;   // null = 还没探过；true / false = 已知
+  var statCache = {};      // dir -> { path: unix秒 } 或 null（取过、没拿到）
+  var statSeq = 0;         // 只认最后一次请求的结果，避免切目录时旧响应覆盖新列表
+
+  function statURL(dir) {
+    return 'oka-stat?path=' + encodeURIComponent(dir);
+  }
+
+  // 把 unix 秒格式化成「2026-11-09 02:11」。
+  // 用 UTC 还是本地时区：用户在手机上看到的时间应该和自己熟悉的一致，
+  // 手机浏览器跑的是设备本地时区，所以用本地时间（getFullYear 等）。
+  function fmtMtime(sec) {
+    if (typeof sec !== 'number' || !isFinite(sec) || sec <= 0) { return ''; }
+    var d = new Date(sec * 1000);
+    if (isNaN(d.getTime())) { return ''; }
+    function p2(n) { return (n < 10 ? '0' : '') + n; }
+    return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()) +
+      ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes());
+  }
+
+  // 取一个目录的全部时间。同一目录只请求一次（成功后缓存；
+  // 失败也缓存 null，避免每次 decorateRows 都重试打服务端）。
+  // 缓存失效点：列表重载 / 上传 / 删除 / 移动 / 重命名都会改变 mtime，
+  // 那些路径统一走 invalidateStat()。
+  function fetchStat(dir) {
+    if (statUsable === false) { return Promise.resolve(null); }
+    if (Object.prototype.hasOwnProperty.call(statCache, dir)) {
+      return Promise.resolve(statCache[dir]);
     }
-    return xhrGet(rawURL(path), true).then(function (bytes) {
+    return xhrGet(statURL(dir), false).then(function (txt) {
+      var map = null;
+      try { map = JSON.parse(txt); } catch (e) { map = null; }
+      if (!map || typeof map !== 'object' || Array.isArray(map)) { map = null; }
+      statUsable = true;
+      statCache[dir] = map;
+      return map;
+    }, function (err) {
+      var st = err && err.status;
+      // 404 / 405 = 接口不存在（老插件）。这是「永久不可用」，定死。
+      if (st === 404 || st === 405) {
+        statUsable = false;
+      } else {
+        // 其他错误（网络抖动、超时）只让本次拿不到，不永久降级：
+        // 下一次列表刷新还会再试，用户不至于因为一次超时就永久失去这一列。
+        statCache[dir] = null;
+      }
+      return null;
+    });
+  }
+
+  // 时间会随任何写操作变化，写完之后把缓存清掉。
+  // 不在这里 reload：调用方本来就会 reload，重载时自然会重新取。
+  function invalidateStat() {
+    statCache = {};
+  }
+
+  // 把时间写进每一行。dirMap 为 null 时（接口不可用 / 还没拿到）整列隐藏，
+  // 不留空白单元格 —— 否则表格会多出一段没有内容的空列。
+  function applyRowTimes(dirMap) {
+    var listing = document.getElementById('listing');
+    if (!listing) { return; }
+    var rows = listing.querySelectorAll('tr.row-file');
+    var hasAny = false;
+    for (var i = 0; i < rows.length; ++i) {
+      var tr = rows[i];
+      var cell = tr.querySelector('.oka-mtime-cell');
+      if (!cell) {
+        cell = document.createElement('td');
+        cell.className = 'oka-mtime-cell';
+        // 插在 .column-size 右边：时间紧挨着大小，读起来是一组；
+        // 放最右边会被操作按钮挤到屏幕外。
+        // sizeCell 一定是 tr 的直接子节点（原版模板里就是 <td>），
+        // insertBefore(cell, sizeCell.nextSibling) 在 nextSibling 为 null 时
+        // 等价于 append，所以不需要再写一个分支去处理「没有下一个兄弟」。
+        var sizeCell = tr.querySelector('.column-size');
+        if (sizeCell) {
+          tr.insertBefore(cell, sizeCell.nextSibling);
+        } else {
+          tr.appendChild(cell);
+        }
+      }
+      if (!dirMap) {
+        if (cell.textContent !== '') { cell.textContent = ''; }
+        if (cell.style.display !== 'none') { cell.style.display = 'none'; }
+        continue;
+      }
+      var d = $(tr).data() || {};
+      var key = String(d.path || '');
+      var text = '';
+      if (key && Object.prototype.hasOwnProperty.call(dirMap, key)) {
+        text = fmtMtime(dirMap[key]);
+      }
+      // ★ 只在内容真的变了才写 DOM。
+      //   本函数由 MutationObserver 与 600ms 定时器反复调用，而写 textContent
+      //   本身就会产生一条 childList mutation —— 无条件赋值就是自己触发自己，
+      //   变成死循环（CPU 打满、页面卡死）。判等后再写才是幂等的。
+      if (cell.textContent !== text) { cell.textContent = text; }
+      var wantDisp = text ? '' : 'none';
+      if (cell.style.display !== wantDisp) { cell.style.display = wantDisp; }
+      if (text) { hasAny = true; }
+    }
+    // 整屏都没有时间（比如接口刚挂）就整列隐藏，不留一列空 td。
+    if (dirMap && !hasAny) {
+      for (var j = 0; j < rows.length; ++j) {
+        var c2 = rows[j].querySelector('.oka-mtime-cell');
+        if (c2) { c2.style.display = 'none'; }
+      }
+    }
+  }
+
+  // 为当前目录拉一次时间并写进行里。seq 用来丢弃过期响应：
+  // 用户快速切目录时，慢的那个响应晚到，不能覆盖新目录的数据。
+  function refreshRowTimes() {
+    var dir = curPath();
+    var seq = ++statSeq;
+    fetchStat(dir).then(function (map) {
+      if (seq !== statSeq) { return; }
+      if (statUsable === false) { applyRowTimes(null); return; }
+      applyRowTimes(map);
+    });
+  }
+
+  // ★ v1.1.9：/oka-raw 取不到时的回退也要谨慎。
+  //   回退打的是 /download —— 响应带 Content-Disposition: attachment，
+  //   在某些下载管理器（IDM 等）开着浏览器集成时会**被接管**：请求被抢走，
+  //   页面侧拿到空体或超时，同时用户在下载器里看到任务。
+  //   所以这条回退只用来「探测接口是否存在」，并且同样要校验字节非空；
+  //   它只会在插件版本太老（没有 /oka-raw）时命中一次，之后 rawUsable 定死。
+  function fetchBytes(path, onProgress) {
+    if (rawUsable === false) {
+      return xhrGet('download?path=' + encodeURIComponent(path), true, onProgress);
+    }
+    return xhrGet(rawURL(path), true, onProgress).then(function (bytes) {
       rawUsable = true;
       return bytes;
     }, function (err) {
@@ -494,18 +686,22 @@
 
   // 每行下载按钮：文件走 /oka-raw 取字节 + Blob，目录走上面的前端 ZIP 打包。
   //
-  // ★ v1.1.8：不再用 `window.location = 'download?...'`。
-  //   v1.1.7 那种写法是「顶层导航触发下载」，在 http://<局域网IP>:8080 这种
-  //   明文源上会被 Chrome 的安全下载策略拦成「已阻止不安全的下载」，
-  //   必须手动点「保留」；而且 Chrome 要先把它读完才判定类型，大文件就
-  //   表现为「点了按钮半天没动静」。改成 Blob 下载后：
-  //     · blob: 是页面自己产生的数据，不经过「不安全下载」判定；
-  //     · 进度由本页控制，可以给出「正在下载 xx%」的反馈；
-  //     · 字节走 /oka-raw（inline），IDM 不会抢。
+  // ★ v1.1.9：彻底删掉「导航式下载」这条退路。
   //
-  //   大文件不无条件读进内存：超过 DOWNLOAD_BLOB_MAX 就退回导航式下载
-  //   （那种情况浏览器自带进度条与存盘，体验反而更好），并明确告诉用户
-  //   如果被拦怎么放行。
+  //   为什么必须删而不是继续兜底：
+  //   `window.location = 'download?path=...'` 会产生一次真正的**浏览器下载事件**，
+  //   而 IDM 这类下载管理器的浏览器集成正是靠「下载事件 + Content-Disposition」
+  //   来接管的。一旦走这条路：
+  //     ① Chrome 对 http://<局域网IP> 明文源上的下载判定为「不安全下载」并拦截，
+  //        用户必须点「保留」；
+  //     ② 它要先读完整个响应才决定类型，大文件就表现为「点了半天没反应」；
+  //     ③ 接管方还要排队、探测、弹窗，于是二三十秒后才出现在下载列表里。
+  //   最要命的是它**只要触发一次就够用户骂一次**，所以不能留作兜底：
+  //   宁可明确报错让用户重试，也不要把文件交给浏览器下载通道。
+  //
+  //   现在的唯一路径：XHR 取字节 → Blob → <a download>。
+  //   blob: 是页面内存里的数据，不经过网络下载通道，IDM 看不到，
+  //   也不触发「不安全下载」判定（已用 A/B 实验在非安全源上验证）。
   var DOWNLOAD_BLOB_MAX = 512 * 1024 * 1024;   // 512 MB
 
   function saveBytesAs(name, bytes, mime) {
@@ -525,13 +721,10 @@
     return MIME_EXT[fileExt(name)] || 'application/octet-stream';
   }
 
-  // 导航式下载兜底（大文件 / Blob 失败）。仍然走 /download，
-  // 因为只有它会带 attachment —— 而 attachment 正是「存成文件」需要的。
-  function navigateDownload(path) {
-    setTimeout(function () {
-      window.location = 'download?path=' + encodeURIComponent(path);
-    }, 0);
-  }
+  // ★ v1.1.9：导航式下载已彻底移除（见上面段落说明）。
+  //   这里不再有 navigateDownload()：任何「把文件交给浏览器下载通道」的行为
+  //   都会让 IDM 接管 + 触发「不安全下载」拦截，代价远大于收益。
+  //   取不到字节时明确报错并提示重试，而不是偷偷换一条会弹窗的路。
 
   function downloadItem(d) {
     var isDir = (d.size == null) || String(d.path || '').slice(-1) === '/';
@@ -540,32 +733,49 @@
     var name = String(d.name || baseName(d.path));
     var known = (typeof d.size === 'number' && d.size >= 0) ? d.size : null;
 
-    // 已知超大：直接走导航式下载，不读进内存。
+    // 已知超大：不读进内存，但也不交给浏览器下载通道 —— 直接说清楚。
     if (known !== null && known > DOWNLOAD_BLOB_MAX) {
-      showResult('info', '<strong>文件较大</strong> ' + esc(name) +
-        ' · 交给浏览器下载。若提示「已阻止不安全的下载」，点地址栏右侧提示选「保留」。');
-      navigateDownload(d.path);
+      showResult('warning', '<strong>文件过大</strong> ' + esc(name) + ' · ' +
+        fmtSize(known) + '，超过浏览器单次保存上限 ' + fmtSize(DOWNLOAD_BLOB_MAX) +
+        '。请用电脑上的 Finder / 文件管理器读取，或先拆分后再下载。');
       return;
     }
 
-    showResult('info', '<strong>正在下载</strong> ' + esc(name));
-    fetchBytes(d.path).then(function (bytes) {
+    showResult('info', '<strong>正在读取</strong> ' + esc(name) +
+      (known !== null ? ' · ' + fmtSize(known) : '') + ' …');
+    fetchBytes(d.path, function (loaded, total) {
+      if (!(total > 0)) {
+        showResult('info', '<strong>正在读取</strong> ' + esc(name) +
+          ' · 已收到 ' + fmtSize(loaded) + ' …');
+        return;
+      }
+      var pct = Math.floor(loaded * 100 / total);
+      if (pct > 100) { pct = 100; }
+      showResult('info', '<strong>正在读取</strong> ' + esc(name) +
+        ' · ' + pct + '%（' + fmtSize(loaded) + ' / ' + fmtSize(total) + '）');
+    }).then(function (bytes) {
+      // ★ 空字节必须当失败：服务端要是回了个空体（被中间层吞掉、出错页等），
+      //   当成成功就会存下一个 0 字节文件，用户以为下好了、打开却是坏的。
+      if (!bytes || bytes.length === 0) {
+        showResult('danger', '<strong>下载失败</strong> ' + esc(name) +
+          ' · 服务端返回空内容。请刷新页面后重试；若反复出现，检查是否有' +
+          '下载管理器（IDM 等）正在接管本页请求。');
+        return;
+      }
       if (bytes.length > DOWNLOAD_BLOB_MAX) {
-        showResult('info', '<strong>文件较大</strong> ' + esc(name) +
-          ' · 改由浏览器下载。若被拦，点地址栏提示选「保留」。');
-        navigateDownload(d.path);
+        showResult('warning', '<strong>文件过大</strong> ' + esc(name) + ' · ' +
+          fmtSize(bytes.length) + '，超过浏览器单次保存上限。请用电脑上的' +
+          '文件管理器读取。');
         return;
       }
       saveBytesAs(name, bytes, mimeOf(name));
-      showResult('success', '<strong>已开始保存</strong> ' + esc(name) +
-        ' · ' + fmtSize(bytes.length));
+      showResult('success', '<strong>已保存</strong> ' + esc(name) +
+        ' · ' + fmtSize(bytes.length) + '（请查看浏览器下载列表）');
     }, function (err) {
-      // 取不到字节时不能让用户没路走：退回导航式下载。
-      // 这条路会被 Chrome / IDM 干预，但至少文件能下来。
-      navigateDownload(d.path);
-      showResult('warning', '<strong>已改用浏览器下载</strong> ' + esc(name) +
-        '（' + esc(err && err.message ? err.message : err) +
-        '）。若提示「已阻止不安全的下载」，点地址栏提示选「保留」。');
+      var msg = err && err.message ? err.message : String(err);
+      showResult('danger', '<strong>下载失败</strong> ' + esc(name) + ' · ' + esc(msg) +
+        '。请刷新页面后重试；若反复出现，检查是否有下载管理器（IDM 等）' +
+        '正在接管本页请求。');
     });
   }
 
@@ -638,10 +848,12 @@
       var settled = false;
       var abortReason = null;
       var xhr = new XMLHttpRequest();
-      // ★ v1.1.8：优先 /oka-raw（Content-Disposition: inline）。
-      //   预览之所以必须走 inline：IDM 的浏览器集成见到 attachment 就抢，
+      // ★ v1.1.8：优先 /oka-raw（响应**不带** Content-Disposition 头）。
+      //   预览之所以必须走它：IDM 的浏览器集成见到 attachment 就抢，
       //   抢走之后本页拿到的字节不完整，PDF 的 iframe 就报
-      //   「未能加载 PDF 文档」。inline 响应不会被当成下载任务。
+      //   「未能加载 PDF 文档」。不带该头的响应不会被当成下载任务。
+      //   （v1.1.9 更正：isAttachment:NO 的实际效果是不发这个头，
+      //     不是发 inline —— 见 Tweak.xm 里 【解法】 段的实测证据。）
       //   这里不能复用 fetchBytes（它要先把整个 body 读完才能回退），
       //   预览需要在 readyState 2 就判类型 / 拦大文件，所以自己开 XHR，
       //   只借用 rawUsable 这个探测结果决定打哪个地址。
@@ -717,6 +929,13 @@
         }
         if (rawUsable === null) { rawUsable = true; }
         var bytes = new Uint8Array(xhr.response || 0);
+        // ★ v1.1.9：200 但空体不能当成功。被下载管理器接管、或服务端
+        //   返回了空响应时，这里会拿到 0 字节；继续往下走就会渲染一个
+        //   空白预览或存一个 0 字节文件，用户只会看到「未能加载」。
+        if (bytes.length === 0) {
+          reject(new Error('服务端返回空内容'));
+          return;
+        }
         if (bytes.length > PREVIEW_MAX) {
           reject(new Error('文件超过 ' + fmtSize(PREVIEW_MAX) + '，请用下载按钮'));
           return;
@@ -1530,6 +1749,28 @@
       if (checkCell) { checkCell.classList.add('oka-select-zone'); }
       if (iconCell) { iconCell.classList.add('oka-select-zone'); }
 
+      // ★ v1.1.9：摘掉原版图标按钮的 .button-download / .button-open 类。
+      //
+      //   原版 index.js 里是 `$(".button-download").click(...)`，handler 直接
+      //   绑在元素上，里面执行 `window.location = "download?path=..."` ——
+      //   这正是「等二三十秒 + 已阻止不安全的下载 + IDM 弹窗」的来源。
+      //
+      //   目前靠「图标列是选中热区、捕获阶段 stopPropagation」挡住它，
+      //   但那是隐式依赖：热区逻辑一改、或某个分支 return 早了，用户点图标
+      //   就会掉回原版导航式下载。把类名摘掉是从根上断掉这条绑定 ——
+      //   原版选择器再也匹配不到这个元素，事件绑不上，点了什么也不会发生。
+      //   图标本身是纯视觉标识（v1.1.6 起就不参与交互），摘类不影响观感。
+      if (iconCell) {
+        var legacyBtn = iconCell.querySelector('.button-download, .button-open');
+        if (legacyBtn) {
+          // 只摘类名，不加新类：图标观感由 .column-icon > .btn 的现有样式负责，
+          // 多挂一个没样式的类只会变成死代码。
+          legacyBtn.classList.remove('button-download');
+          legacyBtn.classList.remove('button-open');
+          legacyBtn.removeAttribute('title');
+        }
+      }
+
       var d = $(tr).data() || {};
       var isDir = (d.size == null) || String(d.path || '').slice(-1) === '/';
 
@@ -1594,6 +1835,16 @@
         else { tr.appendChild(rtd); }
       }
     }
+
+    // ⑥ v1.1.9：最后修改时间列。
+    //    必须在上面所有列都插完之后再调，否则 .column-size 的 nextSibling
+    //    可能正好是刚插进来的下载按钮单元格，时间会跑到按钮右边去。
+    //    这里不直接 fetch，只按已有缓存渲染；真正的网络请求由
+    //    refreshRowTimes() 在列表重载时触发一次。
+    applyRowTimes(
+      Object.prototype.hasOwnProperty.call(statCache, curPath())
+        ? statCache[curPath()] : null
+    );
   }
 
   // v1.1.5：重命名只由每行的独立按钮触发。

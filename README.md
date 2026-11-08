@@ -6,7 +6,34 @@
 |---|---|---|
 | 1 | 桌面长按快捷开启 | 长按图标出现「开启 WiFi 传输」，点一下直接启动服务，地址自动复制到剪贴板并弹窗提示。不用进 App、不用点按钮 |
 | 2 | 蜂窝 / 热点可开启 | 用手机流量或个人热点时，WiFi 传输页面的「开始」按钮正常出现，可正常开启；且显示的地址是手机在热点网段的真实 IP（`172.20.10.1` 这类），不再是 `unknown` |
-| 3 | 电脑网页端增强（v1.1.8） | 保留原 `Upload Files` 按钮；**整个页面就是放置区**（没有独立拖放框），把单个/多个文件、整个文件夹拖进网页任意位置即可上传（拖入时全屏提示 + 成功/失败汇总 + 失败重试）；**复用原版行末「移动」按钮与原弹窗**，增强为目录浏览 + 可勾选批量移动 + 结果反馈。v1.1.2：**文件夹置顶**、**顶部紧凑**、**任务面板默认折叠**；v1.1.5：文件夹琥珀黄 + 行内重命名按钮；**v1.1.6：删除按钮挪到最右、重命名在它左边；文件名左侧整片区域点一下即选中；每行新增下载按钮，文件直接下载、整个文件夹自动打成 ZIP；点行不再下载**；**v1.1.7：点文件夹行进入目录、点文件行在线预览 txt / pdf / mp4 / 图片 / 音频；目录 ZIP 显式带顶层文件夹；图标列按文件类型显示不同图标**；**v1.1.8：下载改 Blob 保存，不再触发 Chrome「已阻止不安全的下载」；PDF 预览可用；目录下载不再引发 IDM 弹一堆窗口** |
+| 3 | 电脑网页端增强（v1.1.8） | 保留原 `Upload Files` 按钮；**整个页面就是放置区**（没有独立拖放框），把单个/多个文件、整个文件夹拖进网页任意位置即可上传（拖入时全屏提示 + 成功/失败汇总 + 失败重试）；**复用原版行末「移动」按钮与原弹窗**，增强为目录浏览 + 可勾选批量移动 + 结果反馈。v1.1.2：**文件夹置顶**、**顶部紧凑**、**任务面板默认折叠**；v1.1.5：文件夹琥珀黄 + 行内重命名按钮；**v1.1.6：删除按钮挪到最右、重命名在它左边；文件名左侧整片区域点一下即选中；每行新增下载按钮，文件直接下载、整个文件夹自动打成 ZIP；点行不再下载**；**v1.1.7：点文件夹行进入目录、点文件行在线预览 txt / pdf / mp4 / 图片 / 音频；目录 ZIP 显式带顶层文件夹；图标列按文件类型显示不同图标**；**v1.1.8：下载改 Blob 保存，不再触发 Chrome「已阻止不安全的下载」；PDF 预览可用；目录下载不再引发 IDM 弹一堆窗口**；**v1.1.9：彻底删掉导航式下载（「等二三十秒 + 已阻止不安全的下载 + IDM 接管」的根因）；每行显示最后修改时间** |
+
+> **v1.1.9：下载慢/被拦的真正根因已清除，并新增「最后修改时间」列。**
+>
+> **① 下载「要等二三十秒、还要手动点保留」**：v1.1.8 虽然主路径换了 Blob，但仍留了两处
+> `window.location = 'download?...'` 兜底（文件超过 512 MB、取字节失败）。实测（同一服务、
+> 同一页面代码，只换访问来源做 A/B）证明：在 `http://<局域网IP>` 这种 `isSecureContext=false`
+> 的源上，**导航式下载必然被拦**——25 秒内连下载事件都不产生，而 `blob:` + `<a download>`
+> 在同样环境下 8 MB 文件秒存、字节完整。注意 v1.1.8 的验证全跑在 `127.0.0.1`，而 Chrome 把
+> localhost 视为安全上下文，所以那条拦截路径**一次都没被走到** —— 验证全绿但真机仍失败。
+> 现在导航式下载已**全文件禁止**（构建期用 python3 剥注释后全文检查，注释里提到不算违规）。
+> 取不到字节时明确报错，不再偷偷换一条会弹窗的路；同时给原版图标按钮摘掉
+> `.button-download` / `.button-open` 类，断掉原版 `$(".button-download").click(...)` 里那条
+> `window.location` 绑定，作为第二道防线。
+>
+> **② 新增「最后修改时间」列**：原版 `list` 只返回 `path` / `name` / `size`，没有时间字段，
+> 所以插件侧注册第 8 个只读接口 `GET /oka-stat?path=<dir>`，一次返回整个目录的
+> `{相对path: unix秒}`（键与原版 `path` 逐字节一致，目录补尾斜杠）。前端渲染在文件大小右侧，
+> 灰字等宽数字，窄屏自动隐藏。三个必须钉死的实现细节：写入必须幂等（本列由 MutationObserver
+> 与 600ms 定时器反复调用，写 `textContent` 本身会产生 mutation，无条件赋值就是自激死循环）；
+> 插入锚在 `.column-size` 之后（否则排到删除按钮右边被挤出屏幕）；在原版 done 之后才刷新
+> （原版在那时才执行 `_path = path` 并重建行，抢跑会取到上一个目录的时间）。
+> 老插件没有这个接口时 404，整列消失，其余功能不受影响。
+>
+> **③ 顺带更正一处长期错误的注释**：`isAttachment:NO` 的实际效果是**不发 `Content-Disposition` 头**，
+> 不是「发 `inline`」。binary 里 `inline` 出现 0 次（`GCDWebServer.framework`），上游源码是
+> `if (attachment) { ...forAdditionalHeader:@"Content-Disposition" }`，NO 时整段跳过。
+> 代码行为一直是对的，只是描述错了。
 
 > **v1.1.8：修掉下载被浏览器拦、PDF 预览失败、目录下载弹一堆 IDM 窗。** 三个问题同一个根因：
 > 服务端 `/download` 的响应固定带 `Content-Disposition: attachment`（`GCDWebUploader.m` 里是
@@ -15,7 +42,7 @@
 > 类型 → 表现为「点了半天没动静，还得手动点保留」；② IDM 的浏览器集成见到 `attachment` 就抢，
 > 预览拿到的字节不完整 → PDF 报「未能加载 PDF 文档」；③ 目录 ZIP 是逐文件请求，每个响应都是
 > `attachment`，IDM 逐个接管 → **点一次下载文件夹弹出 N 个窗口**。
-> 修法是服务端新增 **`GET /oka-raw`**，用 `isAttachment:NO` 返回同一份文件（`inline`），
+> 修法是服务端新增 **`GET /oka-raw`**，用 `isAttachment:NO` 返回同一份文件（**不发 `Content-Disposition` 头**），
 > 前端所有「把字节读进页面」的路径（预览 / 目录打包 / Blob 下载）全部改走它；文件下载不再导航，
 > 改为 XHR 取字节 + `Blob` + `<a download>` 落盘（`blob:` 是页面自己产生的数据，不经过「不安全下载」
 > 判定）；PDF 容器从 `<iframe>` 换成 `<embed type="application/pdf">` 并带加载失败兜底。
@@ -247,9 +274,23 @@ _GCDWebServerGetPrimaryIPAddress 硬编码 strcmp(ifa_name,"en0")
 `Content-Disposition: inline` 预览、覆盖写回、服务端打包 ZIP 之类的隐藏接口。
 
 > **v1.1.8 补了第 7 个**：插件在 `-[GCDWebUploader initWithUploadDirectory:]` 之后注册
-> `GET /oka-raw?path=`，用 `responseWithFile:isAttachment:NO` 返回同一份文件，响应头是
-> `Content-Disposition: inline`。它不是原版接口，是插件自己加的；只服务本插件前端，
+> `GET /oka-raw?path=`，用 `responseWithFile:isAttachment:NO` 返回同一份文件。
+> **注意 `isAttachment:NO` 的实际效果是「不发 `Content-Disposition` 头」，不是发 `inline`** ——
+> 这一点在 v1.1.9 用二进制与上游源码双重核对过：`GCDWebServer.framework` 里 `inline` 出现
+> **0 次**，`Content-Disposition` 只出现 1 次且值为 `attachment; filename="%@"; filename*=UTF-8''%@`；
+> 上游 `GCDWebServerFileResponse.m` 是 `if (attachment) { ... forAdditionalHeader:@"Content-Disposition" }`，
+> NO 时整段跳过。行为上正是我们要的：没有这个头，IDM 不当下载任务接管，Chrome 也不走
+> 「不安全下载」判定（它就是一次普通 XHR 响应）。v1.1.8 的注释曾把这里写成 `inline`，已更正。
+> 它不是原版接口，是插件自己加的；只服务本插件前端，
 > `/download` 的语义与行为完全不变。见下面 v1.1.8 一节。
+>
+> **v1.1.9 补了第 8 个**：`GET /oka-stat?path=<dir>`，返回该目录下所有条目的最后修改时间，
+> 形如 `{"sub/a.txt": 1762..., "sub/": 1762...}`（键与原版 `list` 的 `path` 字段逐字节一致，
+> 目录补尾斜杠；值为 unix 秒）。列表的时间列就靠它。它也是**只读**，与 `/oka-raw`
+> 共用同一份路径围栏（`OkaResolveInRoot`），围栏逻辑只有一份实现。
+> **为什么不直接给 `list` 加字段**：那个 JSON 结构是原版页面的契约，改它属于变更原版接口语义；
+> 新开一个只读接口，出问题不注册即可，原版行为一字不动。
+>
 > 覆盖写回、服务端打包 ZIP 仍然没有 —— 目录 ZIP 依旧在浏览器端拼。
 > 因此「网页里编辑文件再保存回手机」仍不可行。
 
@@ -260,8 +301,8 @@ _GCDWebServerGetPrimaryIPAddress 硬编码 strcmp(ifa_name,"en0")
 | 反馈 | 根因 | 改法 |
 |---|---|---|
 | 点下载按钮要反应半天，还报「已阻止不安全的下载」，得手动点保留 | `downloadItem()` 用 `window.location = 'download?path=...'` 做**顶层导航下载**。`/download` 的响应是 `responseWithFile:isAttachment:YES`，在 `http://172.20.10.1:8080` 这种**明文局域网源**上会被 Chrome 安全下载策略拦下（要求用户确认「保留」）；而且 Chrome 要先把响应读完才能判定类型，所以小文件也要等，大文件更慢 | 改为「XHR 取字节 → `Blob` → `<a download>` 点击」。`blob:` 是页面自身产生的数据，不经过「不安全下载」判定；进度由本页掌控。超过 `DOWNLOAD_BLOB_MAX`（512 MB）或取字节失败时，才退回导航式下载并明确提示如何在地址栏放行 |
-| PDF 点预览报「未能加载 PDF 文档」，但 IDM 弹了下载窗 | 两层原因叠加：① 预览用 XHR 打 `/download`，响应带 `attachment`，**IDM 的浏览器集成会抢走它**，页面拿到的字节不完整；② 容器是 `<iframe src="blob:...">`，Chromium 内嵌 PDF 依赖内置阅读器插件，被禁用 / 被扩展接管时就报这句 | 字节改走 `/oka-raw`（`inline`，IDM 不再视为下载任务）；容器换成 `<embed type="application/pdf">`，并显式给 `width` / `height`（`<embed>` 是 replaced element，只靠 CSS 会出现 0 高度空白）；挂 `error` 监听，失败时换成说明 + 「在新标签页打开」按钮，不留空白 |
-| 点下载文件夹，IDM 弹出很多个窗口，每个文件一个 | 目录 ZIP 是**逐文件**发 XHR 取字节。每个 `/download` 响应都带 `Content-Disposition: attachment`，IDM 把每一条都当成一次独立下载任务接管 → N 个文件弹 N 个窗 | 逐文件取字节改走 `/oka-raw`（`inline`），IDM 不再接管；一个目录只产生一次 Blob 落盘 |
+| PDF 点预览报「未能加载 PDF 文档」，但 IDM 弹了下载窗 | 两层原因叠加：① 预览用 XHR 打 `/download`，响应带 `attachment`，**IDM 的浏览器集成会抢走它**，页面拿到的字节不完整；② 容器是 `<iframe src="blob:...">`，Chromium 内嵌 PDF 依赖内置阅读器插件，被禁用 / 被扩展接管时就报这句 | 字节改走 `/oka-raw`（不带 `Content-Disposition`，IDM 不再视为下载任务）；容器换成 `<embed type="application/pdf">`，并显式给 `width` / `height`（`<embed>` 是 replaced element，只靠 CSS 会出现 0 高度空白）；挂 `error` 监听，失败时换成说明 + 「在新标签页打开」按钮，不留空白 |
+| 点下载文件夹，IDM 弹出很多个窗口，每个文件一个 | 目录 ZIP 是**逐文件**发 XHR 取字节。每个 `/download` 响应都带 `Content-Disposition: attachment`，IDM 把每一条都当成一次独立下载任务接管 → N 个文件弹 N 个窗 | 逐文件取字节改走 `/oka-raw`（不带 `Content-Disposition`），IDM 不再接管；一个目录只产生一次 Blob 落盘 |
 
 **为什么会这样**：`GCDWebUploader.m` 的 `downloadFile:` 结尾是
 
@@ -294,7 +335,7 @@ return [GCDWebServerFileResponse responseWithFile:absolutePath isAttachment:YES]
 
 **v1.1.8 起预览的字节来源改为 `GET /oka-raw`**（v1.1.7 用的是 `GET download`）：
 两者返回同一份文件，但 `/download` 带 `Content-Disposition: attachment`，会被 IDM 的浏览器集成抢走，
-导致预览字节不完整（PDF 尤甚）。`/oka-raw` 是 `inline`，不会被当成下载任务。
+导致预览字节不完整（PDF 尤甚）。`/oka-raw` 不发送 `Content-Disposition`，不会被当成下载任务。
 前端仍用原生 `XMLHttpRequest`，与被包装过的 `$.ajax` 完全隔离，不会触发排序或清空选中。
 PDF 容器在 v1.1.8 从 `<iframe>` 换成 `<embed type="application/pdf">`。
 左侧热区、每行下载按钮、上传 / 移动 / 重命名 / 排序 / 折叠面板全部保持原样。
@@ -671,7 +712,7 @@ v1.1.3 起插件**不输出任何系统日志**，所以判据一律看功能表
 5. **端口是 App 自己定的，插件不改。** v1.0.2 直接从 `[self port]` 读真实端口（`GCDWebServer` 公开属性）、`isRunning` 读运行状态，`stop` 时清零；不再靠猜 8080，也不再依赖 `startWithPort:` 是否被命中。端口 LISTEN 探测只保留为 UI 兜底层的补充手段。
 6. **网页增强依赖电脑浏览器的 `DataTransferItem.webkitGetAsEntry()`。** Chrome / Edge / Safari 支持整个文件夹递归；不提供该 API 的浏览器会自动降级为「单文件 / 多文件」拖放上传，文件夹结构无法保留（点 `Upload Files` 选文件始终可用）。另外服务端 `create` 不递归、也不允许目标已存在，所以文件夹上传是**串行**的：先逐级建目录，再逐个传文件，大文件夹会比一次多文件选择慢。
 7. **注入层依赖 `responseWithHTMLTemplate:variables:` 这条渲染路径。** 已在 1.7.5 的 `GCDWebServer` 二进制里反汇编确认（6 个 variables key 的字典 + `0x1D210` 的类方法调用）。若 App 升级换了 GCDWebServer 版本、改走别的 HTML 渲染方法，注入会静默不生效——但功能 1 / 2 完全不受影响，网页也会保持原版可用状态。
-8. **「点行打开文件 → 编辑 → 保存回手机」仍不支持编辑保存；v1.1.7 起支持只读预览。** 服务端只有 6 个接口：`download` 是附件下载（指向目录直接 400）、`upload` 同名自动改名不覆盖，没有 inline 读取与覆盖写回。要真正实现在线编辑，必须在插件侧注册新的 `GCDWebServer` handler（例如 `/open` + `/save`），属于改服务端能力，未实施。目录下载因此走浏览器端 ZIP 打包（v1.1.7 起显式带顶层文件夹），超大目录会受浏览器内存限制；单个文件预览上限 200 MB，超过只给下载按钮。
+8. **「点行打开文件 → 编辑 → 保存回手机」仍不支持编辑保存；v1.1.7 起支持只读预览。** 原版服务端只有 6 个接口：`download` 是附件下载（指向目录直接 400）、`upload` 同名自动改名不覆盖，没有 inline 读取与覆盖写回。v1.1.8 由插件侧注册了第 7 个接口 `GET /oka-raw`（只读取字节，仅限上传根内，响应不带 `Content-Disposition`），v1.1.9 又加了第 8 个只读接口 `GET /oka-stat`（取目录内各条目的修改时间，供列表时间列），预览与目录 ZIP 的字节都改从这里取；**它只读，仍然没有覆盖写回**。要真正实现在线编辑，还得再注册一个 `/save` 之类能写回的 handler，属于新增写能力，未实施。目录下载因此走浏览器端 ZIP 打包（v1.1.7 起显式带顶层文件夹），超大目录会受浏览器内存限制；单个文件预览上限 200 MB，超过只给下载按钮。
 
 ---
 

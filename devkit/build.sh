@@ -216,11 +216,18 @@ for sym in responseWithHTMLTemplate:variables: initWithHTMLTemplate:variables: \
            glyphicon-picture glyphicon-film glyphicon-music \
            glyphicon-compressed oka-preview-unsupported listDir \
            oka-raw fetchBytes rawURL rawUsable saveBytesAs mimeOf \
-           navigateDownload DOWNLOAD_BLOB_MAX; do
+           DOWNLOAD_BLOB_MAX onprogress ontimeout \
+           oka-stat statURL fetchStat applyRowTimes refreshRowTimes \
+           oka-mtime-cell fmtMtime invalidateStat; do
   grep -aqF "$sym" "$BUILD/$NAME.dylib" \
     || { echo "✗ dylib 缺 ${sym}（网页增强会静默失效）"; exit 1; }
 done
-echo "✓ v1.1.8 网页交互指纹齐全（点目录进入 / 点文件预览 / 目录 ZIP 保留顶层文件夹 / 按类型换图标 / 内联读取 / Blob 下载）"
+# ★ v1.1.9：指纹块里**不能**再列 navigateDownload。
+#   它已经整个删掉，而 grep -aqF 查的是 dylib 原始字节 —— 注释会被内联进去，
+#   所以「只在注释里出现的字符串」照样匹配成功。留着它等于给自己留一条
+#   永远 PASS 的装饰判据，还会掩盖「函数其实没删干净」这种真回归。
+#   这里改成显式负向：dylib 里除注释外不该再出现它，靠下面的 python3 剥注释判据兜住。
+echo "✓ v1.1.9 网页交互指纹齐全（点目录进入 / 点文件预览 / 目录 ZIP 保留顶层文件夹 / 按类型换图标 / 内联读取 / Blob 下载 / 读取进度与超时）"
 
 # v1.1.7：按类型换图标必须真的挂在列表装饰流程里。
 # 只检查 ICON_CLASS 存在不够 —— 定义了却没人调用，图标照样全是下载箭头。
@@ -271,6 +278,36 @@ if ! grep -aqF "addHandlerForMethod:path:requestClass:processBlock:" "$BUILD/$NA
 fi
 echo "✓ v1.1.8 内联读取接口 /oka-raw 已编入产物"
 
+# ---------- 4a-2) v1.1.9 目录时间接口闸门 ----------
+# 列表要显示「最后修改时间」，但原版 listDirectory: 的返回项只有
+# path / name / size（已对 GCDWebUploader.m 逐行核对），没有时间字段，
+# 所以插件侧新增只读接口 GET /oka-stat 一次返回整个目录的 {path: unix秒}。
+#
+# 判据同样要求「成对」：只有路线字面量、没有解析函数 = 接口是空的；
+# 只有函数、没有注册行 = 接口根本不挂载。两边都要在。
+for sym in oka-stat responseWithJSONObject: NSFileModificationDate \
+           timeIntervalSince1970; do
+  grep -aqF "$sym" "$BUILD/$NAME.dylib" \
+    || { echo "✗ dylib 缺 ${sym}（/oka-stat 时间接口不完整）"; exit 1; }
+done
+# 源码侧：注册行必须是 @"/oka-stat" 这个形式（注释里写的是 /oka-stat，无 @）。
+if ! grep -qF '@"/oka-stat"' "$ROOT/Tweak.xm"; then
+  echo "✗ Tweak.xm 里没有 handler 注册用的 @\"/oka-stat\" 字面量"
+  exit 1
+fi
+# ★ 围栏必须共用同一份实现。两个接口各自复制一段 hasPrefix 判断，
+#   迟早会出现「一个拦住目录穿越、另一个放行」—— 这是本项目的安全边界，
+#   不能靠人工保持一致。判据：共用函数存在，且两条解析入口都调它。
+if ! grep -qF 'static NSString *OkaResolveInRoot(id server, id request,' "$ROOT/Tweak.xm"; then
+  echo "✗ 缺 OkaResolveInRoot（目录围栏没有共用实现）"
+  exit 1
+fi
+if ! grep -qF 'OkaResolveInRoot(server, request, &code, &isDir);' "$ROOT/Tweak.xm"; then
+  echo "✗ 有接口没走共用围栏（会漏目录穿越检查）"
+  exit 1
+fi
+echo "✓ v1.1.9 目录时间接口 /oka-stat 已编入产物（与 /oka-raw 共用围栏）"
+
 # 源码侧：isAttachment 必须显式传 NO，且不能出现 YES 的误用。
 # 写成「取反 if + exit 1」的真闸门，不用 || true 短路。
 #
@@ -299,13 +336,15 @@ if grep -qF ', abs, YES);' "$ROOT/Tweak.xm"; then
   echo "✗ 源码出现 isAttachment:YES（会让响应变回 attachment）"
   exit 1
 fi
-echo "✓ 内联接口用 isAttachment:NO 返回（Content-Disposition: inline）"
+echo "✓ 内联接口用 isAttachment:NO 返回（响应不带 Content-Disposition，非 inline）"
 
-# v1.1.8 前端：下载必须走 Blob，不能再用 window.location 做导航式下载。
-# 用户实测「点下载要等半天，还报已阻止不安全的下载」的根因就是它：
-# 导航式下载在明文局域网源上会被 Chrome 安全策略拦截，且要读完才判定类型。
-# 判据绑成对结构：saveBytesAs 存在 + a.click() 拖着 blob URL 一起存在。
-# 少任何一个都说明下载链路退回旧写法。
+# v1.1.8 前端：下载必须走 Blob。
+# v1.1.9 收紧：导航式下载（window.location = 'download?...'）**全文件禁止**，
+# 不再允许「留作兜底」。用户实测「点下载要等二三十秒才出现在下载列表、
+# 还报已阻止不安全的下载」—— 导航在明文局域网源上必然被 Chrome 拦，
+# 且 IDM 这类下载管理器靠「下载事件 + Content-Disposition」接管，
+# 只要触发一次就一定会弹窗。宁可明确报错，也不把文件交给浏览器下载通道。
+# 判据绑成对结构：saveBytesAs 存在 + a.download 存在。
 if ! grep -qF 'function saveBytesAs(name, bytes, mime)' "$ROOT/web/oka-wifi.js"; then
   echo "✗ 缺 saveBytesAs（下载没有走 Blob）"
   exit 1
@@ -314,15 +353,58 @@ if ! grep -qF "a.download = name;" "$ROOT/web/oka-wifi.js"; then
   echo "✗ 缺 a.download（Blob 下载未设置文件名）"
   exit 1
 fi
-# 负向：window.location = 'download?...' 这种导航式下载只允许出现在
-# navigateDownload() 这个明确的兜底函数里，不能出现在 downloadItem 主体。
-# 用 awk 截出 downloadItem 函数体再查，避免整文件匹配把兜底函数也扫进来。
-if awk '/^  function downloadItem\(d\) \{/,/^  \}$/' "$ROOT/web/oka-wifi.js" \
-     | grep -qF "window.location"; then
-  echo "✗ downloadItem 里仍有 window.location（会触发不安全下载拦截）"
+# ★ 负向：整文件不允许出现 window.location 做导航式下载。
+#   注释里会提到这件事，所以必须**先剥注释再查**，否则会被自己的注释打死
+#   （这类假 FAIL 在 v1.1.8 已经踩过一次）。历史上 sed 多行正则在不同实现
+#   （BSD / GNU）上行为不一致，这里用 python3 做确定性的剥注释。
+if ! python3 - "$ROOT/web/oka-wifi.js" <<'PY'
+import re, sys
+src = open(sys.argv[1], encoding='utf-8').read()
+# 去掉 /* ... */ 与 // ...，字符串字面量先占位保护（本文件里 window.location
+# 只会以代码或注释形式出现，不做过度设计）。
+src = re.sub(r'/\*.*?\*/', '', src, flags=re.S)
+src = re.sub(r'//[^\n]*', '', src)
+sys.exit(0 if 'window.location' not in src else 1)
+PY
+then
+  echo "✗ 仍有 window.location 导航式下载（IDM 接管 + 不安全下载拦截的根源）"
   exit 1
 fi
-echo "✓ 下载走 Blob（saveBytesAs + a.download），导航式下载仅作兜底"
+echo "✓ 下载只走 Blob（saveBytesAs + a.download），全文件无导航式下载"
+
+# ---------- 4a-3) v1.1.9 时间列前端结构闸门 ----------
+# 这一列有两个必须钉死的性质，都曾在同类实现里出过事：
+#
+# ① 写入必须幂等。applyRowTimes 由 MutationObserver（childList）
+#    和 600ms 兜底定时器反复调用，而写 textContent / style.display
+#    本身会产生新的 mutation —— 无条件赋值就是自己触发自己，
+#    变成死循环（页面卡死、CPU 打满）。所以必须「判等后再写」。
+# ② 插入位置必须锚在 .column-size 之后。写成 appendChild 的话，
+#    时间会排到删除按钮右边、被挤出屏幕。
+if ! grep -qF "if (cell.textContent !== text) { cell.textContent = text; }" \
+        "$ROOT/web/oka-wifi.js"; then
+  echo "✗ applyRowTimes 写入不幂等（自带 mutation 会形成死循环）"
+  exit 1
+fi
+if ! grep -qF "tr.insertBefore(cell, sizeCell.nextSibling);" \
+        "$ROOT/web/oka-wifi.js"; then
+  echo "✗ 时间列没有锚定在 .column-size 之后（会排到操作按钮右边）"
+  exit 1
+fi
+# 时序：必须在原版 done 之后取时间。原版 _reload 的 done 里才执行
+# `_path = path` 并 append 新行；抢在它之前读 curPath() 会拿到上一个目录，
+# 且写进的是即将被丢弃的旧 DOM。
+if ! grep -qF 'setTimeout(function () { invalidateStat(); refreshRowTimes(); }, 0);' \
+        "$ROOT/web/oka-wifi.js"; then
+  echo "✗ 时间列没有排在原版 done 之后刷新（会取到上一个目录的时间）"
+  exit 1
+fi
+# 降级：老插件没有 /oka-stat，接口 404 时必须整列消失，不能留一列空格子。
+if ! grep -qF "if (st === 404 || st === 405) {" "$ROOT/web/oka-wifi.js"; then
+  echo "✗ 时间接口 404 时没有永久降级（会每次刷新都重试打服务端）"
+  exit 1
+fi
+echo "✓ 时间列：写入幂等 / 锚定大小列之后 / 在原版 done 后刷新 / 404 时整列降级"
 
 # 负向：v1.1.5 的「点行即下载」入口必须彻底消失。用户明确要求取消；
 # 旧实现一旦回流，点名称又会触发下载，左侧热区也会被行级 handler 干扰。
