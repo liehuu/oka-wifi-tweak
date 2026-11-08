@@ -1,5 +1,5 @@
 /*
- * OkaWiFi v1.1.7 — GCDWebUploader 网页端增强层
+ * OkaWiFi v1.1.8 — GCDWebUploader 网页端增强层
  *
  * 注入方式：由 Tweak.xm hook +[GCDWebServerDataResponse responseWithHTMLTemplate:variables:]
  *          把本文件 + oka-wifi.css 追加到 epilogue 变量里，随首页 HTML 一起下发。
@@ -17,6 +17,10 @@
  *   v1.1.4 每次列表重建都重置选中，修掉删除 / 移动之后的「幽灵选中」。
  *   v1.1.5 文件夹琥珀黄；摘掉原版 jeditable 把重命名改成每行一个按钮。
  *
+ *   v1.1.6 行末按钮重排 / 左侧选中热区 / 每行下载按钮 / 目录 ZIP。
+ *   v1.1.7 点目录进入 / 点文件预览 / ZIP 保留顶层文件夹 / 按类型换图标。
+ *   v1.1.8 下载改 Blob 保存 / PDF 换 embed 容器 / 新增 inline 读取接口 /oka-raw。
+ *
  * v1.1.6 三项交互（按真机反馈改）：
  *   ① 行末按钮重排：删除按钮必须在最右，重命名按钮紧挨它左边；
  *      并在原版 .column-move 左边插入一个独立下载按钮。
@@ -31,15 +35,30 @@
  *      现在点名称区域时目录走原版 window._reload(path)，文件走下面的预览。
  *   ② 目录 ZIP 显式写入顶层目录条目：v1.1.6 只写了 Docs/a.txt 这类带前缀的
  *      文件条目，没写 Docs/ 本身；不少解压工具不建隐式目录，解压就成了散装文件。
- *   ③ 点文件行在线预览 txt / pdf / mp4 / 图片 / 音频：服务端 download 是
- *      attachment，但前端用原生 XHR 取回字节后用 Blob URL 渲染即可，
- *      不需要改服务端、也不需要覆盖写回（编辑保存仍不支持，见 README）。
+ *   ③ 点文件行在线预览 txt / pdf / mp4 / 图片 / 音频：v1.1.7 用 download 取字节，
+ *      但 download 的响应带 Content-Disposition: attachment，会被浏览器下载管理 /
+ *      第三方下载器抢走，拿到的字节不完整。v1.1.8 起改用新增的 GET /oka-raw
+ *      （响应为 inline），详见下面 v1.1.8 段落。
  *      预览弹窗默认隐藏，不占列表版面；左侧热区仍然只负责选中。
+ *
+ * v1.1.8 三项修复（按真机反馈改）：
+ *   ① 下载被浏览器拦 / 反应慢：以前用 window.location 导航到 download，
+ *      http:// 明文源上的附件下载会触发 Chrome「已阻止不安全的下载」，
+ *      必须手动点「保留」。现在先用 XHR 取回字节，再用 Blob + <a download>
+ *      保存 —— blob: 是页面自身产生的数据，不经过那条不安全下载判定；
+ *      超过 512 MB 或取字节失败时才退回导航式下载，并提示怎么放行。
+ *   ② PDF 预览报「未能加载 PDF 文档」：根因同上，IDM 把 attachment 抢走导致
+ *      字节残缺。改走 inline 接口后仍不够 —— 容器也从 <iframe> 换成
+ *      <embed type="application/pdf">（Chrome 对 blob: 的 PDF 在内嵌框里
+ *      依赖内置阅读器插件），并给 <embed> 显式宽高，加载失败有兜底提示。
+ *   ③ 下载文件夹弹出一堆 IDM 窗：目录 ZIP 逐文件请求以前打 download，
+ *      每条 attachment 都被 IDM 当成一个独立下载任务。现在统一走 /oka-raw。
  *
  * 目录下载（v1.1.6）：服务端 GET download?path=<目录> 直接返回
  *   400 Bad Request（"... is a directory"，见 GCDWebUploader.m 的 downloadFile:），
  *   所以不能用一个请求下载文件夹。这里在浏览器端递归 GET list 展开目录树、
- *   逐文件 GET download，再用零依赖的 store 模式 ZIP 打成 <目录名>.zip。
+ *   逐文件取字节（v1.1.8 起走 /oka-raw），再用零依赖的 store 模式 ZIP 打成
+ *   <目录名>.zip。
  *   全程用原生 XMLHttpRequest，绕过 $.ajax 包装：否则每次 list 都会触发
  *   sortListingInPlace() 与 resetSelectionOnReload()，把用户当前勾选清掉，
  *   还会让「下载」悄悄干扰「上传」的队列状态。
@@ -51,12 +70,19 @@
  *
  * 服务端接口（由 GCDWebServer 二进制反汇编 + GCDWebUploader.m 交叉确认）：
  *   GET  list?path=<dir>                  -> JSON 数组；目录的 path 以 "/" 结尾
- *   GET  download?path=<file>             -> 附件；path 指向目录则 400
+ *   GET  download?path=<file>             -> 附件（attachment）；path 指向目录则 400
  *   POST upload {path:<已存在目录>, files[]:...} -> 同名文件自动改名，不覆盖
  *   POST create {path:<新目录完整路径>}   -> withIntermediateDirectories:NO
  *   POST move   {oldPath, newPath}        -> 目标已存在时自动改名，不覆盖
  *   POST delete {path}
- *   只有以上 6 个接口，没有读取文件内容 inline、也没有覆盖写回的接口。
+ *   原版只有以上 6 个接口。v1.1.8 由插件自己补了第 7 个：
+ *   GET  /oka-raw?path=<file>             -> 内联（inline）返回文件字节，仅限上传根内
+ *   仍然没有覆盖写回的接口（编辑保存不支持，见 README）。
+ *
+ * /oka-raw 的兼容性设计：它是插件注册的，老版本插件里不存在。
+ *   首次用到时先探一次，只有确认「接口缺失」（download 能拿到、oka-raw 404）
+ *   才永久降级回 download；文件真的不存在时不降级，避免一个 404 把后续
+ *   所有预览都拖成慢路径。
  */
 (function () {
   'use strict';
