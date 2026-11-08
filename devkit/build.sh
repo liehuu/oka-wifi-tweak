@@ -182,7 +182,7 @@ grep -aq "_swift_unknownObjectWeakLoadStrong" "$BUILD/$NAME.dylib" \
        echo "  排查：Tweak.xm 里 dlsym(RTLD_DEFAULT, \"_swift_unknownObjectWeakLoadStrong\") 是否还以字符串字面量形式存在"
        exit 1; }
 
-# 功能 3（v1.1.5）：网页增强注入层
+# 功能 3（v1.1.6）：网页增强注入层
 # 前 4 条是 ObjC 侧：类方法 hook 的 selector、幂等标记、类名常量。
 # 其余来自内联的 kOkaWebJS / kOkaWebCSS —— 丢了说明 gen-webassets.py 的
 # 产物没被编进来，页面会照常打开但增强功能全部不存在，属于"静默功能缺失"。
@@ -190,20 +190,32 @@ grep -aq "_swift_unknownObjectWeakLoadStrong" "$BUILD/$NAME.dylib" \
 # v1.1.2 再加两条：sortListingInPlace（列表排序）与 oka-compact（顶部紧凑）。
 # v1.1.3 移除诊断日志（见下方负向闸门）；
 # v1.1.4 修选中残留：resetSelectionOnReload（列表重建即清空）+ liveSelectedItems（剔除幽灵项）。
-# v1.1.5 三项网页交互：decorateRows（摘掉 jeditable / 配色 / 行内重命名按钮）、
-#   startRename（按钮触发的内联重命名）、openRow（点行下载 / 进入目录）。
+# v1.1.6 三项网页交互：行末按钮重排（oka-download / oka-rename 都在删除左边）、
+#   左侧选中热区（onSelectZoneCapture / oka-select-zone / toggleRowSelection）、
+#   目录前端 ZIP 打包（buildZip / collectTree / xhrGet / downloadItem）。
+#   v1.1.5 的「点行即下载」已按反馈取消，由下面的负向闸门反查。
 for sym in responseWithHTMLTemplate:variables: initWithHTMLTemplate:variables: \
            OKA-WIFI-INJECTED GCDWebServerDataResponse \
            oka-list-tools onMoveButtonCapture HTML_MOVE_ENHANCE move-confirm \
            oka-drag-overlay webkitGetAsEntry dirAlreadyExists \
            sortListingInPlace isListingArray isDirEntry origAjax oka-compact \
            resetSelectionOnReload liveSelectedItems hidden.bs.modal \
-           decorateRows startRename openRow oka-dir-row oka-file-row \
-           oka-name oka-rename oka-rename-input glyphicon-pencil; do
+           decorateRows startRename downloadItem oka-dir-row oka-file-row \
+           oka-name oka-rename oka-rename-input glyphicon-pencil \
+           oka-download oka-download-cell oka-select-zone onSelectZoneCapture \
+           toggleRowSelection buildZip collectTree xhrGet application/zip; do
   grep -aqF "$sym" "$BUILD/$NAME.dylib" \
     || { echo "✗ dylib 缺 ${sym}（网页增强会静默失效）"; exit 1; }
 done
-echo "✓ v1.1.5 网页交互指纹齐全（文件夹琥珀黄 / 点行下载进入 / 行内重命名）"
+echo "✓ v1.1.6 网页交互指纹齐全（行末按钮重排 / 左侧选中热区 / 目录 ZIP 下载）"
+
+# 负向：v1.1.5 的「点行即下载」入口必须彻底消失。用户明确要求取消；
+# 旧实现一旦回流，点名称又会触发下载，左侧热区也会被行级 handler 干扰。
+if grep -aqF "openRow" "$BUILD/$NAME.dylib"; then
+  echo "✗ dylib 仍有 openRow（v1.1.5 点行下载未取消）"
+  exit 1
+fi
+echo "✓ 无 v1.1.5 点行下载残留"
 
 # 负向闸门：v1.1.0 的独立拖放框 / 独立批量移动弹窗必须从产物里彻底消失。
 # 用户明确反馈过这两样占版面、另起一套入口不合理，不能让旧代码回流。

@@ -1,60 +1,52 @@
 /*
- * OkaWiFi v1.1.5 — GCDWebUploader 网页端增强层
+ * OkaWiFi v1.1.6 — GCDWebUploader 网页端增强层
  *
  * 注入方式：由 Tweak.xm hook +[GCDWebServerDataResponse responseWithHTMLTemplate:variables:]
  *          把本文件 + oka-wifi.css 追加到 epilogue 变量里，随首页 HTML 一起下发。
  *
  * 布局原则（v1.1.1 按用户反馈改）：
  *   页面默认状态与原版几乎一致，不新增任何占空间的可见区块。
- *   · 拖放在整个页面都可用，所以**没有单独的拖放框**；只在拖入时显示全屏提示层。
+ *   · 拖放在整个页面都可用，所以没有单独的拖放框；只在拖入时显示全屏提示层。
  *   · 上传任务面板默认隐藏，只在有任务时出现；结果条复用原页面的 #alerts。
  *   · 全选/取消选择放进原 .btn-toolbar，与原按钮同一行。
- *   · 移动**复用原版入口**：点行末的 .button-move，弹出的仍是原版 #move-modal，
+ *   · 移动复用原版入口：点行末的 .button-move，弹出的仍是原版 #move-modal，
  *     只是把「只能手填地址」替换成目录浏览 + 批量选中 + 结果反馈。
- *     不再有独立的「移动选中项」按钮和独立弹窗。
  *
- * v1.1.2 两处补齐（按真机反馈）：
- *   · 列表排序：原版按服务端返回顺序直接渲染，目录和文件穿插；在 GET list
- *     的响应源头原地 sort，文件夹置顶、组内按名称自然序。
- *   · 顶部紧凑：header 模板变量那行大标题 + 30px 工具栏上边距把文件列表顶得太靠下，
- *     用 body.oka-compact 作用域收紧，标题保留为一行小字。
+ * 版本沿革：
+ *   v1.1.2 列表排序（文件夹置顶、组内按名称自然序）+ 顶部紧凑 + 任务面板默认折叠。
+ *   v1.1.4 每次列表重建都重置选中，修掉删除 / 移动之后的「幽灵选中」。
+ *   v1.1.5 文件夹琥珀黄；摘掉原版 jeditable 把重命名改成每行一个按钮。
  *
- * v1.1.4 修复（真机反馈：勾选 A 删除/移动后，下次勾选 B 点移动，「已选择项目」里仍有 A）：
- *   根因是 selected 保存的是完整 path，而列表重建后没有清空它：
- *     · 原版「删除」按钮走的是原版 _reload，我们的包装只排序、不清选择；
- *     · 移动后文件 path 已变，旧 path 匹配不到新行 —— DOM 上看不到勾选，
- *       但集合里还留着，下次移动就把它一起列出来（幽灵项）。
- *   修法两道：
- *     ① 每次 GET list 响应到达（删除/移动/上传/新建/切目录/手动刷新都会走）
- *        就重置选择，DOM 与集合始终一致；
- *     ② 打开移动弹窗时只认当前列表里真实存在的行，幽灵项顺手剔除。
+ * v1.1.6 三项交互（按真机反馈改）：
+ *   ① 行末按钮重排：删除按钮必须在最右，重命名按钮紧挨它左边；
+ *      并在原版 .column-move 左边插入一个独立下载按钮。
+ *   ② 选中热区扩大到「文件名左边所有区域」：行首复选框列与图标列任意位置
+ *      点击都切换选中。原版绑在图标按钮上的「点图标即下载 / 进入目录」
+ *      在捕获阶段拦掉，图标只保留视觉标识，不再抢走选中手势。
+ *   ③ 取消「点行即下载」：点名称区域不再触发任何动作（给将来「点行打开」
+ *      留出这个手势）。下载统一走每行新增的 .oka-download 按钮。
  *
- * v1.1.5 网页交互（按真机反馈改）：
- *   · 文件夹换成 Windows 资源管理器式琥珀黄（图标按钮 + 名称 + 行首色条），
- *     文件保持中性色，两者不再「看起来差不多」。
- *   · 原版把 jeditable 的 click 直接 bind 在 .column-name 里的 <p class="edit"> 上
- *     （jquery.jeditable.js 第 125 行），handler 里还 e.stopPropagation()；
- *     名称列又是最宽的一列，于是用户感受到的是「点所在行就是重命名」，
- *     连行级选中都点不到。这里在每次列表重建后把那个 <p> 整个换成
- *     不带 .edit 的 <p class="oka-name">，绑在旧元素上的 jeditable handler
- *     随元素一起失效 —— 不改 index.js、不改 bundle 模板（会破坏 App 签名）。
- *   · 行点击改为「文件 → 下载，文件夹 → 进入」，与原版行首按钮同语义；
- *     多选只走行首复选框与工具栏「全选 / 取消选择」。
- *   · 重命名改成每行一个独立按钮，点开内联输入框；Enter 提交 / Esc 取消，
- *     提交仍走原版同名语义的 POST move {oldPath, newPath: _path + 新名}。
+ * 目录下载（v1.1.6）：服务端 GET download?path=<目录> 直接返回
+ *   400 Bad Request（"... is a directory"，见 GCDWebUploader.m 的 downloadFile:），
+ *   所以不能用一个请求下载文件夹。这里在浏览器端递归 GET list 展开目录树、
+ *   逐文件 GET download，再用零依赖的 store 模式 ZIP 打成 <目录名>.zip。
+ *   全程用原生 XMLHttpRequest，绕过 $.ajax 包装：否则每次 list 都会触发
+ *   sortListingInPlace() 与 resetSelectionOnReload()，把用户当前勾选清掉，
+ *   还会让「下载」悄悄干扰「上传」的队列状态。
  *
  * 设计约束：
  *   1. 原生 "Upload Files" 按钮 / #fileupload 的点击选择流程完全不动；
  *   2. 原生 #listing / _reload / #create-modal 完全不动；
  *   3. 新增功能只通过「追加 DOM + 事件委托 / 捕获阶段拦截」实现。
  *
- * 服务端接口（由 GCDWebServer 二进制反汇编确认）：
+ * 服务端接口（由 GCDWebServer 二进制反汇编 + GCDWebUploader.m 交叉确认）：
  *   GET  list?path=<dir>                  -> JSON 数组；目录的 path 以 "/" 结尾
- *   POST upload {path:<已存在目录>, files[]:...} -> 目录不存在或不是目录会失败
- *   POST create {path:<新目录完整路径>}   -> createDirectoryAtPath:withIntermediateDirectories:NO
- *                                            => 父目录必须已存在，且目标不能已存在
- *   POST move   {oldPath, newPath}        -> newPath 是完整目标路径；已存在会失败
- *   路径一律经 GCDWebServerNormalizePath 规范化。
+ *   GET  download?path=<file>             -> 附件；path 指向目录则 400
+ *   POST upload {path:<已存在目录>, files[]:...} -> 同名文件自动改名，不覆盖
+ *   POST create {path:<新目录完整路径>}   -> withIntermediateDirectories:NO
+ *   POST move   {oldPath, newPath}        -> 目标已存在时自动改名，不覆盖
+ *   POST delete {path}
+ *   只有以上 6 个接口，没有读取文件内容 inline、也没有覆盖写回的接口。
  */
 (function () {
   'use strict';
@@ -193,16 +185,217 @@
     return (b / 1000).toFixed(2) + ' KB';
   }
 
-  // v1.1.5：点行的语义与原版行首按钮一致 —— 文件下载，文件夹进目录。
-  // 下载沿用原版 .button-download 的写法（setTimeout + window.location），
-  // 进目录沿用原版 .button-open 的 _reload(path)。两者都不经过我们自己的
-  // 上传/移动管线，服务端接口一点没变。
-  function openRow(d) {
-    var isDir = (d.size == null) || String(d.path || '').slice(-1) === '/';
-    if (isDir) {
-      if (typeof window._reload === 'function') { window._reload(d.path); }
+  // ---------------------------------------------------------------------
+  // 0b. v1.1.6 行内下载：文件直连 download，目录前端递归打包 ZIP
+  //
+  // 服务端 downloadFile: 遇到目录直接回 400 Bad Request（"... is a directory"），
+  // 而整个 GCDWebUploader 只有 list / download / upload / move / delete /
+  // create 六个接口，没有服务端打包。所以目录下载只能在浏览器端做：
+  //   递归 GET list 展开目录树 → 逐文件 GET download → store 模式 ZIP → Blob。
+  // 全部走原生 XMLHttpRequest，不经过 $.ajax 包装：否则每次 list 都会触发
+  // sortListingInPlace() 与 resetSelectionOnReload()，把用户当前勾选清掉，
+  // 还会让「下载」悄悄干扰「上传」的队列状态。
+  // ---------------------------------------------------------------------
+  var zipping = false;
+
+  function utf8Bytes(s) {
+    if (typeof TextEncoder !== 'undefined') { return new TextEncoder().encode(s); }
+    var bin = unescape(encodeURIComponent(s));
+    var out = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; ++i) { out[i] = bin.charCodeAt(i) & 255; }
+    return out;
+  }
+
+  var CRC_TABLE = null;
+  function crcTable() {
+    if (CRC_TABLE) { return CRC_TABLE; }
+    var t = new Uint32Array(256);
+    for (var n = 0; n < 256; ++n) {
+      var c = n;
+      for (var k = 0; k < 8; ++k) {
+        c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      }
+      t[n] = c >>> 0;
+    }
+    CRC_TABLE = t;
+    return t;
+  }
+
+  function crc32(bytes) {
+    var t = crcTable(), c = 0xFFFFFFFF;
+    for (var i = 0; i < bytes.length; ++i) {
+      c = (c >>> 8) ^ t[(c ^ bytes[i]) & 255];
+    }
+    return (c ^ 0xFFFFFFFF) >>> 0;
+  }
+
+  function w16(a, o, v) { a[o] = v & 255; a[o + 1] = (v >>> 8) & 255; }
+  function w32(a, o, v) {
+    a[o] = v & 255; a[o + 1] = (v >>> 8) & 255;
+    a[o + 2] = (v >>> 16) & 255; a[o + 3] = (v >>> 24) & 255;
+  }
+
+  // ZIP store 模式（不压缩）：local headers + 数据 + central directory + EOCD。
+  // 用 Blob 的 parts 拼，不把大文件内容再复制进一个大数组。
+  // 文件名置 UTF-8 标志位 0x0800，中文名在 Windows / macOS 都不会乱码。
+  function buildZip(entries) {
+    var d = new Date();
+    var year = Math.max(1980, d.getFullYear());
+    var dosTime = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
+    var dosDate = ((year - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+    var parts = [], central = [], offset = 0;
+
+    for (var i = 0; i < entries.length; ++i) {
+      var nameBytes = utf8Bytes(entries[i].name);
+      var data = entries[i].bytes;
+      var sum = crc32(data), size = data.length;
+
+      var local = new Uint8Array(30 + nameBytes.length);
+      w32(local, 0, 0x04034b50);
+      w16(local, 4, 20); w16(local, 6, 0x0800); w16(local, 8, 0);
+      w16(local, 10, dosTime); w16(local, 12, dosDate);
+      w32(local, 14, sum); w32(local, 18, size); w32(local, 22, size);
+      w16(local, 26, nameBytes.length); w16(local, 28, 0);
+      local.set(nameBytes, 30);
+      parts.push(local, data);
+
+      var cd = new Uint8Array(46 + nameBytes.length);
+      w32(cd, 0, 0x02014b50);
+      w16(cd, 4, 20); w16(cd, 6, 20); w16(cd, 8, 0x0800); w16(cd, 10, 0);
+      w16(cd, 12, dosTime); w16(cd, 14, dosDate);
+      // ★ central directory 的字段偏移与 local header 不同：
+      //   crc@16 / comp@20 / uncomp@24（local 是 14/18/22）。
+      //   曾把 uncomp 写到 22，后面所有字段左移 2 字节，ZIP 能被生成但
+      //   Python zipfile 直接报 "Bad magic number for central directory"。
+      w32(cd, 16, sum); w32(cd, 20, size); w32(cd, 24, size);
+      w16(cd, 28, nameBytes.length);
+      w16(cd, 30, 0);   // extra field length
+      w16(cd, 32, 0);   // file comment length
+      w16(cd, 34, 0);   // disk number start
+      w16(cd, 36, 0);   // internal file attributes
+      w32(cd, 38, 0);   // external file attributes
+      w32(cd, 42, offset);   // relative offset of local header
+      cd.set(nameBytes, 46);
+      central.push(cd);
+      offset += local.length + size;
+    }
+
+    var cdSize = 0;
+    for (var j = 0; j < central.length; ++j) { cdSize += central[j].length; }
+    var eocd = new Uint8Array(22);
+    w32(eocd, 0, 0x06054b50);
+    w16(eocd, 4, 0); w16(eocd, 6, 0);
+    w16(eocd, 8, entries.length); w16(eocd, 10, entries.length);
+    w32(eocd, 12, cdSize); w32(eocd, 16, offset); w16(eocd, 20, 0);
+    for (var k = 0; k < central.length; ++k) { parts.push(central[k]); }
+    parts.push(eocd);
+    return new Blob(parts, { type: 'application/zip' });
+  }
+
+  function xhrGet(url, binary) {
+    return new Promise(function (resolve, reject) {
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', url, true);
+      if (binary) { xhr.responseType = 'arraybuffer'; }
+      xhr.onload = function () {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(binary ? new Uint8Array(xhr.response) : xhr.responseText);
+        } else { reject(new Error('HTTP ' + xhr.status)); }
+      };
+      xhr.onerror = function () { reject(new Error('网络错误')); };
+      xhr.send();
+    });
+  }
+
+  // 递归展开目录树。depth / seen 是防环保险：服务端 list 不会返回环，
+  // 但万一上层目录被改名或服务端数据异常，不能让浏览器卡死。
+  function collectTree(dir, relPrefix, acc, depth, seen) {
+    if (depth > 32 || seen[dir]) { return Promise.resolve(acc); }
+    seen[dir] = true;
+    return xhrGet('list?path=' + encodeURIComponent(dir), false).then(function (txt) {
+      var arr;
+      try { arr = JSON.parse(txt); } catch (e) { throw new Error('目录内容不是有效 JSON'); }
+      if (!Array.isArray(arr)) { throw new Error('目录内容不是数组'); }
+      var chain = Promise.resolve();
+      for (var i = 0; i < arr.length; ++i) {
+        (function (o) {
+          if (!o || typeof o.path !== 'string') { return; }
+          var isDir = (o.size == null) || o.path.charAt(o.path.length - 1) === '/';
+          var name = String(o.name || baseName(o.path));
+          if (isDir) {
+            var rel = relPrefix + name + '/';
+            acc.dirs.push(rel);
+            chain = chain.then(function () {
+              return collectTree(o.path, rel, acc, depth + 1, seen);
+            });
+          } else {
+            acc.files.push({ path: o.path, name: relPrefix + name });
+          }
+        })(arr[i]);
+      }
+      return chain.then(function () { return acc; });
+    });
+  }
+
+  function downloadDirectoryAsZip(d) {
+    if (zipping) {
+      showResult('warning', '<strong>已有目录正在打包</strong> 请等当前任务结束。');
       return;
     }
+    zipping = true;
+    var dir = String(d.path || '');
+    var rootRel = baseName(dir) + '/';
+    var acc = { dirs: [], files: [] };
+    showResult('info', '<strong>正在读取目录</strong> ' + esc(rootRel));
+
+    collectTree(dir, rootRel, acc, 0, {}).then(function () {
+      var entries = [];
+      for (var i = 0; i < acc.dirs.length; ++i) {
+        entries.push({ name: acc.dirs[i], bytes: new Uint8Array(0) });
+      }
+      var failures = [];
+      var chain = Promise.resolve();
+      for (var j = 0; j < acc.files.length; ++j) {
+        (function (f, idx) {
+          chain = chain.then(function () {
+            showResult('info', '<strong>正在打包目录</strong> ' + esc(rootRel) +
+              ' · ' + (idx + 1) + '/' + acc.files.length);
+            return xhrGet('download?path=' + encodeURIComponent(f.path), true)
+              .then(function (bytes) { entries.push({ name: f.name, bytes: bytes }); },
+                    function (err) { failures.push(f.name + '：' + err.message); });
+          });
+        })(acc.files[j], j);
+      }
+      return chain.then(function () {
+        var blob = buildZip(entries);
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = baseName(dir) + '.zip';
+        document.body.appendChild(a);
+        a.click();
+        a.parentNode.removeChild(a);
+        setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
+        if (failures.length) {
+          showResult('danger', '<strong>目录下载部分失败</strong> ' + esc(a.download) +
+            ' · 成功 ' + (entries.length - acc.dirs.length - failures.length) +
+            ' 个文件 · 失败 ' + failures.length + ' 个<div class="oka-move-failures">' +
+            failures.map(function (s) { return esc(s); }).join('<br>') + '</div>');
+        } else {
+          showResult('success', '<strong>目录下载完成</strong> ' + esc(a.download) +
+            ' · ' + acc.files.length + ' 个文件 · ' + acc.dirs.length + ' 个子目录');
+        }
+      });
+    }).catch(function (err) {
+      showResult('danger', '<strong>目录下载失败</strong> ' +
+        esc(err && err.message ? err.message : err));
+    }).then(function () { zipping = false; });
+  }
+
+  // 每行下载按钮：文件走原版 download 接口，目录走上面的前端 ZIP 打包。
+  function downloadItem(d) {
+    var isDir = (d.size == null) || String(d.path || '').slice(-1) === '/';
+    if (isDir) { downloadDirectoryAsZip(d); return; }
     setTimeout(function () {
       window.location = 'download?path=' + encodeURIComponent(d.path);
     }, 0);
@@ -245,7 +438,7 @@
     '<span class="oka-list-tools">',
     '  <button type="button" class="btn btn-default btn-sm" id="oka-select-all">全选</button>',
     '  <button type="button" class="btn btn-default btn-sm" id="oka-select-none">取消选择</button>',
-    '  <span class="oka-hint">已选 <span id="oka-sel-count" class="badge">0</span> 项 &middot; 勾行首复选框可批量移动 &middot; 点行即下载 / 进入文件夹</span>',
+    '  <span class="oka-hint">已选 <span id="oka-sel-count" class="badge">0</span> 项 &middot; 点文件名左侧区域即可选中 &middot; 每行下载按钮可下载文件或整个文件夹</span>',
     '</span>'
   ].join('\n');
 
@@ -716,6 +909,14 @@
         tr.insertBefore(td, tr.firstChild);
       }
 
+      // ①b v1.1.6：文件名左边所有区域都是选中热区。
+      //    复选框列 + 图标列两个 td 整格可点，捕获阶段统一 toggle；
+      //    图标列里的原版按钮不再承担下载 / 进入目录的职责。
+      var checkCell = tr.querySelector('.oka-check');
+      var iconCell = tr.querySelector('.column-icon');
+      if (checkCell) { checkCell.classList.add('oka-select-zone'); }
+      if (iconCell) { iconCell.classList.add('oka-select-zone'); }
+
       var d = $(tr).data() || {};
       var isDir = (d.size == null) || String(d.path || '').slice(-1) === '/';
 
@@ -742,7 +943,25 @@
         }
       }
 
-      // ④ 每行一个独立重命名按钮（v1.1.5）
+      // ④ v1.1.6：下载按钮插在原版 .column-move 左边（文件直接下载，
+      //    目录递归打包 ZIP）。插在 DOM 里而不是 append，才不会挤到最右边。
+      if (!tr.querySelector('.oka-download')) {
+        var dtd = document.createElement('td');
+        dtd.className = 'oka-download-cell';
+        var dbtn = document.createElement('button');
+        dbtn.type = 'button';
+        dbtn.className = 'btn btn-default btn-xs oka-download';
+        dbtn.title = '下载文件或整个文件夹';
+        dbtn.setAttribute('aria-label', '下载');
+        dbtn.innerHTML = '<span class="glyphicon glyphicon-download-alt"></span>';
+        dtd.appendChild(dbtn);
+        var moveCell = tr.querySelector('.column-move');
+        if (moveCell) { tr.insertBefore(dtd, moveCell); }
+        else { tr.appendChild(dtd); }
+      }
+
+      // ⑤ v1.1.6：重命名按钮移到删除按钮左边，删除按钮保持在最右。
+      //    v1.1.5 直接 append 到行尾，重命名反而排在删除右边，与反馈相反。
       if (!tr.querySelector('.oka-rename')) {
         var rtd = document.createElement('td');
         rtd.className = 'oka-rename-cell';
@@ -753,7 +972,9 @@
         rbtn.setAttribute('aria-label', '重命名');
         rbtn.innerHTML = '<span class="glyphicon glyphicon-pencil"></span>';
         rtd.appendChild(rbtn);
-        tr.appendChild(rtd);
+        var delCell = tr.querySelector('.column-delete');
+        if (delCell) { tr.insertBefore(rtd, delCell); }
+        else { tr.appendChild(rtd); }
       }
     }
   }
@@ -805,6 +1026,34 @@
     if (input[0]) { input[0].focus(); input[0].select(); }
   }
 
+  // v1.1.6：左侧热区统一切换选中。原版图标按钮的 click 在捕获阶段被
+  // onSelectZoneCapture 拦下，所以点图标不会再触发 download / _reload。
+  function toggleRowSelection(tr) {
+    var d = $(tr).data() || {};
+    if (!d.path) { return; }
+    if (selected[d.path]) { delete selected[d.path]; }
+    else {
+      selected[d.path] = {
+        path: d.path, name: d.name || baseName(d.path), isDir: (d.size == null)
+      };
+    }
+    syncSelectionUI();
+  }
+
+  function onSelectZoneCapture(e) {
+    var t = e.target;
+    if (!t || !t.closest) { return; }
+    // 复选框本身交给原生 change，避免 toggle 两次互相抵消。
+    if (t.closest('input, a, .oka-rename-input')) { return; }
+    var zone = t.closest('#listing tr.row-file .oka-select-zone');
+    if (!zone) { return; }
+    var tr = zone.closest('tr.row-file');
+    if (!tr) { return; }
+    e.preventDefault();
+    e.stopPropagation();   // 原版 .button-download / .button-open 的直接绑定不再执行
+    toggleRowSelection(tr);
+  }
+
   function syncSelectionUI() {
     var keys = Object.keys(selected);
     var map = {};
@@ -832,15 +1081,17 @@
       setInterval(function () { decorateRows(); syncSelectionUI(); }, 600);
     }
 
-    // v1.1.5：行点击 = 下载 / 进入目录，不再切换选中、也不再触发重命名。
-    // 多选只走行首复选框与工具栏的全选按钮；按钮 / 链接 / 输入框一律放行给
-    // 各自的 handler（原版 download/open/move/delete 按钮照常可用）。
-    $(document).on('click', '#listing tr.row-file', function (e) {
-      if ($(e.target).closest('button, a, input, .oka-rename-input').length) { return; }
-      var d = $(this).data() || {};
-      if (!d.path) { return; }
+    // v1.1.6：点行不再下载 / 进入目录。名称及其右侧空白区保持无动作，
+    // 给将来「点行打开文件」留出手势；选中统一由左侧热区（捕获阶段）处理。
+    // 这里不再注册任何行级 click handler —— 少一个 handler 比多一层放行更可靠。
+
+    // 每行一个独立下载按钮：文件直连 download，目录前端递归打包 ZIP。
+    $(document).on('click', '#listing .oka-download', function (e) {
       e.preventDefault();
-      openRow(d);
+      e.stopPropagation();
+      var d = $(this).closest('tr.row-file').data() || {};
+      if (!d.path) { return; }
+      downloadItem(d);
     });
 
     // 每行一个独立重命名按钮：只有点它才进编辑态
@@ -1042,6 +1293,9 @@
 
       // 捕获阶段接管原版行内移动按钮
       document.addEventListener('click', onMoveButtonCapture, true);
+      // 捕获阶段接管「文件名左侧区域」：既扩大选中热区，又拦掉原版
+      // 绑在图标按钮上的下载 / 进入目录 handler。
+      document.addEventListener('click', onSelectZoneCapture, true);
 
       // 捕获阶段接管拖放（全页面都是放置区）
       document.addEventListener('dragenter', onDragEnter, true);

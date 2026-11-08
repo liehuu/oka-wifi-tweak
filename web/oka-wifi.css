@@ -1,6 +1,7 @@
-/* OkaWiFi v1.1.5 — 网页增强层样式
- * v1.1.4 只改了 JS（列表重建时重置选中状态），样式自 v1.1.2 起没动过；
- * v1.1.5 新增文件夹琥珀黄配色与行内重命名按钮 / 输入框样式。
+/* OkaWiFi v1.1.6 — 网页增强层样式
+ * v1.1.5 新增文件夹琥珀黄配色与行内重命名按钮 / 输入框样式；
+ * v1.1.6 新增左侧选中热区（图标按钮改为纯视觉、不再可点）、独立下载按钮列，
+ *         并把重命名列与下载列的宽度收窄，保持删除按钮在最右。
  * 只使用 oka- 前缀，不覆盖 Bootstrap 原类，保证原页面可用性不受影响。
  *
  * v1.1.1 布局原则（按用户反馈改）：
@@ -41,12 +42,22 @@
 .oka-list-tools .badge { background: #2f7fbf; color: #fff; margin: 0 2px; }
 .oka-list-tools .oka-hint { margin-left: 2px; }
 
-/* --- 行选择 --- */
+/* --- 行选择（v1.1.6：文件名左边整片都是热区） --- */
 #listing .oka-check { width: 34px; text-align: center; vertical-align: middle; }
 #listing .oka-checkbox { cursor: pointer; }
-#listing tr.row-file { cursor: pointer; }
+#listing tr.row-file { cursor: default; }
+#listing tr.row-file .btn { cursor: pointer; }
 #listing tr.row-file.oka-selected { background: #e8f3ff !important; }
 #listing tr.row-file.oka-selected > td { border-top-color: #b9d9f5; }
+
+/* 图标列 + 复选框列：整格点击即切换选中。
+ * 原版把 .button-download / .button-open 直接绑在图标按钮上，这里让按钮
+ * 完全不参与鼠标命中，点击必然落到 td，交给捕获阶段的 onSelectZoneCapture。
+ * 键盘 Tab / 编程式 click 仍会派发到按钮，由 JS 侧捕获拦截兜住，双保险。
+ * 按钮保留原有的图标与琥珀黄底色，只是不再是「点一下就下载」的陷阱。 */
+#listing .oka-select-zone { cursor: pointer; }
+#listing .oka-select-zone:hover { background: #f2f8ff; }
+#listing .column-icon > .btn { pointer-events: none; }
 
 /* --- v1.1.5：文件夹用 Windows 资源管理器式琥珀黄，与文件明确区分 ---
  * 原版目录和文件都只靠一个灰色的 btn-default glyphicon 区分，字号颜色完全一样。
@@ -69,8 +80,18 @@
 #listing tr.row-file.oka-file-row .oka-name { color: #2c3e50; font-weight: normal; }
 #listing tr.row-file.oka-file-row .glyphicon-download-alt { color: #5a6b7b; }
 
-/* 行内重命名按钮与编辑框：跟原版行末按钮同一尺寸，不撑高 40px 的行 */
+/* 行内下载 / 重命名按钮与编辑框：跟原版行末按钮同一尺寸，不撑高 40px 的行。
+ * v1.1.6 列顺序（左 → 右）：复选框 · 图标 · 名称 · 大小 · 下载 · 移动 · 重命名 · 删除 */
+#listing .oka-download-cell,
 #listing .oka-rename-cell { width: 40px; text-align: center; }
+/* 选择器要比 oka-file-row 那条更强，否则新下载按钮的图标仍是灰的 */
+#listing tr.row-file .oka-download-cell .glyphicon-download-alt { color: #2f7fbf; }
+#listing tr.row-file .oka-download-cell .btn:hover,
+#listing tr.row-file .oka-download-cell .btn:focus {
+  border-color: #2f7fbf;
+  background-color: #eef5fc;
+}
+#listing tr.row-file.oka-selected .oka-select-zone:hover { background: transparent; }
 #listing .oka-name { margin: 0; }
 #listing .oka-rename-input {
   display: inline-block; width: 90%; max-width: 420px;

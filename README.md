@@ -6,12 +6,19 @@
 |---|---|---|
 | 1 | 桌面长按快捷开启 | 长按图标出现「开启 WiFi 传输」，点一下直接启动服务，地址自动复制到剪贴板并弹窗提示。不用进 App、不用点按钮 |
 | 2 | 蜂窝 / 热点可开启 | 用手机流量或个人热点时，WiFi 传输页面的「开始」按钮正常出现，可正常开启；且显示的地址是手机在热点网段的真实 IP（`172.20.10.1` 这类），不再是 `unknown` |
-| 3 | 电脑网页端增强（v1.1.5） | 保留原 `Upload Files` 按钮；**整个页面就是放置区**（没有独立拖放框），把单个/多个文件、整个文件夹拖进网页任意位置即可上传（拖入时全屏提示 + 成功/失败汇总 + 失败重试）；**复用原版行末「移动」按钮与原弹窗**，增强为目录浏览 + 可勾选批量移动 + 结果反馈。v1.1.2 另加：**文件夹排在最上面**（组内按名称自然序，不再与文件穿插）、**顶部设备名大标题收成一行小字**（文件列表上移约 100px）、**上传任务面板默认折叠成一条**，要看明细再点「展开」。v1.1.5 另加：**文件夹改成 Windows 式琥珀黄**、**点行即下载 / 进入文件夹**、**重命名改成每行一个按钮** |
+| 3 | 电脑网页端增强（v1.1.6） | 保留原 `Upload Files` 按钮；**整个页面就是放置区**（没有独立拖放框），把单个/多个文件、整个文件夹拖进网页任意位置即可上传（拖入时全屏提示 + 成功/失败汇总 + 失败重试）；**复用原版行末「移动」按钮与原弹窗**，增强为目录浏览 + 可勾选批量移动 + 结果反馈。v1.1.2：**文件夹置顶**、**顶部紧凑**、**任务面板默认折叠**；v1.1.5：文件夹琥珀黄 + 行内重命名按钮；**v1.1.6：删除按钮挪到最右、重命名在它左边；文件名左侧整片区域点一下即选中；每行新增下载按钮，文件直接下载、整个文件夹自动打成 ZIP；点行不再下载** |
 
-> **v1.1.5：网页交互三项（按真机反馈改）。** ① 文件夹与文件不再「颜色太相似」：
+> **v1.1.6：网页交互三项（按真机反馈改）。** ① 行末按钮重排：**删除在最右、重命名紧挨左边**，
+> 并在原版「移动」按钮**左边**新增一个下载按钮；② **文件名左边所有区域（复选框列 + 图标列）
+> 点击即选中**，原版「点文件图标就下载」的绑定在捕获阶段拦掉，图标只作视觉标识；
+> ③ **取消点行下载**：点名称所在行不再有动作，下载统一走每行新增的按钮。
+> 目录下载由浏览器端递归 `GET list` + 逐文件 `GET download` + 零依赖 ZIP 打包完成
+> （服务端 `download?path=<目录>` 会返回 400，见下）。原上传 / 移动 / 排序 / 折叠面板全部保留。
+
+> **v1.1.5：网页交互三项（按真机反馈改，其中「点行即下载」已在 v1.1.6 取消）。** ① 文件夹与文件不再「颜色太相似」：
 > 目录行用 Windows 资源管理器式琥珀黄（图标按钮、文件夹图标、名称、行首色条），文件保持中性蓝灰；
 > ② 原来点名称那一列会触发原版 jeditable 的重命名（名称列最宽，感觉就是「点行 = 重命名」），
-> 现在**点行 = 文件下载 / 文件夹进入**，多选只走行首复选框与「全选」；
+> v1.1.5 曾改成**点行 = 文件下载 / 文件夹进入**（v1.1.6 已按反馈取消，改为点行无动作 + 独立下载按钮）；
 > ③ **重命名改为每行一个按钮**，点开内联输入框，Enter 提交 / Esc 取消，提交仍走原版
 > `POST move {oldPath, newPath: 当前目录 + 新名}`。原 `Upload Files`、移动弹窗、拖放上传、
 > 排序、紧凑布局、折叠任务面板与 v1.1.4 的选择重置全部保留。
@@ -189,7 +196,7 @@ _GCDWebServerGetPrimaryIPAddress 硬编码 strcmp(ifa_name,"en0")
    - 挂**后台保活**（`AVAudioSession` Playback + 循环播放 App 自带的 `Happy Dreams.mp3`，音量 0）——否则切到后台几秒后进程被挂起、端口就断了；
    - 等 1.5s 读 App 自己写进 `ipAddress.text` 的 URL（`Helper` 是纯 Swift 类，ObjC runtime 反射不到 `uploader`）；读不到再用「本机 IP + 端口」兜底，复制到剪贴板并弹窗显示。
 
-### 功能 3 —— 电脑网页端增强（v1.1.1 定型，v1.1.2 ~ v1.1.5 持续增强）
+### 功能 3 —— 电脑网页端增强（v1.1.1 定型，v1.1.2 ~ v1.1.6 持续增强）
 
 **约束**：不能改 App 包内 `GCDWebUploader.bundle/Contents/Resources/` 的任何文件，那会破坏代码签名。所以采用「构建期把前端资源编进 dylib + 运行时注入 HTML」。
 
@@ -210,29 +217,73 @@ _GCDWebServerGetPrimaryIPAddress 硬编码 strcmp(ifa_name,"en0")
 
 | 接口 | 参数 | 行为 |
 |---|---|---|
-| `GET list?path=` | 目录（`/` 结尾） | JSON 数组；目录项 `path` 以 `/` 结尾，文件项不带 |
-| `POST upload` | `path` = **已存在的目标目录** + multipart `files[]` | 先 `fileExistsAtPath:isDirectory:`，目录不存在直接失败 |
-| `POST create` | `path` = 新目录完整路径（不带尾斜杠） | `createDirectoryAtPath:withIntermediateDirectories:` 的实参是 **`mov w3, #0`（NO）** → 父目录必须已存在、目标不能已存在 |
-| `POST move` | `oldPath` / `newPath`（完整目标路径） | 目标已存在报 `Destination ... already exists` |
-| `POST delete` / `GET download` | `path` | 原页面逻辑，不改 |
+| `GET list?path=` | 目录（`/` 结尾） | JSON 数组；目录项 `path` 以 `/` 结尾，文件项不带；服务端已按 `localizedStandardCompare:` 排序，但**不区分目录/文件**，所以会穿插 |
+| `GET download?path=` | 文件路径 | `GCDWebServerFileResponse ... isAttachment:YES`；**`path` 指向目录时直接 `400 Bad Request`（`"%@" is a directory`）** |
+| `POST upload` | `path` = **已存在的目标目录** + multipart `files[]` | 目标路径过 `_uniquePathForPath`：同名文件自动改成 `name (1).ext`，**不覆盖** |
+| `POST create` | `path` = 新目录完整路径（不带尾斜杠） | `withIntermediateDirectories:NO` → 父目录必须已存在、目标不能已存在，不递归 |
+| `POST move` | `oldPath` / `newPath`（完整目标路径） | `newAbsolutePath` 同样过 `_uniquePathForPath`：目标已存在时自动改名，不覆盖也不报错 |
+| `POST delete` | `path` | 原页面逻辑，不改 |
+
+**只有以上 6 个接口**（另有用 `GCDWebUploader.m` 源码交叉核对）：没有「把文件内容 inline 读出来」、
+`Content-Disposition: inline` 预览、覆盖写回、服务端打包 ZIP 之类的隐藏接口。
 
 路径都经 `_GCDWebServerNormalizePath` 规范化。因为 `create` **不递归**，文件夹上传必须把目录按深度升序**逐级创建**，再逐个上传文件到对应子目录；重复拖入同名文件夹时，`create` 会失败，此时用 `list` 反查同名目录是否真的已存在，存在就当"目录已就绪"继续走，不吞掉真实失败。
+
+#### v1.1.6：行末按钮重排 / 左侧选中热区 / 每行下载（按真机反馈改）
+
+| 反馈 | 根因 | 改法 |
+|---|---|---|
+| 删除按钮要在最右，重命名放在它左边 | v1.1.5 用 `tr.appendChild()` 把重命名 td 追加到行尾，结果它排到了 `.column-delete` **右边** | `decorateRows()` 改为 `tr.insertBefore(rtd, delCell)`；下载按钮用 `tr.insertBefore(dtd, moveCell)` 插在移动按钮左边。最终列顺序：**复选框 · 图标 · 名称 · 大小 · 下载 · 移动 · 重命名 · 删除** |
+| 选中太麻烦，必须点开头的小方块；希望文件名左边整片都能点中 | 复选框 td 只有 34px；图标列里的原版按钮还绑着「点一下就下载 / 进入目录」的 handler，点了反而触发下载 | 给 `.oka-check` 与 `.column-icon` 两个 td 加 `oka-select-zone`，在 `document` **捕获阶段**用 `onSelectZoneCapture` 统一 `toggleRowSelection()`；`e.stopPropagation()` 顺带拦掉原版 `$(".button-download").click(...)` / `$(".button-open").click(...)`。CSS 再给图标按钮 `pointer-events:none`，点击必然落到 td。复选框本身放行给原生 `change`，避免双重 toggle 抵消 |
+| 取消点行下载，改成每行一个下载按钮，文件夹也要能下载 | v1.1.5 的行级 click handler 里 `openRow(d)` 会触发 `download?path=` | 删掉整个行级 click handler 与 `openRow()`，点名称区域不再有动作；新增 `.oka-download` 按钮 → `downloadItem(d)`：文件走原版 `download?path=`，目录走前端 ZIP 打包 |
+
+**文件夹为什么只能前端打包**：`GCDWebUploader.m` 的 `downloadFile:` 里
+
+```objc
+if (isDirectory) {
+  return [GCDWebServerErrorResponse responseWithClientError:
+          kGCDWebServerHTTPStatusCode_BadRequest message:@"\"%@\" is a directory", relativePath];
+}
+```
+
+一个 `download?path=<目录>` 请求必然 400，服务端也没有打包接口。所以目录下载在浏览器端做：
+原生 `XMLHttpRequest` 递归 `GET list` 展开目录树（带深度上限与防环 `seen`）→ 逐文件 `GET download`
+取 `ArrayBuffer` → 零依赖的 store 模式 ZIP（CRC32 + local headers + central directory + EOCD，
+文件名置 UTF-8 标志 `0x0800`）→ `Blob` + `<a download>` 触发 `<目录名>.zip`。空子目录也会写成
+以 `/` 结尾的 0 字节条目。打包进度与成功/失败汇总复用原页面 `#alerts`；某个文件失败不会
+丢弃其它已取到的文件，结果条会明确列出失败项。
+
+**全程不经过 `$.ajax`**：本插件为了排序与选择重置包装过 `$.ajax`，若目录递归借它读 `list`，
+每读一层就会触发一次 `resetSelectionOnReload()`，把用户当前勾选项悄悄清空，还会干扰上传队列。
+ZIP 下载使用独立的 `zipping` 标志，不占用 `tasks` / `running`，`Upload Files` 与拖放上传完全不受影响。
+
+**附带结论：「点行打开文件 → 编辑 → 保存回手机」当前做不到**，仅靠现有 6 个接口不行：
+
+- `GET download` 是 `isAttachment:YES`，只能下载，没有 inline 读取接口；
+- `POST upload` 同名文件走 `_uniquePathForPath` 自动改名，保存回去只会得到 `xxx (1).txt` 副本，不会覆盖原文件；
+- `POST move` 也不能覆盖（同样自动改名），且没有「写入内容」的接口。
+
+要做成真正的在线编辑，必须**在插件侧新增原生接口**：hook `GCDWebServer` 注册
+`GET /open?path=`（读文件内容按文本返回）与 `POST /save?path=`（原子覆盖写回），并处理
+路径规范化、扩展名白名单、文本/二进制判定、备份与并发锁。这属于改服务端能力，
+风险与工作量都明显大于本版前端改动，本版未实施；当前可用的替代流程是
+「下载 → 电脑编辑 → 重新上传」，但会得到副本而非原文件。
 
 #### v1.1.5：文件夹配色与行点击语义（按真机反馈改）
 
 | 反馈 | 根因 | 改法 |
 |---|---|---|
 | 文件夹和文件的颜色太相似，看着分不清 | 原版 `template-listing` 里两者都只是 `btn-default` + 灰色 glyphicon，名称文字同色同字号 | 列表重建时给目录行加 `oka-dir-row`、文件行加 `oka-file-row`；CSS 把目录的图标按钮底色、文件夹 glyph、名称文字、行首色条统一成 Windows 式琥珀黄，文件保持中性蓝灰。选中态带 `!important`，优先级更高，不会被配色盖住 |
-| 点文件 / 文件夹所在行是重命名，想改成点行就下载 / 进入 | `jquery.jeditable.js` 第 125 行把 `click` **直接 bind** 在 `.column-name` 里的 `<p class="edit">` 上，handler 还 `e.stopPropagation()`；名称列又是最宽的一列，于是「点行」几乎必然落在它上面，连行级事件都收不到 | 不改 `index.js`、不改 bundle 模板（会破坏 App 签名）：在 `MutationObserver` 回调（microtask，晚于原版 `_reload` 里同步执行的 `$(".edit").editable(...)`）把 `<p class="edit">` **整个替换**成 `<p class="oka-name">`，绑在旧元素上的 jeditable handler 随元素一起失效。行点击改为 `openRow()`：文件走原版 `.button-download` 的 `download?path=`，文件夹走原版 `.button-open` 的 `_reload(path)` |
+| 点文件 / 文件夹所在行是重命名，想改成点行就下载 / 进入 | `jquery.jeditable.js` 第 125 行把 `click` **直接 bind** 在 `.column-name` 里的 `<p class="edit">` 上，handler 还 `e.stopPropagation()`；名称列又是最宽的一列，于是「点行」几乎必然落在它上面，连行级事件都收不到 | 不改 `index.js`、不改 bundle 模板（会破坏 App 签名）：在 `MutationObserver` 回调（microtask，晚于原版 `_reload` 里同步执行的 `$(".edit").editable(...)`）把 `<p class="edit">` **整个替换**成 `<p class="oka-name">`，绑在旧元素上的 jeditable handler 随元素一起失效。当时把行点击改成了文件下载 / 文件夹进入（**v1.1.6 已按反馈整体删除**，改为点行无动作 + 每行独立下载按钮） |
 | 把重命名改成每行一个按钮 | — | 每行末尾追加一个 `.oka-rename` 按钮（pencil glyph），点它才 `startRename()`：名称换成内联 `<input>`，Enter 提交 / Esc 取消 / 失焦提交，用 `settled` 标志防重复 POST。提交语义与原版 jeditable 完全一致：`POST move {oldPath: 当前 path, newPath: _path + 新名}`，成功后 `_reload(_path)` 并在原 `#alerts` 反馈成功或失败 |
 
 **为什么用「替换元素」而不是在捕获阶段拦 click**：jeditable 的 handler 绑在元素本身，
-且自己 `stopPropagation()`；在 `document` 捕获阶段拦会连行级点击一起吞掉
-（点名称就既不重命名、也不下载）。替换 DOM 元素是唯一能同时做到「点名称 = 行动作」
-和「jeditable 不再触发」的做法，而且不碰 App 包内任何文件。
+且自己 `stopPropagation()`；在 `document` 捕获阶段拦会连行级点击一起吞掉。替换 DOM 元素是
+唯一能同时做到「点名称不再重命名」和「行级手势留给上层决定」的做法，而且不碰 App 包内任何文件。
+（v1.1.6 之后点名称干脆不再有动作，这个替换依然是必需的前提。）
 
 多选入口没丢：行首复选框、工具栏「全选 / 取消选择」以及原版行末「移动」按钮照常可用；
-点行不再切换选中，只是因为行点击被换成了下载 / 进入这个更常用的手势。
+**v1.1.6 起文件名左边整片区域（复选框列 + 图标列）点击都切换选中**，点名称区域不切换选中。
 
 #### v1.1.4：修复「操作后勾选残留」（按真机反馈）
 
@@ -292,9 +343,9 @@ v1.1.0 曾单独放了一块占大半个页面的虚线拖放框，又另起了�
 **不需要 Theos。** 构建是一台装了 Xcode 的 macOS（或 GitHub Actions 的 `macos-latest`）上跑三条命令：
 
 ```bash
-sh devkit/build.sh arm64e iphoneos-arm64e 1.1.5   # RootHide / roothide
-sh devkit/build.sh arm64  iphoneos-arm64  1.1.5   # rootless（Dopamine / palera1n）
-sh devkit/build.sh arm64  iphoneos-arm    1.1.5   # 传统 rootful
+sh devkit/build.sh arm64e iphoneos-arm64e 1.1.6   # RootHide / roothide
+sh devkit/build.sh arm64  iphoneos-arm64  1.1.6   # rootless（Dopamine / palera1n）
+sh devkit/build.sh arm64  iphoneos-arm    1.1.6   # 传统 rootful
 ```
 
 产物在 `.build/out/com.oka.wifitweak_<ver>_<arch>.deb`。
@@ -447,10 +498,17 @@ v1.1.3 起插件**不输出任何系统日志**，所以判据一律看功能表
      「本次移动」里应当**只有新勾选的这一个**，不带上次的文件。点删除后列表里的勾选也应全部消失。
    - 文件夹配色：目录行的图标按钮是**琥珀黄底 + 黄色文件夹图标**，名称是琥珀色加粗，
      行首有一条黄色竖线；文件行仍是灰色图标 + 普通深色名称，一眼可分。
-   - 点行手势：点文件名所在行 → 浏览器开始**下载该文件**；点文件夹名所在行 → **进入该文件夹**
-     （面包屑变成对应目录）。点名称**不再进入重命名编辑框**；点行首复选框仍只勾选、不触发下载。
-   - 行内重命名：点某行末尾的**铅笔按钮** → 名称变成输入框且自动全选 → 改名字按 Enter
+   - 行末按钮顺序（左 → 右）：复选框 · 图标 · 名称 · 大小 · **下载** · 移动 · **重命名** · **删除**；
+     删除在最右、重命名紧挨其左，下载在移动按钮左边。
+   - 选中热区：点文件名**左边任意位置**（复选框列空白、图标列的图标本身）都会勾选/取消该行；
+     点图标**不再下载也不再进入目录**；点行首小方块仍只切换一次（已选计数 ±1，不是 0 或 ±2）。
+   - 点行手势：点文件名所在行**不应该有任何反应**（不下载、不进入目录、不重命名）；
+     点名称**不再进入重命名编辑框**。
+   - 下载按钮：点文件行 → 浏览器下载该文件；点文件夹行 → `#alerts` 显示打包进度，随后得到
+     `<文件夹名>.zip`，解压后目录结构与手机上一致（含空子目录、中文名不乱码）。
+   - 行内重命名：点某行**删除按钮左边的铅笔按钮** → 名称变成输入框且自动全选 → 改名字按 Enter
      → 页面 `#alerts` 显示「重命名成功」，列表刷新后显示新名字；按 Esc 或名字不变则什么都不做。
+   - 回归：拖放上传、批量移动仍与前面几条一致；目录下载**不会**清掉已勾选的项目。
    - 浏览器「查看网页源代码」：`<body>` 里有且仅有一处 `<!-- OKA-WIFI-INJECTED -->`，
      源码里不应出现独立拖放框或第二个移动弹窗。
 
@@ -468,8 +526,11 @@ v1.1.3 起插件**不输出任何系统日志**，所以判据一律看功能表
 | 快捷菜单点了没反应 | `gServerPort` 未清零，被误判成「已在运行」 | 已 hook `-[GCDWebServer stop]` 清零；若 App 走别的停服路径会误判，重启 App 再试 |
 | 操作过一次后再点移动，仍带着上次勾选的文件 | 选中集合没随列表重建清空（v1.1.4 已修） | 确认装的是 1.1.4；控制台执行 `document.querySelectorAll('#listing .oka-checkbox:checked').length` 应为 0 |
 | 点名称还是进入重命名编辑框 | `decorateRows()` 没把 `.edit` 换掉（v1.1.5 已修） | 控制台执行 `document.querySelectorAll('#listing p.edit').length`，应为 **0**；为 1 说明装的是 v1.1.4 或更早，确认包版本后强刷（Ctrl+F5） |
-| 点文件行没下载 / 点文件夹行没进入 | 行点击被其它元素挡住，或 `openRow` 没注入 | 先确认 `window.__okaWiFiLoaded` 为真；再点该行第一列的原版下载 / 打开按钮，若原版按钮也没反应就是服务端问题。点行首复选框**不该**触发下载，这是设计如此 |
-| 找不到每行末尾的重命名按钮 | `.oka-rename` 没注入 | 控制台执行 `document.querySelectorAll('#listing .oka-rename').length`，应等于列表行数 |
+| 点名称所在行还是会下载 / 进入目录 | 装的是 v1.1.5（v1.1.6 已取消点行下载） | 确认包版本是 1.1.6 后强刷（Ctrl+F5）；控制台查 `document.querySelectorAll('#listing .oka-download').length` 应等于行数，网页源码里不应再出现 `openRow` |
+| 点文件图标还是会下载 / 进入目录 | 捕获阶段拦截或 `pointer-events:none` 没生效 | 控制台确认 `.column-icon` 带 `oka-select-zone`、`getComputedStyle(图标按钮).pointerEvents === 'none'`；两者都对仍下载就强刷排除缓存 |
+| 点文件名左边空白不选中 | `onSelectZoneCapture` 没注册 | 网页源码搜 `onSelectZoneCapture`，控制台确认 `window.__okaWiFiLoaded` 为真 |
+| 找不到重命名按钮 / 它不在删除左边 | `.oka-rename` 没注入，或装的是 v1.1.5（旧版 append 到了删除右边） | 控制台查 `document.querySelectorAll('#listing .oka-rename').length` 应等于行数；每行 `lastElementChild.className` 应为 `column-delete` |
+| 文件夹下载得到的 zip 少文件 / 打不开 | 某个 `GET download` 失败，或浏览器不支持 `Blob` / `TextEncoder` | 先看 `#alerts` 里的「目录下载部分失败」清单；空子目录以 `/` 结尾的 0 字节条目保留。中文名乱码时确认解压软件支持 ZIP 的 UTF-8 标志位 |
 | 文件夹还是和文件一个颜色 | `oka-dir-row` 或注入的 CSS 没生效 | 控制台看目录行是否有 `oka-dir-row` class；为真但颜色没变就强刷（Ctrl+F5）排除缓存 |
 | 系统日志里还能看到 `[OkaWiFi]` | 装的不是 v1.1.3（或更早） | v1.1.3 起源码和产物里都不会有 `NSLog` / `[OkaWiFi]`；确认装的是 1.1.3 的包并重启 App |
 | CI 报 `CPU: unbound variable`，但编译和签名都成功了 | 某行 `echo` 里写了 `$CPU，`（后跟全角标点） | macOS 的 bash 3.2 把 `0xEF` 吞进变量名。改 `${CPU}`，并跑 `python3 devkit/check-shell.py .` 扫全仓库 |
@@ -484,7 +545,8 @@ v1.1.3 起插件**不输出任何系统日志**，所以判据一律看功能表
 | 拖放后出现两份上传 / 进度条乱跳 | 捕获阶段的 `stopPropagation` 没挡住 jQuery File Upload 在 `$(document)` 上的 drop handler | 检查是否有其它插件/浏览器扩展改写了 drag/drop；本插件的 `onDrop` 必须同时 `preventDefault()` 与 `stopPropagation()` |
 | 点行末「移动」按钮还是原版那个只有路径输入框的弹窗 | 捕获阶段接管没生效（v1.1.1 仍复用原版 `#move-modal`，**弹窗长得很像原版是正常的**，判据是里面有没有「本次移动 N 项」和目录浏览） | 先在浏览器控制台确认 `window.__okaWiFiLoaded` 为真；再看源码里有没有 `onMoveButtonCapture`。若原版 handler 仍执行，会出现「弹窗立刻自动关闭 + 只发 1 个 POST move」——这是 `.off('click')` 没摘掉 `#move-confirm` 旧绑定的特征 |
 | 移动完成后按钮点不动 | 故意设计：结果留在弹窗里给用户看，确认按钮保持禁用以防重复提交 | 关掉弹窗，重新点任意一行的「移动」按钮即可恢复 |
-| 批量移动全部报失败 | `newPath` 目标已存在，或目标目录不存在 | 弹窗里逐项列出失败原因。服务端 `move` 在目标已存在时返回 `Destination ... already exists`；目录浏览只列 `GET list` 里真实存在的目录，手动输入路径时先确认它存在 |
+| 移动/上传后出现 `name (1).ext` 之类的副本 | 服务端 `move` 与 `upload` 都走 `_uniquePathForPath`，目标已存在时**自动改名，不覆盖也不报错** | 这是 `GCDWebUploader.m` 的真实行为，不是插件 bug；移动前确认目标目录没有同名项 |
+| 批量移动全部报失败 | 目标目录不存在，或路径手填错了 | 弹窗里逐项列出失败原因。目录浏览只列 `GET list` 里真实存在的目录；手动输入路径时先确认它存在 |
 
 
 ---
@@ -498,6 +560,7 @@ v1.1.3 起插件**不输出任何系统日志**，所以判据一律看功能表
 5. **端口是 App 自己定的，插件不改。** v1.0.2 直接从 `[self port]` 读真实端口（`GCDWebServer` 公开属性）、`isRunning` 读运行状态，`stop` 时清零；不再靠猜 8080，也不再依赖 `startWithPort:` 是否被命中。端口 LISTEN 探测只保留为 UI 兜底层的补充手段。
 6. **网页增强依赖电脑浏览器的 `DataTransferItem.webkitGetAsEntry()`。** Chrome / Edge / Safari 支持整个文件夹递归；不提供该 API 的浏览器会自动降级为「单文件 / 多文件」拖放上传，文件夹结构无法保留（点 `Upload Files` 选文件始终可用）。另外服务端 `create` 不递归、也不允许目标已存在，所以文件夹上传是**串行**的：先逐级建目录，再逐个传文件，大文件夹会比一次多文件选择慢。
 7. **注入层依赖 `responseWithHTMLTemplate:variables:` 这条渲染路径。** 已在 1.7.5 的 `GCDWebServer` 二进制里反汇编确认（6 个 variables key 的字典 + `0x1D210` 的类方法调用）。若 App 升级换了 GCDWebServer 版本、改走别的 HTML 渲染方法，注入会静默不生效——但功能 1 / 2 完全不受影响，网页也会保持原版可用状态。
+8. **「点行打开文件 → 编辑 → 保存回手机」当前不支持。** 服务端只有 6 个接口：`download` 是附件下载（指向目录直接 400）、`upload` 同名自动改名不覆盖，没有 inline 读取与覆盖写回。要真正实现在线编辑，必须在插件侧注册新的 `GCDWebServer` handler（例如 `/open` + `/save`），属于改服务端能力，本版未实施。目录下载因此走浏览器端 ZIP 打包，超大目录会受浏览器内存限制。
 
 ---
 
@@ -507,9 +570,9 @@ v1.1.3 起插件**不输出任何系统日志**，所以判据一律看功能表
 wifitweak/
 ├── Tweak.xm                    # 全部实现（约 1230 行，含逐条逆向依据注释）
 ├── OkaWiFi.plist               # CydiaSubstrate 过滤：只注入 com.blinker.documents
-├── web/                        # 网页端增强前端资源（v1.1.5 含文件夹配色 / 点行下载进入 / 行内重命名）
-│   ├── oka-wifi.js             # 列表排序 / 全页拖放 / 文件夹递归 / 折叠任务面板 / 复用原版移动弹窗 / 行交互
-│   └── oka-wifi.css            # oka- 前缀样式 + 顶部紧凑布局 + 文件夹琥珀黄 + 行内重命名
+├── web/                        # 网页端增强前端资源（v1.1.6 含行末按钮重排 / 左侧选中热区 / 目录 ZIP 下载）
+│   ├── oka-wifi.js             # 列表排序 / 全页拖放 / 文件夹递归 / 折叠任务面板 / 复用原版移动弹窗 / 行交互 / ZIP 打包
+│   └── oka-wifi.css            # oka- 前缀样式 + 顶部紧凑布局 + 文件夹琥珀黄 + 选中热区 + 行内按钮
 ├── devkit/
 │   ├── build.sh                # 零 Theos 编译：资源内联 + xcrun clang + codesign + 闸门
 │   ├── mkdeb.sh                # 纯 Python 拼 ar 归档（不依赖 dpkg-deb）
