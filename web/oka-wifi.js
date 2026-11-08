@@ -1,5 +1,5 @@
 /*
- * OkaWiFi v1.1.6 — GCDWebUploader 网页端增强层
+ * OkaWiFi v1.1.7 — GCDWebUploader 网页端增强层
  *
  * 注入方式：由 Tweak.xm hook +[GCDWebServerDataResponse responseWithHTMLTemplate:variables:]
  *          把本文件 + oka-wifi.css 追加到 epilogue 变量里，随首页 HTML 一起下发。
@@ -25,6 +25,16 @@
  *      在捕获阶段拦掉，图标只保留视觉标识，不再抢走选中手势。
  *   ③ 取消「点行即下载」：点名称区域不再触发任何动作（给将来「点行打开」
  *      留出这个手势）。下载统一走每行新增的 .oka-download 按钮。
+ *
+ * v1.1.7 三项交互（按真机反馈改）：
+ *   ① 恢复点目录行进入目录：v1.1.6 把行级 handler 整个删掉后连文件夹都进不去，
+ *      现在点名称区域时目录走原版 window._reload(path)，文件走下面的预览。
+ *   ② 目录 ZIP 显式写入顶层目录条目：v1.1.6 只写了 Docs/a.txt 这类带前缀的
+ *      文件条目，没写 Docs/ 本身；不少解压工具不建隐式目录，解压就成了散装文件。
+ *   ③ 点文件行在线预览 txt / pdf / mp4 / 图片 / 音频：服务端 download 是
+ *      attachment，但前端用原生 XHR 取回字节后用 Blob URL 渲染即可，
+ *      不需要改服务端、也不需要覆盖写回（编辑保存仍不支持，见 README）。
+ *      预览弹窗默认隐藏，不占列表版面；左侧热区仍然只负责选中。
  *
  * 目录下载（v1.1.6）：服务端 GET download?path=<目录> 直接返回
  *   400 Bad Request（"... is a directory"，见 GCDWebUploader.m 的 downloadFile:），
@@ -345,7 +355,12 @@
     zipping = true;
     var dir = String(d.path || '');
     var rootRel = baseName(dir) + '/';
-    var acc = { dirs: [], files: [] };
+    // ★ v1.1.7：顶层目录本身必须是一条显式目录条目。
+    //   v1.1.6 只把 rootRel 当文件名前缀，ZIP 里没有 "Docs/" 这一条；
+    //   Windows / macOS / iOS 上的部分解压工具不创建隐式目录，解压出来
+    //   就是一堆散装文件，用户拿不到那个文件夹。以 0 字节 + "/" 结尾写入
+    //   是标准 ZIP 做法，任何解压工具都会先建好顶层目录。
+    var acc = { dirs: [rootRel], files: [] };
     showResult('info', '<strong>正在读取目录</strong> ' + esc(rootRel));
 
     collectTree(dir, rootRel, acc, 0, {}).then(function () {
@@ -377,13 +392,15 @@
         a.parentNode.removeChild(a);
         setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
         if (failures.length) {
+          // ★ 成功数只能从 acc.files 算：entries 里还混着 acc.dirs 那批
+          //   0 字节目录条目，用 entries.length 减会把目录数重复扣一次。
           showResult('danger', '<strong>目录下载部分失败</strong> ' + esc(a.download) +
-            ' · 成功 ' + (entries.length - acc.dirs.length - failures.length) +
+            ' · 成功 ' + (acc.files.length - failures.length) +
             ' 个文件 · 失败 ' + failures.length + ' 个<div class="oka-move-failures">' +
             failures.map(function (s) { return esc(s); }).join('<br>') + '</div>');
         } else {
           showResult('success', '<strong>目录下载完成</strong> ' + esc(a.download) +
-            ' · ' + acc.files.length + ' 个文件 · ' + acc.dirs.length + ' 个子目录');
+            ' · ' + acc.files.length + ' 个文件 · ' + (acc.dirs.length - 1) + ' 个子目录');
         }
       });
     }).catch(function (err) {
@@ -399,6 +416,315 @@
     setTimeout(function () {
       window.location = 'download?path=' + encodeURIComponent(d.path);
     }, 0);
+  }
+
+  // ---------------------------------------------------------------------
+  // 0c. v1.1.7 文件在线预览（点文件所在行触发）
+  //
+  // 服务端只有 download 一个读接口，且响应带 Content-Disposition: attachment，
+  // 直接在标签页打开它只会下载。这里用原生 XHR 把字节取回页面内存，
+  // 再用 Blob URL 交给 <pre>/<iframe>/<img>/<video>/<audio> 渲染：
+  //   · 不依赖服务端新增接口，也不需要 inline 支持；
+  //   · 只读预览，不做编辑保存（保存要覆盖写回，服务端不支持，见 README）；
+  //   · 同样绕开 $.ajax 包装，避免一次预览触发排序 / 清空选中。
+  // ---------------------------------------------------------------------
+  var PREVIEW_MAX = 200 * 1024 * 1024;   // 超过 200 MB 不读进内存，只给下载按钮
+  var previewURL = null;
+
+  var TEXT_EXT = {
+    txt: 1, log: 1, md: 1, markdown: 1, json: 1, xml: 1, csv: 1, js: 1,
+    css: 1, html: 1, htm: 1, ini: 1, conf: 1, yaml: 1, yml: 1, plist: 1,
+    sh: 1, py: 1, sql: 1, properties: 1, text: 1, srt: 1, vtt: 1
+  };
+  var MIME_EXT = {
+    pdf: 'application/pdf',
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+    bmp: 'image/bmp', webp: 'image/webp', svg: 'image/svg+xml',
+    mp4: 'video/mp4', m4v: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime',
+    mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav', aac: 'audio/aac',
+    ogg: 'audio/ogg', flac: 'audio/flac'
+  };
+
+  function fileExt(name) {
+    var s = String(name || '');
+    var i = s.lastIndexOf('.');
+    return i >= 0 ? s.slice(i + 1).toLowerCase() : '';
+  }
+
+  // 扩展名优先：GCDWebServer 对 .log / .bin 之类常给 application/octet-stream，
+  // 只看 Content-Type 会把文本误判成「不支持预览」。MIME 只作为兜底。
+  function previewKind(ext, mime) {
+    var m = String(mime || '').toLowerCase();
+    if (TEXT_EXT[ext]) { return 'text'; }
+    if (ext === 'pdf') { return 'pdf'; }
+    var own = MIME_EXT[ext];
+    if (own && own.indexOf('image/') === 0) { return 'image'; }
+    if (own && own.indexOf('video/') === 0) { return 'video'; }
+    if (own && own.indexOf('audio/') === 0) { return 'audio'; }
+    if (m.indexOf('text/') === 0) { return 'text'; }
+    if (m.indexOf('pdf') >= 0) { return 'pdf'; }
+    if (m.indexOf('image/') === 0) { return 'image'; }
+    if (m.indexOf('video/') === 0) { return 'video'; }
+    if (m.indexOf('audio/') === 0) { return 'audio'; }
+    return 'other';
+  }
+
+  function decodeText(bytes) {
+    if (typeof TextDecoder !== 'undefined') {
+      try { return new TextDecoder('utf-8').decode(bytes); } catch (e) {}
+    }
+    var out = [];
+    for (var i = 0; i < bytes.length; ++i) { out.push(String.fromCharCode(bytes[i])); }
+    return out.join('');
+  }
+
+  function fetchPreview(path, ext) {
+    return new Promise(function (resolve, reject) {
+      var settled = false;
+      var abortReason = null;
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', 'download?path=' + encodeURIComponent(path), true);
+      xhr.responseType = 'arraybuffer';
+
+      // ★ readyState 2 = HEADERS_RECEIVED：响应头已到、正文还没读。
+      //   这里就结合服务端 Content-Type 判一次类型：
+      //   · 扩展名能认出来 → previewKind 走扩展名优先，不会被 octet-stream 误判；
+      //   · 扩展名不认识 → 靠 Content-Type 兜底（text/* / image/* / video/* …）；
+      //   · 两边都判不出 → 立刻 abort，绝不把几百 MB 二进制读进内存只为显示
+      //     一句「不支持预览」。
+      //   v1.1.7 初版在 openPreview() 里用 previewKind(ext, '') 提前 return，
+      //   使 previewKind 的 MIME 兜底永远走不到（未知扩展名一律「不支持」），
+      //   现在兜底真正生效。
+      xhr.onreadystatechange = function () {
+        if (settled || abortReason || xhr.readyState !== 2) { return; }
+        if (xhr.status < 200 || xhr.status >= 300) { return; }   // 交给 onload 报 HTTP 错
+        var len = parseInt(xhr.getResponseHeader('Content-Length') || '', 10);
+        if (!isNaN(len) && len > PREVIEW_MAX) {
+          abortReason = '文件超过 ' + fmtSize(PREVIEW_MAX) + '，请用下载按钮';
+        } else if (previewKind(ext, xhr.getResponseHeader('Content-Type') || '') === 'other') {
+          abortReason = 'unsupported';
+        }
+        if (!abortReason) { return; }
+        try { xhr.abort(); } catch (ignored) {}
+      };
+
+      xhr.onprogress = function (e) {
+        if (settled || abortReason || !e.lengthComputable || e.total <= PREVIEW_MAX) { return; }
+        abortReason = '文件超过 ' + fmtSize(PREVIEW_MAX) + '，请用下载按钮';
+        try { xhr.abort(); } catch (ignored) {}
+      };
+      xhr.onload = function () {
+        if (settled) { return; }
+        settled = true;
+        if (xhr.status < 200 || xhr.status >= 300) {
+          reject(new Error('HTTP ' + xhr.status));
+          return;
+        }
+        var bytes = new Uint8Array(xhr.response || 0);
+        if (bytes.length > PREVIEW_MAX) {
+          reject(new Error('文件超过 ' + fmtSize(PREVIEW_MAX) + '，请用下载按钮'));
+          return;
+        }
+        resolve({ bytes: bytes, type: xhr.getResponseHeader('Content-Type') || '' });
+      };
+      xhr.onerror = function () {
+        if (settled) { return; }
+        settled = true;
+        reject(new Error('网络错误'));
+      };
+      xhr.onabort = function () {
+        if (settled) { return; }
+        settled = true;
+        if (abortReason === 'unsupported') {
+          var e = new Error('unsupported');
+          e.code = 'unsupported';
+          reject(e);
+          return;
+        }
+        reject(new Error(abortReason || '读取已取消'));
+      };
+      xhr.send();
+    });
+  }
+
+  function clearPreviewURL() {
+    if (previewURL) {
+      try { URL.revokeObjectURL(previewURL); } catch (ignored) {}
+      previewURL = null;
+    }
+  }
+
+  function renderPreviewBody(name, kind, bytes, mime) {
+    var body = document.getElementById('oka-preview-body');
+    if (!body) { return; }
+    body.innerHTML = '';
+    clearPreviewURL();
+    var note = '';
+    if (kind === 'text') {
+      var pre = document.createElement('pre');
+      pre.className = 'oka-preview-text';
+      pre.textContent = decodeText(bytes);
+      body.appendChild(pre);
+      note = '文本预览（UTF-8）· 只读；编辑保存需要服务端新增接口';
+    } else {
+      var el = null;
+      if (kind === 'image') {
+        el = document.createElement('img');
+        el.className = 'oka-preview-media';
+      } else if (kind === 'video') {
+        el = document.createElement('video');
+        el.className = 'oka-preview-media';
+        el.setAttribute('controls', 'controls');
+      } else if (kind === 'audio') {
+        el = document.createElement('audio');
+        el.setAttribute('controls', 'controls');
+      } else if (kind === 'pdf') {
+        el = document.createElement('iframe');
+        el.className = 'oka-preview-frame';
+      }
+      if (el) {
+        var blob = new Blob([bytes], {
+          type: MIME_EXT[fileExt(name)] || mime || 'application/octet-stream'
+        });
+        previewURL = URL.createObjectURL(blob);
+        el.src = previewURL;
+        body.appendChild(el);
+        note = '在线预览 · 只读；如浏览器无法播放请用下载按钮';
+      } else {
+        // 兜底：走到这里说明类型在 fetchPreview 之后仍判不出来（例如服务端
+        // 返回了空 Content-Type 且扩展名未知）。不能留一个空白弹窗。
+        body.innerHTML = '';
+        showUnsupportedPreview();
+        return;
+      }
+    }
+    $('#oka-preview-note').text(note);
+  }
+
+  // 明确「不可能是可预览类型」的扩展名：本地直接拒绝，连请求都不发。
+  // 与 previewKind 的 MIME 兜底不冲突 —— 兜底是为了「扩展名不认识，
+  // 但服务端说了 text/* 或 image/*」这种真能预览的情况（例如 .xyz 其实
+  // 是纯文本）。而可执行文件 / 磁盘镜像 / 原始二进制，MIME 只会是
+  // octet-stream，白跑一次 download 请求毫无意义，还会在上传队列旁边
+  // 留下一次无谓的网络往返。
+  var BINARY_EXT = {
+    bin: 1, exe: 1, dll: 1, so: 1, dylib: 1, o: 1, a: 1, lib: 1,
+    dmg: 1, iso: 1, img: 1, vmdk: 1, pkg: 1, msi: 1, app: 1,
+    db: 1, sqlite: 1, sqlite3: 1, pyc: 1, class: 1, jar: 1, wasm: 1,
+    ttf: 1, otf: 1, woff: 1, woff2: 1, eot: 1,
+    psd: 1, ai: 1, sketch: 1, blend: 1,
+    torrent: 1, crt: 1, cer: 1, p12: 1, pfx: 1
+  };
+
+  function showUnsupportedPreview() {
+    $('#oka-preview-body').html(
+      '<div class="alert alert-info oka-preview-unsupported">' +
+      '此文件类型暂不支持在线预览，请点「下载原文件」到电脑打开。</div>');
+    $('#oka-preview-note').text('仅提供下载');
+  }
+
+  function openPreview(d) {
+    var name = String(d.name || baseName(d.path));
+    var ext = fileExt(name);
+    $('#oka-preview-title').text(name);
+    $('#oka-preview-note').text('');
+    $('#oka-preview-download')
+      .attr('href', 'download?path=' + encodeURIComponent(d.path))
+      .attr('download', name);
+    $('#oka-preview-body').html('<div class="oka-preview-loading">正在读取文件…</div>');
+    $('#oka-preview-modal').modal('show');
+
+    // 明确不可预览的二进制：本地就拒绝，不必为它发一次 download 请求。
+    if (BINARY_EXT[ext]) {
+      showUnsupportedPreview();
+      return;
+    }
+
+    // ★ v1.1.7 自检修正：不再用 previewKind(ext, '') 提前 return。
+    //   那样做的话，扩展名不认识但服务端 Content-Type 是 text/* 或 image/*
+    //   的文件永远进不来，previewKind 里的 MIME 兜底成了死代码。
+    //   现在由 fetchPreview() 在 HEADERS_RECEIVED 阶段结合 Content-Type 判定，
+    //   判不出就 abort 并回报 code='unsupported'，MIME 兜底真正生效。
+    fetchPreview(d.path, ext).then(function (res) {
+      renderPreviewBody(name, previewKind(ext, res.type), res.bytes, res.type);
+    }, function (err) {
+      clearPreviewURL();
+      if (err && err.code === 'unsupported') {
+        showUnsupportedPreview();
+        return;
+      }
+      $('#oka-preview-body').html(
+        '<div class="alert alert-danger oka-preview-error">' +
+        '预览失败：' + esc(err && err.message ? err.message : err) +
+        '，可点「下载原文件」。</div>');
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // 0d. 文件类型图标（v1.1.7）
+  //
+  // 原版图标列对**所有**文件都用同一个下载图标（glyphicon-download-alt），
+  // 只对目录用 folder-open。于是满屏都是下载箭头，既看不出类型，也和
+  // v1.1.6 新增的「每行下载按钮」在视觉上撞车（那个才是真·下载入口，
+  // 这个按钮已 pointer-events:none，纯标识）。
+  //
+  // 这里按扩展名换成语义图标，只用 Bootstrap 3 自带字形（Abel 字体里
+  // 确认存在，不引外部图标库，不新增网络请求）：
+  //   picture → 图片   film → 视频   music → 音频
+  //   compressed → 压缩包   book → 文档   file → 文本 / 其它
+  // 目录不动，仍是原版 folder-open（CSS 已给琥珀黄）。
+  // 表里查不到的扩展名一律退回 glyphicon-file，不会出现空白图标。
+  // ---------------------------------------------------------------------
+  var ICON_CLASS = {
+    image: 'glyphicon-picture',
+    video: 'glyphicon-film',
+    audio: 'glyphicon-music',
+    archive: 'glyphicon-compressed',
+    doc: 'glyphicon-book',
+    text: 'glyphicon-file',
+    other: 'glyphicon-file'
+  };
+
+  var ICON_EXT = {
+    image: { png: 1, jpg: 1, jpeg: 1, gif: 1, bmp: 1, webp: 1, svg: 1,
+             heic: 1, heif: 1, tif: 1, tiff: 1, ico: 1, raw: 1 },
+    video: { mp4: 1, m4v: 1, mov: 1, webm: 1, avi: 1, mkv: 1, flv: 1,
+             wmv: 1, mpg: 1, mpeg: 1, ts: 1, '3gp': 1 },
+    audio: { mp3: 1, m4a: 1, wav: 1, aac: 1, ogg: 1, flac: 1, ape: 1,
+             amr: 1, opus: 1, aiff: 1, wma: 1 },
+    archive: { zip: 1, rar: 1, '7z': 1, tar: 1, gz: 1, tgz: 1, bz2: 1,
+               xz: 1, deb: 1, ipa: 1, apk: 1, dmg: 1, iso: 1, lz4: 1 },
+    doc: { pdf: 1, doc: 1, docx: 1, xls: 1, xlsx: 1, ppt: 1, pptx: 1,
+           pages: 1, numbers: 1, key: 1, rtf: 1, epub: 1, mobi: 1 }
+  };
+
+  // 文本类复用预览段的 TEXT_EXT（txt / log / md / json / js / css …），
+  // 避免同一份扩展名清单在文件里维护两遍、改一处漏一处。
+  function iconKind(name) {
+    var ext = fileExt(name);
+    if (!ext) { return 'other'; }
+    if (TEXT_EXT[ext]) { return 'text'; }
+    for (var k in ICON_EXT) {
+      if (Object.prototype.hasOwnProperty.call(ICON_EXT, k) && ICON_EXT[k][ext]) { return k; }
+    }
+    return 'other';
+  }
+
+  function fileIconClass(name) {
+    return ICON_CLASS[iconKind(name)] || ICON_CLASS.other;
+  }
+
+  // 按行同步图标列的字形。幂等：已经是目标字形就不动 DOM，
+  // 否则 MutationObserver 每轮都会重建 class，造成视觉抖动。
+  function applyRowIcon(tr, name, isDir) {
+    if (isDir) { return; }   // 目录保留原版 folder-open
+    var icon = tr.querySelector('.column-icon > .btn > .glyphicon');
+    if (!icon) { return; }
+    var want = fileIconClass(name);
+    if (icon.classList.contains(want)) { return; }
+    var all = icon.className.match(/glyphicon-[a-z0-9-]+/g) || [];
+    for (var i = 0; i < all.length; ++i) { icon.classList.remove(all[i]); }
+    icon.classList.add(want);
   }
 
   // ---------------------------------------------------------------------
@@ -438,7 +764,7 @@
     '<span class="oka-list-tools">',
     '  <button type="button" class="btn btn-default btn-sm" id="oka-select-all">全选</button>',
     '  <button type="button" class="btn btn-default btn-sm" id="oka-select-none">取消选择</button>',
-    '  <span class="oka-hint">已选 <span id="oka-sel-count" class="badge">0</span> 项 &middot; 点文件名左侧区域即可选中 &middot; 每行下载按钮可下载文件或整个文件夹</span>',
+    '  <span class="oka-hint">已选 <span id="oka-sel-count" class="badge">0</span> 项 &middot; 点文件名左侧区域即可选中 &middot; 点名称进入文件夹 / 预览文件 &middot; 每行下载按钮可下载文件或整个文件夹</span>',
     '</span>'
   ].join('\n');
 
@@ -456,6 +782,27 @@
     '  <div id="oka-move-browser" class="oka-move-browser"></div>',
     '</div>',
     '<div id="oka-move-result"></div>'
+  ].join('\n');
+
+  // v1.1.7 文件预览弹窗：默认隐藏，不占列表版面；关闭时清空 body 以停掉
+  // 视频 / 音频播放，并 revoke Blob URL，避免反复预览泄漏内存。
+  var HTML_PREVIEW = [
+    '<div class="modal fade" id="oka-preview-modal" tabindex="-1" role="dialog" aria-hidden="true">',
+    '  <div class="modal-dialog modal-lg" role="document">',
+    '    <div class="modal-content">',
+    '      <div class="modal-header">',
+    '        <button type="button" class="close" data-dismiss="modal" aria-label="关闭"><span aria-hidden="true">&times;</span></button>',
+    '        <h4 class="modal-title" id="oka-preview-title">预览</h4>',
+    '      </div>',
+    '      <div class="modal-body" id="oka-preview-body"></div>',
+    '      <div class="modal-footer">',
+    '        <span id="oka-preview-note" class="oka-hint pull-left"></span>',
+    '        <a class="btn btn-default" id="oka-preview-download" href="#" download>下载原文件</a>',
+    '        <button type="button" class="btn btn-primary" data-dismiss="modal">关闭</button>',
+    '      </div>',
+    '    </div>',
+    '  </div>',
+    '</div>'
   ].join('\n');
 
   // ---------------------------------------------------------------------
@@ -687,23 +1034,36 @@
     });
   }
 
+  // 插件自己发起的 list 一律走原生 XHR，不能用 $.ajax。
+  // $.ajax 已被上面的包装接管：任何 list 的 done 都会调
+  // sortListingInPlace() 与 resetSelectionOnReload()。上传时反查目录、
+  // 移动弹窗里浏览目标目录都是「内部辅助请求」，不该冒泡成「列表重建」，
+  // 否则用户在移动弹窗里点一下目录，刚勾好的多选项就被清空了。
+  function listDir(dir) {
+    return xhrGet('list?path=' + encodeURIComponent(dir), false).then(function (txt) {
+      var arr;
+      try { arr = JSON.parse(txt); } catch (e) { throw new Error('目录内容不是有效 JSON'); }
+      if (!Array.isArray(arr)) { return []; }
+      // ★ 排序要在这里补一次：原先这些内部 list 走的是被包装的 $.ajax，
+      //   排序由包装层的 done 回调完成；改成原生 XHR 后包装层不参与，
+      //   移动弹窗的目录浏览会退回服务端的文件系统顺序（大小写、数字乱序）。
+      sortListingInPlace(arr);
+      return arr;
+    });
+  }
+
   // create 用 withIntermediateDirectories:NO，目标已存在会直接失败。
   // 重复拖入同名文件夹时反查 list，确认同名目录确实存在才当「已就绪」。
   function dirAlreadyExists(absNoSlash) {
     var cut = absNoSlash.lastIndexOf('/');
     var parent = cut > 0 ? absNoSlash.slice(0, cut + 1) : '/';
-    return new Promise(function (resolve) {
-      $.ajax({ url: 'list', type: 'GET', data: { path: parent }, dataType: 'json' })
-        .done(function (data) {
-          var arr = data || [], found = false;
-          for (var k = 0; k < arr.length; ++k) {
-            var o = arr[k];
-            if (o && o.path && o.size == null && noSlash(o.path) === absNoSlash) { found = true; break; }
-          }
-          resolve(found);
-        })
-        .fail(function () { resolve(false); });
-    });
+    return listDir(parent).then(function (arr) {
+      for (var k = 0; k < arr.length; ++k) {
+        var o = arr[k];
+        if (o && o.path && o.size == null && noSlash(o.path) === absNoSlash) { return true; }
+      }
+      return false;
+    }, function () { return false; });
   }
 
   function uploadOne(task, targetPath) {
@@ -929,6 +1289,10 @@
         tr.classList.remove('oka-dir-row');
       }
 
+      // ②b v1.1.7：文件图标按类型换（原本所有文件都是同一个下载箭头，
+      //     和 v1.1.6 新增的每行下载按钮撞车）。目录保留原版 folder-open。
+      applyRowIcon(tr, String(d.name || baseName(d.path)), isDir);
+
       // ③ 摘掉原版 jeditable 的点击目标（v1.1.5）
       //    正在重命名时 .oka-name 仍在（只是 hide 了），.oka-rename-input 也在，
       //    所以不会把用户正在编辑的输入框冲掉。
@@ -1054,6 +1418,30 @@
     toggleRowSelection(tr);
   }
 
+  // v1.1.7：点名称区域 = 目录进入 / 文件预览。
+  // 左侧热区在捕获阶段就 stopPropagation 了，不会走到这里；按钮类元素一律
+  // 放行给各自的 handler —— 原版 .button-delete 的 handler 没有 stopPropagation，
+  // 不排掉的话点删除会顺带打开预览或切换目录。
+  function onRowAction(e) {
+    var t = e.target;
+    if (!t || !t.closest) { return; }
+    if (t.closest('button, a, input, select, textarea, .btn, .oka-rename-input')) { return; }
+    // 行末那几个 40px 宽的按钮格：按钮本身已被上面排掉，但格子里的空白
+    // 仍会漏下来。点空白不该触发「进入目录 / 预览」，否则删除旁边一点就跳页。
+    if (t.closest('td.column-move, td.column-delete, td.oka-download-cell, td.oka-rename-cell')) { return; }
+    var tr = t.closest('#listing tr.row-file');
+    if (!tr) { return; }
+    var d = $(tr).data() || {};
+    if (!d.path) { return; }
+    e.preventDefault();
+    if (isDirEntry({ path: d.path, size: d.size })) {
+      if (typeof window._reload === 'function') { window._reload(d.path); }
+      else { showResult('danger', '<strong>无法进入目录</strong> 原页面 _reload 不可用'); }
+    } else {
+      openPreview(d);
+    }
+  }
+
   function syncSelectionUI() {
     var keys = Object.keys(selected);
     var map = {};
@@ -1081,9 +1469,10 @@
       setInterval(function () { decorateRows(); syncSelectionUI(); }, 600);
     }
 
-    // v1.1.6：点行不再下载 / 进入目录。名称及其右侧空白区保持无动作，
-    // 给将来「点行打开文件」留出手势；选中统一由左侧热区（捕获阶段）处理。
-    // 这里不再注册任何行级 click handler —— 少一个 handler 比多一层放行更可靠。
+    // v1.1.7：把「点行」这个手势还给内容本身 —— 目录进入、文件预览。
+    // 左侧选中热区在捕获阶段拦下，各按钮在自己 handler 里阻止冒泡，
+    // 都不受影响；点行依旧不切换选中（选中只走复选框 / 左侧热区 / 全选）。
+    $(document).on('click', '#listing tr.row-file', onRowAction);
 
     // 每行一个独立下载按钮：文件直连 download，目录前端递归打包 ZIP。
     $(document).on('click', '#listing .oka-download', function (e) {
@@ -1164,23 +1553,22 @@
     $('#oka-move-crumb').html(crumbs.join(' '));
     $('#oka-move-browser').html('<span class="oka-hint">载入中…</span>');
 
-    $.ajax({ url: 'list', type: 'GET', data: { path: browseDir }, dataType: 'json' })
-      .done(function (data) {
-        var arr = data || [], dirs = [];
-        for (var k = 0; k < arr.length; ++k) {
-          var o = arr[k];
-          if (o && o.path && o.path.charAt(o.path.length - 1) === '/') { dirs.push(o); }
-        }
-        if (!dirs.length) { $('#oka-move-browser').html('<span class="oka-hint">此目录下没有子目录</span>'); return; }
-        var html = [];
-        for (var n = 0; n < dirs.length; ++n) {
-          html.push('<a href="#" class="oka-dir" data-dir="' + esc(dirs[n].path) + '">&#128193; ' + esc(dirs[n].name) + '</a>');
-        }
-        $('#oka-move-browser').html(html.join(''));
-      })
-      .fail(function (xhr, status, err) {
-        $('#oka-move-browser').html('<span class="text-danger">读取目录失败：' + esc(err || status) + '</span>');
-      });
+    listDir(browseDir).then(function (arr) {
+      var dirs = [];
+      for (var k = 0; k < arr.length; ++k) {
+        var o = arr[k];
+        if (o && o.path && isDirEntry(o)) { dirs.push(o); }
+      }
+      if (!dirs.length) { $('#oka-move-browser').html('<span class="oka-hint">此目录下没有子目录</span>'); return; }
+      var html = [];
+      for (var n = 0; n < dirs.length; ++n) {
+        html.push('<a href="#" class="oka-dir" data-dir="' + esc(dirs[n].path) + '">&#128193; ' + esc(dirs[n].name) + '</a>');
+      }
+      $('#oka-move-browser').html(html.join(''));
+    }, function (err) {
+      $('#oka-move-browser').html('<span class="text-danger">读取目录失败：' +
+        esc(err && err.message ? err.message : err) + '</span>');
+    });
   }
 
   // 捕获阶段拦下原版 .button-move 的 click：
@@ -1222,7 +1610,20 @@
   // 这里改成批量 + 逐项结果 + 保留弹窗反馈 + 结束后刷新列表。
   function doMove() {
     if (!pendingMove.length) { return; }
-    var target = withSlash($('#move-input').val());
+    // ★ 自检修正：先校验目标路径再禁用按钮。
+    //   withSlash('') 会返回 '/'，原版是「空输入直接不提交」，这里若照抄
+    //   withSlash 就会把用户清空输入框当成「移动到根目录」——静默把文件
+    //   搬到 / 下，属于破坏性误操作。原版还要求以 / 开头，一并校验。
+    var raw = String($('#move-input').val() == null ? '' : $('#move-input').val()).replace(/^\s+|\s+$/g, '');
+    if (!raw) {
+      $('#oka-move-result').html('<div class="alert alert-warning">请先填写目标目录，例如 /Docs/</div>');
+      return;
+    }
+    if (raw.charAt(0) !== '/') {
+      $('#oka-move-result').html('<div class="alert alert-warning">目标路径要以 / 开头，例如 /Docs/</div>');
+      return;
+    }
+    var target = withSlash(raw);
     $('#move-confirm').prop('disabled', true);
     var ok = 0, fail = 0, skipped = 0;
     var failures = [];
@@ -1280,6 +1681,14 @@
       // 列表工具塞进原 .btn-toolbar，与原按钮同一行，不新增行
       $('.btn-toolbar').first().append(HTML_LIST_TOOLS);
       $('body').append(HTML_OVERLAY);
+      $('body').append(HTML_PREVIEW);
+      // 关闭预览：停掉媒体播放 + 释放 Blob URL，反复预览不会累积内存。
+      $('#oka-preview-modal').on('hidden.bs.modal', function () {
+        clearPreviewURL();
+        var body = document.getElementById('oka-preview-body');
+        if (body) { body.innerHTML = ''; }
+        $('#oka-preview-note').text('');
+      });
 
       // ---- 改造原版 #move-modal ----
       var mbody = $('#move-modal .modal-body');

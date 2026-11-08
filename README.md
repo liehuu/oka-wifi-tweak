@@ -6,7 +6,13 @@
 |---|---|---|
 | 1 | 桌面长按快捷开启 | 长按图标出现「开启 WiFi 传输」，点一下直接启动服务，地址自动复制到剪贴板并弹窗提示。不用进 App、不用点按钮 |
 | 2 | 蜂窝 / 热点可开启 | 用手机流量或个人热点时，WiFi 传输页面的「开始」按钮正常出现，可正常开启；且显示的地址是手机在热点网段的真实 IP（`172.20.10.1` 这类），不再是 `unknown` |
-| 3 | 电脑网页端增强（v1.1.6） | 保留原 `Upload Files` 按钮；**整个页面就是放置区**（没有独立拖放框），把单个/多个文件、整个文件夹拖进网页任意位置即可上传（拖入时全屏提示 + 成功/失败汇总 + 失败重试）；**复用原版行末「移动」按钮与原弹窗**，增强为目录浏览 + 可勾选批量移动 + 结果反馈。v1.1.2：**文件夹置顶**、**顶部紧凑**、**任务面板默认折叠**；v1.1.5：文件夹琥珀黄 + 行内重命名按钮；**v1.1.6：删除按钮挪到最右、重命名在它左边；文件名左侧整片区域点一下即选中；每行新增下载按钮，文件直接下载、整个文件夹自动打成 ZIP；点行不再下载** |
+| 3 | 电脑网页端增强（v1.1.7） | 保留原 `Upload Files` 按钮；**整个页面就是放置区**（没有独立拖放框），把单个/多个文件、整个文件夹拖进网页任意位置即可上传（拖入时全屏提示 + 成功/失败汇总 + 失败重试）；**复用原版行末「移动」按钮与原弹窗**，增强为目录浏览 + 可勾选批量移动 + 结果反馈。v1.1.2：**文件夹置顶**、**顶部紧凑**、**任务面板默认折叠**；v1.1.5：文件夹琥珀黄 + 行内重命名按钮；**v1.1.6：删除按钮挪到最右、重命名在它左边；文件名左侧整片区域点一下即选中；每行新增下载按钮，文件直接下载、整个文件夹自动打成 ZIP；点行不再下载**；**v1.1.7：点文件夹行进入目录、点文件行在线预览 txt / pdf / mp4 / 图片 / 音频；目录 ZIP 显式带顶层文件夹；图标列按文件类型显示不同图标（图片 / 视频 / 音频 / 压缩包 / 文档 / 文本），不再满屏下载箭头** |
+
+> **v1.1.7：四项网页改进。** ① **点文件夹所在行恢复进入文件夹**（v1.1.6 把行级 handler 整个删掉，连文件夹都进不去了），点文件所在行改为**在线预览**；
+> ② **目录 ZIP 显式写入顶层文件夹条目**：v1.1.6 只写了 `Docs/a.txt` 这类带前缀的文件条目，部分解压工具不建隐式目录，解压出来是散装文件，现在 ZIP 第一条就是 `Docs/`；
+> ③ **点文件所在行即可预览** `txt / log / json / pdf / mp4 / mp3 / png` 等，前端用原生 XHR 取回 `download` 的字节后用 Blob URL 渲染（弹窗默认隐藏、关闭即释放），不改服务端、不影响上传与移动；
+> ④ **图标列按文件类型换字形**：原版对所有文件都用同一个下载箭头，看不出类型、还和每行下载按钮撞车，现在图片 / 视频 / 音频 / 压缩包 / 文档 / 文本各用各的图标并分色，目录仍是琥珀黄文件夹。
+> 预览是**只读**的；「编辑完保存回手机」仍需服务端新增覆盖写回接口，见下方可行性结论。
 
 > **v1.1.6：网页交互三项（按真机反馈改）。** ① 行末按钮重排：**删除在最右、重命名紧挨左边**，
 > 并在原版「移动」按钮**左边**新增一个下载按钮；② **文件名左边所有区域（复选框列 + 图标列）
@@ -18,7 +24,7 @@
 > **v1.1.5：网页交互三项（按真机反馈改，其中「点行即下载」已在 v1.1.6 取消）。** ① 文件夹与文件不再「颜色太相似」：
 > 目录行用 Windows 资源管理器式琥珀黄（图标按钮、文件夹图标、名称、行首色条），文件保持中性蓝灰；
 > ② 原来点名称那一列会触发原版 jeditable 的重命名（名称列最宽，感觉就是「点行 = 重命名」），
-> v1.1.5 曾改成**点行 = 文件下载 / 文件夹进入**（v1.1.6 已按反馈取消，改为点行无动作 + 独立下载按钮）；
+> v1.1.5 曾改成**点行 = 文件下载 / 文件夹进入**（v1.1.6 一度改为点行无动作 + 独立下载按钮，v1.1.7 已恢复为目录进入 / 文件预览）；
 > ③ **重命名改为每行一个按钮**，点开内联输入框，Enter 提交 / Esc 取消，提交仍走原版
 > `POST move {oldPath, newPath: 当前目录 + 新名}`。原 `Upload Files`、移动弹窗、拖放上传、
 > 排序、紧凑布局、折叠任务面板与 v1.1.4 的选择重置全部保留。
@@ -196,7 +202,7 @@ _GCDWebServerGetPrimaryIPAddress 硬编码 strcmp(ifa_name,"en0")
    - 挂**后台保活**（`AVAudioSession` Playback + 循环播放 App 自带的 `Happy Dreams.mp3`，音量 0）——否则切到后台几秒后进程被挂起、端口就断了；
    - 等 1.5s 读 App 自己写进 `ipAddress.text` 的 URL（`Helper` 是纯 Swift 类，ObjC runtime 反射不到 `uploader`）；读不到再用「本机 IP + 端口」兜底，复制到剪贴板并弹窗显示。
 
-### 功能 3 —— 电脑网页端增强（v1.1.1 定型，v1.1.2 ~ v1.1.6 持续增强）
+### 功能 3 —— 电脑网页端增强（v1.1.1 定型，v1.1.2 ~ v1.1.7 持续增强）
 
 **约束**：不能改 App 包内 `GCDWebUploader.bundle/Contents/Resources/` 的任何文件，那会破坏代码签名。所以采用「构建期把前端资源编进 dylib + 运行时注入 HTML」。
 
@@ -228,6 +234,50 @@ _GCDWebServerGetPrimaryIPAddress 硬编码 strcmp(ifa_name,"en0")
 `Content-Disposition: inline` 预览、覆盖写回、服务端打包 ZIP 之类的隐藏接口。
 
 路径都经 `_GCDWebServerNormalizePath` 规范化。因为 `create` **不递归**，文件夹上传必须把目录按深度升序**逐级创建**，再逐个上传文件到对应子目录；重复拖入同名文件夹时，`create` 会失败，此时用 `list` 反查同名目录是否真的已存在，存在就当"目录已就绪"继续走，不吞掉真实失败。
+
+#### v1.1.7：点目录进入 / 点文件预览 / 目录 ZIP 保留顶层文件夹 / 按类型换图标
+
+| 反馈 | 根因 | 改法 |
+|---|---|---|
+| 点击文件夹所在行应该能进入文件夹，现在都进不去了 | v1.1.6 为取消「点行即下载」把**整个行级 click handler** 删掉，目录进入也一起没了 | 恢复 `$(document).on('click', '#listing tr.row-file', onRowAction)`：目录行调原版 `window._reload(d.path)`，文件行调 `openPreview(d)`。左侧热区在捕获阶段 `stopPropagation`，各按钮在自己 handler 里阻止冒泡，都不受影响；原版 `.button-delete` 没有 `stopPropagation`，所以 `onRowAction` 里显式排除 `button / a / input / select / textarea / .btn / .oka-rename-input` |
+| 下载文件夹得到的是文件夹里的各个文件，没有那个文件夹 | v1.1.6 的 ZIP 只有 `Docs/notes.txt` 这类**带前缀的文件条目**，没有显式写入 `Docs/` 这条 0 字节目录条目；部分解压工具不创建隐式目录 | `downloadDirectoryAsZip()` 把 `acc.dirs` 初始化为 `[rootRel]`，ZIP 第一条就是顶层文件夹。完成汇总里的子目录数用 `acc.dirs.length - 1`，不把顶层算进去 |
+| 能否点文件所在行直接打开 txt / pdf / mp4，起码预览一下 | 服务端 `download` 是 `isAttachment:YES`，直接在标签页打开只会下载；但**前端可以把字节取回页面内存**再渲染 | 原生 XHR 读 `download?path=` → `Uint8Array` → `Blob` → `URL.createObjectURL`：文本走 `<pre>`、PDF 走 `<iframe>`、图片/视频/音频走 `<img>/<video>/<audio>`；按**扩展名优先**判类型（服务端对 `.log` 常给 `application/octet-stream`），MIME 兜底。弹窗默认隐藏、关闭时清空 body + revoke Blob URL；超过 200 MB 或扩展名不认识就只给「下载原文件」，不把大文件读进内存 |
+
+**预览不改服务端**：仍然只用现有的 `GET download`，不需要 inline 接口，也不做覆盖写回。
+预览请求走原生 `XMLHttpRequest`，与被包装过的 `$.ajax` 完全隔离，不会触发排序或清空选中。
+左侧热区、每行下载按钮、上传 / 移动 / 重命名 / 排序 / 折叠面板全部保持原样。
+
+**类型判定顺序**（`previewKind(ext, mime)`）：扩展名优先，服务端 `Content-Type` 兜底。
+先看扩展名是因为 GCDWebServer 对 `.log` / `.bin` 这类常用 `application/octet-stream`，
+只看 MIME 会把文本误判成「不支持」。反过来，扩展名不认识时靠 MIME 兜底 ——
+判定发生在 `xhr.readyState === 2`（响应头已到、正文未读）这一刻：能判出类型就继续读，
+判不出就立刻 `abort`，不会为了显示一句「不支持」把几百 MB 二进制读进内存。
+`Content-Length` 大于 200 MB 同样在响应头阶段就拦掉。
+
+#### v1.1.7：图标列按文件类型换字形
+
+| 现象 | 根因 | 改法 |
+|---|---|---|
+| 文件图标是个下载箭头，不合适，能不能按类型换 | 原版 `template-listing` 对**所有**文件都用 `glyphicon-download-alt`，只对目录用 `glyphicon-folder-open`。满屏都是下载箭头，且 v1.1.6 新增的**每行下载按钮**也是同一个字形，两者在视觉上撞车 | `decorateRows()` 里按扩展名换字形（`applyRowIcon` / `iconKind` / `ICON_CLASS`）：图片 `picture`、视频 `film`、音频 `music`、压缩包 `compressed`、文档 `book`、文本与未知 `file`。目录保持原版 `folder-open`（CSS 已给琥珀黄） |
+
+只用 Bootstrap 3 自带字形（Abel 字体里逐个确认存在，见 `bootstrap.css` 的 `glyphicon-*:before`），
+**不引外部图标库、不新增任何网络请求**。扩展名比较统一转小写，`x.HEIC` 与 `x.heic` 同类；
+表里查不到的扩展名、以及完全没有扩展名的文件一律退回 `glyphicon-file`，不会出现空白方块。
+图标列配色改用 `.column-icon` 作用域圈死（图片绿 / 视频紫 / 音频橙 / 压缩包褐 / 文档红），
+并把原先那条 `.glyphicon-download-alt` 通配染色规则删掉 —— 否则它会把真正的下载按钮一起染色。
+
+#### 交付前自检修正（同一版本内）
+
+按「全项目自检」要求复查后修掉的问题，均已补进静态闸门与反向注入用例：
+
+| 问题 | 影响 | 修正 |
+|---|---|---|
+| 目录 ZIP 部分失败时，成功文件数写成 `entries.length - acc.dirs.length - failures.length` | `entries` 已包含目录条目与成功文件，这样算会得到「成功数 − 失败数」，报出的成功数偏小甚至为负 | 改为 `acc.files.length - failures.length` |
+| `openPreview()` 先用 `previewKind(ext, '')` 判 `kind === 'other'` 就返回 | `previewKind` 的 MIME 兜底成了死代码：未知扩展名但服务端返回 `text/*` / `image/*` 的文件永远无法预览 | 删掉提前返回，类型判定统一移到 `fetchPreview()` 的响应头阶段，判不出才 abort 并回报 `code='unsupported'` |
+| `dirAlreadyExists()` 与移动弹窗目录浏览用 `$.ajax` 发 `list` | 走的是被包装的 `$.ajax`，每次都会触发 `resetSelectionOnReload()`：在移动弹窗里点一下目标目录，刚勾好的多选项就被清空 | 新增原生 XHR 的 `listDir()`，插件内部 list 一律走它 |
+| `doMove()` 用 `withSlash($('#move-input').val())` | `withSlash('')` 返回 `/`，用户清空输入框再点移动，文件会被**静默搬到根目录**（原版是空输入直接不提交） | 提交前校验：空值拒绝、必须以 `/` 开头，不通过就只在弹窗里提示，不发请求 |
+| `onRowAction()` 只排除按钮元素 | 行末那几个 40px 按钮**格子的空白处**仍会冒泡上来，点删除按钮旁边一点就跳页 / 开预览 | 追加排除 `td.column-move / td.column-delete / td.oka-download-cell / td.oka-rename-cell` |
+| `renderPreviewBody()` 的 `el` 为 null 时无兜底 | 理论上会留下一个空白弹窗 | 补 `else` 分支，清空 body 并显示「不支持预览」提示 |
 
 #### v1.1.6：行末按钮重排 / 左侧选中热区 / 每行下载（按真机反馈改）
 
@@ -269,6 +319,10 @@ ZIP 下载使用独立的 `zipping` 标志，不占用 `tasks` / `running`，`Up
 风险与工作量都明显大于本版前端改动，本版未实施；当前可用的替代流程是
 「下载 → 电脑编辑 → 重新上传」，但会得到副本而非原文件。
 
+> **v1.1.7 补充：**「点行**只读预览**」已经实现（上面的 Blob URL 方案），
+> txt / pdf / mp4 / 图片 / 音频都能在网页里直接看 / 听 / 播；但「编辑完保存回手机」
+> 仍然需要上面的 `/save` 覆盖写回接口，本版依旧不支持。
+
 #### v1.1.5：文件夹配色与行点击语义（按真机反馈改）
 
 | 反馈 | 根因 | 改法 |
@@ -280,10 +334,10 @@ ZIP 下载使用独立的 `zipping` 标志，不占用 `tasks` / `running`，`Up
 **为什么用「替换元素」而不是在捕获阶段拦 click**：jeditable 的 handler 绑在元素本身，
 且自己 `stopPropagation()`；在 `document` 捕获阶段拦会连行级点击一起吞掉。替换 DOM 元素是
 唯一能同时做到「点名称不再重命名」和「行级手势留给上层决定」的做法，而且不碰 App 包内任何文件。
-（v1.1.6 之后点名称干脆不再有动作，这个替换依然是必需的前提。）
+（v1.1.7 起点名称是进入目录 / 预览文件，这个替换依然是必需的前提。）
 
 多选入口没丢：行首复选框、工具栏「全选 / 取消选择」以及原版行末「移动」按钮照常可用；
-**v1.1.6 起文件名左边整片区域（复选框列 + 图标列）点击都切换选中**，点名称区域不切换选中。
+**v1.1.6 起文件名左边整片区域（复选框列 + 图标列）点击都切换选中**，点名称区域不切换选中；v1.1.7 起点名称区域有进入 / 预览动作，但依然不切换选中。
 
 #### v1.1.4：修复「操作后勾选残留」（按真机反馈）
 
@@ -343,9 +397,9 @@ v1.1.0 曾单独放了一块占大半个页面的虚线拖放框，又另起了�
 **不需要 Theos。** 构建是一台装了 Xcode 的 macOS（或 GitHub Actions 的 `macos-latest`）上跑三条命令：
 
 ```bash
-sh devkit/build.sh arm64e iphoneos-arm64e 1.1.6   # RootHide / roothide
-sh devkit/build.sh arm64  iphoneos-arm64  1.1.6   # rootless（Dopamine / palera1n）
-sh devkit/build.sh arm64  iphoneos-arm    1.1.6   # 传统 rootful
+sh devkit/build.sh arm64e iphoneos-arm64e 1.1.7   # RootHide / roothide
+sh devkit/build.sh arm64  iphoneos-arm64  1.1.7   # rootless（Dopamine / palera1n）
+sh devkit/build.sh arm64  iphoneos-arm    1.1.7   # 传统 rootful
 ```
 
 产物在 `.build/out/com.oka.wifitweak_<ver>_<arch>.deb`。
@@ -526,11 +580,14 @@ v1.1.3 起插件**不输出任何系统日志**，所以判据一律看功能表
 | 快捷菜单点了没反应 | `gServerPort` 未清零，被误判成「已在运行」 | 已 hook `-[GCDWebServer stop]` 清零；若 App 走别的停服路径会误判，重启 App 再试 |
 | 操作过一次后再点移动，仍带着上次勾选的文件 | 选中集合没随列表重建清空（v1.1.4 已修） | 确认装的是 1.1.4；控制台执行 `document.querySelectorAll('#listing .oka-checkbox:checked').length` 应为 0 |
 | 点名称还是进入重命名编辑框 | `decorateRows()` 没把 `.edit` 换掉（v1.1.5 已修） | 控制台执行 `document.querySelectorAll('#listing p.edit').length`，应为 **0**；为 1 说明装的是 v1.1.4 或更早，确认包版本后强刷（Ctrl+F5） |
-| 点名称所在行还是会下载 / 进入目录 | 装的是 v1.1.5（v1.1.6 已取消点行下载） | 确认包版本是 1.1.6 后强刷（Ctrl+F5）；控制台查 `document.querySelectorAll('#listing .oka-download').length` 应等于行数，网页源码里不应再出现 `openRow` |
+| 点文件夹行进不去 / 点文件行不预览 | 装的是 v1.1.6（该版把行级 handler 整个删了） | 确认包版本是 1.1.7 后强刷（Ctrl+F5）；控制台查 `document.querySelector('#oka-preview-modal')` 应存在，点 `.oka-name` 应打开预览或进入目录 |
 | 点文件图标还是会下载 / 进入目录 | 捕获阶段拦截或 `pointer-events:none` 没生效 | 控制台确认 `.column-icon` 带 `oka-select-zone`、`getComputedStyle(图标按钮).pointerEvents === 'none'`；两者都对仍下载就强刷排除缓存 |
 | 点文件名左边空白不选中 | `onSelectZoneCapture` 没注册 | 网页源码搜 `onSelectZoneCapture`，控制台确认 `window.__okaWiFiLoaded` 为真 |
 | 找不到重命名按钮 / 它不在删除左边 | `.oka-rename` 没注入，或装的是 v1.1.5（旧版 append 到了删除右边） | 控制台查 `document.querySelectorAll('#listing .oka-rename').length` 应等于行数；每行 `lastElementChild.className` 应为 `column-delete` |
 | 文件夹下载得到的 zip 少文件 / 打不开 | 某个 `GET download` 失败，或浏览器不支持 `Blob` / `TextEncoder` | 先看 `#alerts` 里的「目录下载部分失败」清单；空子目录以 `/` 结尾的 0 字节条目保留。中文名乱码时确认解压软件支持 ZIP 的 UTF-8 标志位 |
+| 文件夹 ZIP 解压后是一堆散装文件，没有外层文件夹 | 装的是 v1.1.6（ZIP 里没有顶层目录条目，部分解压工具不建隐式目录） | 确认包版本是 1.1.7；用解压软件查看 ZIP 内第一条应是 `文件夹名/`。v1.1.6 的包只能自己建一个同名目录再解压进去 |
+| 点文件行弹出预览但视频 / 音频播不了 | 该编码浏览器不支持（如 `mov` / `flac`），或文件过大被拒 | 预览弹窗右下角「下载原文件」到电脑播放；超过 200 MB 会直接提示用下载按钮，不会读进内存 |
+| 点文件行提示「此文件类型暂不支持在线预览」 | 扩展名不在白名单（如 `.zip` / `.bin`） | 用弹窗里的「下载原文件」；可预览类型：txt/log/json/xml/csv/md 等文本、pdf、png/jpg/gif/bmp/webp/svg、mp4/m4v/webm/mov、mp3/m4a/wav/aac/ogg/flac |
 | 文件夹还是和文件一个颜色 | `oka-dir-row` 或注入的 CSS 没生效 | 控制台看目录行是否有 `oka-dir-row` class；为真但颜色没变就强刷（Ctrl+F5）排除缓存 |
 | 系统日志里还能看到 `[OkaWiFi]` | 装的不是 v1.1.3（或更早） | v1.1.3 起源码和产物里都不会有 `NSLog` / `[OkaWiFi]`；确认装的是 1.1.3 的包并重启 App |
 | CI 报 `CPU: unbound variable`，但编译和签名都成功了 | 某行 `echo` 里写了 `$CPU，`（后跟全角标点） | macOS 的 bash 3.2 把 `0xEF` 吞进变量名。改 `${CPU}`，并跑 `python3 devkit/check-shell.py .` 扫全仓库 |
@@ -560,7 +617,7 @@ v1.1.3 起插件**不输出任何系统日志**，所以判据一律看功能表
 5. **端口是 App 自己定的，插件不改。** v1.0.2 直接从 `[self port]` 读真实端口（`GCDWebServer` 公开属性）、`isRunning` 读运行状态，`stop` 时清零；不再靠猜 8080，也不再依赖 `startWithPort:` 是否被命中。端口 LISTEN 探测只保留为 UI 兜底层的补充手段。
 6. **网页增强依赖电脑浏览器的 `DataTransferItem.webkitGetAsEntry()`。** Chrome / Edge / Safari 支持整个文件夹递归；不提供该 API 的浏览器会自动降级为「单文件 / 多文件」拖放上传，文件夹结构无法保留（点 `Upload Files` 选文件始终可用）。另外服务端 `create` 不递归、也不允许目标已存在，所以文件夹上传是**串行**的：先逐级建目录，再逐个传文件，大文件夹会比一次多文件选择慢。
 7. **注入层依赖 `responseWithHTMLTemplate:variables:` 这条渲染路径。** 已在 1.7.5 的 `GCDWebServer` 二进制里反汇编确认（6 个 variables key 的字典 + `0x1D210` 的类方法调用）。若 App 升级换了 GCDWebServer 版本、改走别的 HTML 渲染方法，注入会静默不生效——但功能 1 / 2 完全不受影响，网页也会保持原版可用状态。
-8. **「点行打开文件 → 编辑 → 保存回手机」当前不支持。** 服务端只有 6 个接口：`download` 是附件下载（指向目录直接 400）、`upload` 同名自动改名不覆盖，没有 inline 读取与覆盖写回。要真正实现在线编辑，必须在插件侧注册新的 `GCDWebServer` handler（例如 `/open` + `/save`），属于改服务端能力，本版未实施。目录下载因此走浏览器端 ZIP 打包，超大目录会受浏览器内存限制。
+8. **「点行打开文件 → 编辑 → 保存回手机」仍不支持编辑保存；v1.1.7 起支持只读预览。** 服务端只有 6 个接口：`download` 是附件下载（指向目录直接 400）、`upload` 同名自动改名不覆盖，没有 inline 读取与覆盖写回。要真正实现在线编辑，必须在插件侧注册新的 `GCDWebServer` handler（例如 `/open` + `/save`），属于改服务端能力，未实施。目录下载因此走浏览器端 ZIP 打包（v1.1.7 起显式带顶层文件夹），超大目录会受浏览器内存限制；单个文件预览上限 200 MB，超过只给下载按钮。
 
 ---
 
@@ -570,7 +627,7 @@ v1.1.3 起插件**不输出任何系统日志**，所以判据一律看功能表
 wifitweak/
 ├── Tweak.xm                    # 全部实现（约 1230 行，含逐条逆向依据注释）
 ├── OkaWiFi.plist               # CydiaSubstrate 过滤：只注入 com.blinker.documents
-├── web/                        # 网页端增强前端资源（v1.1.6 含行末按钮重排 / 左侧选中热区 / 目录 ZIP 下载）
+├── web/                        # 网页端增强前端资源（v1.1.7 含点目录进入 / 文件预览 / 顶层文件夹 ZIP）
 │   ├── oka-wifi.js             # 列表排序 / 全页拖放 / 文件夹递归 / 折叠任务面板 / 复用原版移动弹窗 / 行交互 / ZIP 打包
 │   └── oka-wifi.css            # oka- 前缀样式 + 顶部紧凑布局 + 文件夹琥珀黄 + 选中热区 + 行内按钮
 ├── devkit/

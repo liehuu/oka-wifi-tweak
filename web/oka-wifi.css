@@ -1,7 +1,10 @@
-/* OkaWiFi v1.1.6 — 网页增强层样式
+/* OkaWiFi v1.1.7 — 网页增强层样式
  * v1.1.5 新增文件夹琥珀黄配色与行内重命名按钮 / 输入框样式；
  * v1.1.6 新增左侧选中热区（图标按钮改为纯视觉、不再可点）、独立下载按钮列，
  *         并把重命名列与下载列的宽度收窄，保持删除按钮在最右。
+ * v1.1.7 新增点名称进入目录 / 预览文件的指针提示，以及文件预览弹窗样式
+ *         （文本 pre / PDF iframe / 图片 / 视频 / 音频，弹窗默认隐藏不占版面）；
+ *         另按文件类型给图标列换字形并分色（下载箭头只保留给真正的下载按钮）。
  * 只使用 oka- 前缀，不覆盖 Bootstrap 原类，保证原页面可用性不受影响。
  *
  * v1.1.1 布局原则（按用户反馈改）：
@@ -78,7 +81,22 @@
 #listing tr.row-file.oka-dir-row .oka-name { color: #8a5a00; font-weight: 600; }
 #listing tr.row-file.oka-dir-row > .oka-check { border-left: 3px solid #e8b23a; }
 #listing tr.row-file.oka-file-row .oka-name { color: #2c3e50; font-weight: normal; }
-#listing tr.row-file.oka-file-row .glyphicon-download-alt { color: #5a6b7b; }
+
+/* --- v1.1.7：图标列按文件类型分色 ---
+ * 原版对所有文件都用同一个下载箭头（glyphicon-download-alt），满屏雷同，
+ * 且和 v1.1.6 新增的「每行下载按钮」撞车。JS 侧 applyRowIcon() 把字形换成
+ * picture / film / music / compressed / book / file，这里给每类配色。
+ * ★ 注意别再写 .glyphicon-download-alt 通配规则：那是下载按钮的字形，
+ *   会把按钮图标一起染色。这里只用 .column-icon 作用域圈死图标列。
+ */
+#listing tr.row-file.oka-file-row .column-icon > .btn { background-image: none; }
+#listing tr.row-file.oka-file-row .column-icon .glyphicon { color: #5a6b7b; }
+#listing tr.row-file.oka-file-row .column-icon .glyphicon-picture { color: #2f8f5b; }
+#listing tr.row-file.oka-file-row .column-icon .glyphicon-film { color: #a4569b; }
+#listing tr.row-file.oka-file-row .column-icon .glyphicon-music { color: #c2683a; }
+#listing tr.row-file.oka-file-row .column-icon .glyphicon-compressed { color: #8a6a2f; }
+#listing tr.row-file.oka-file-row .column-icon .glyphicon-book { color: #b3453f; }
+#listing tr.row-file.oka-file-row .column-icon .glyphicon-file { color: #5a6b7b; }
 
 /* 行内下载 / 重命名按钮与编辑框：跟原版行末按钮同一尺寸，不撑高 40px 的行。
  * v1.1.6 列顺序（左 → 右）：复选框 · 图标 · 名称 · 大小 · 下载 · 移动 · 重命名 · 删除 */
@@ -178,4 +196,58 @@ body.oka-compact .container > p.footer { margin-top: 6px; }
   .oka-drag-box { padding: 24px; }
   .oka-drag-box-title { font-size: 20px; }
   .oka-list-tools .oka-hint { display: block; width: 100%; margin: 4px 0 0; }
+}
+
+/* --- v1.1.7 点行进入 / 预览 与预览弹窗 --- */
+/* 名称列现在有动作（目录进入、文件预览），左侧热区仍然是选中。
+ * 只给 .column-name 加指针，不给整行加，避免误示「整行都能进文件夹」。 */
+#listing tr.row-file .column-name { cursor: pointer; }
+#listing tr.row-file .column-name:hover .oka-name { text-decoration: underline; }
+#listing tr.row-file .oka-rename-input { cursor: text; }
+
+#oka-preview-modal .modal-body {
+  min-height: 100px;
+  max-height: 72vh;
+  overflow: auto;
+  text-align: center;
+  background: #fafbfc;
+}
+#oka-preview-modal .oka-preview-loading {
+  padding: 36px 0;
+  color: #667;
+  font-size: 14px;
+}
+#oka-preview-modal .oka-preview-text {
+  display: block;
+  margin: 0;
+  padding: 12px;
+  text-align: left;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 13px;
+  line-height: 1.5;
+  background: #fff;
+  border: 1px solid #e3e8ec;
+  border-radius: 3px;
+}
+#oka-preview-modal .oka-preview-media {
+  display: inline-block;
+  max-width: 100%;
+  max-height: 66vh;
+}
+#oka-preview-modal .oka-preview-frame {
+  display: block;
+  width: 100%;
+  height: 66vh;
+  border: 0;
+  background: #fff;
+}
+#oka-preview-modal .oka-preview-unsupported,
+#oka-preview-modal .oka-preview-error { text-align: left; margin: 18px 0; }
+#oka-preview-modal .modal-footer { text-align: right; }
+#oka-preview-modal #oka-preview-note {
+  display: block;
+  text-align: left;
+  margin-top: 8px;
+  max-width: 60%;
 }

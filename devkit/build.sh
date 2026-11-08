@@ -182,7 +182,7 @@ grep -aq "_swift_unknownObjectWeakLoadStrong" "$BUILD/$NAME.dylib" \
        echo "  排查：Tweak.xm 里 dlsym(RTLD_DEFAULT, \"_swift_unknownObjectWeakLoadStrong\") 是否还以字符串字面量形式存在"
        exit 1; }
 
-# 功能 3（v1.1.6）：网页增强注入层
+# 功能 3（v1.1.7）：网页增强注入层
 # 前 4 条是 ObjC 侧：类方法 hook 的 selector、幂等标记、类名常量。
 # 其余来自内联的 kOkaWebJS / kOkaWebCSS —— 丢了说明 gen-webassets.py 的
 # 产物没被编进来，页面会照常打开但增强功能全部不存在，属于"静默功能缺失"。
@@ -194,6 +194,11 @@ grep -aq "_swift_unknownObjectWeakLoadStrong" "$BUILD/$NAME.dylib" \
 #   左侧选中热区（onSelectZoneCapture / oka-select-zone / toggleRowSelection）、
 #   目录前端 ZIP 打包（buildZip / collectTree / xhrGet / downloadItem）。
 #   v1.1.5 的「点行即下载」已按反馈取消，由下面的负向闸门反查。
+# v1.1.7 三项网页交互：点目录行进入（onRowAction）、点文件行在线预览
+#   （openPreview / previewKind / fetchPreview / oka-preview-modal）、
+#   目录 ZIP 显式写顶层文件夹条目（下方单独的 dirs: [rootRel] 判据）。
+# 另一项 v1.1.7：图标列按文件类型换字形（applyRowIcon / ICON_CLASS / iconKind），
+#   原本所有文件都是同一个下载箭头，与每行下载按钮撞车。
 for sym in responseWithHTMLTemplate:variables: initWithHTMLTemplate:variables: \
            OKA-WIFI-INJECTED GCDWebServerDataResponse \
            oka-list-tools onMoveButtonCapture HTML_MOVE_ENHANCE move-confirm \
@@ -203,11 +208,27 @@ for sym in responseWithHTMLTemplate:variables: initWithHTMLTemplate:variables: \
            decorateRows startRename downloadItem oka-dir-row oka-file-row \
            oka-name oka-rename oka-rename-input glyphicon-pencil \
            oka-download oka-download-cell oka-select-zone onSelectZoneCapture \
-           toggleRowSelection buildZip collectTree xhrGet application/zip; do
+           toggleRowSelection buildZip collectTree xhrGet application/zip \
+           onRowAction openPreview previewKind fetchPreview renderPreviewBody \
+           clearPreviewURL HTML_PREVIEW oka-preview-modal oka-preview-body \
+           oka-preview-text oka-preview-download \
+           applyRowIcon fileIconClass iconKind ICON_CLASS ICON_EXT \
+           glyphicon-picture glyphicon-film glyphicon-music \
+           glyphicon-compressed oka-preview-unsupported listDir; do
   grep -aqF "$sym" "$BUILD/$NAME.dylib" \
     || { echo "✗ dylib 缺 ${sym}（网页增强会静默失效）"; exit 1; }
 done
-echo "✓ v1.1.6 网页交互指纹齐全（行末按钮重排 / 左侧选中热区 / 目录 ZIP 下载）"
+echo "✓ v1.1.7 网页交互指纹齐全（点目录进入 / 点文件预览 / 目录 ZIP 保留顶层文件夹 / 按类型换图标）"
+
+# v1.1.7：按类型换图标必须真的挂在列表装饰流程里。
+# 只检查 ICON_CLASS 存在不够 —— 定义了却没人调用，图标照样全是下载箭头。
+# 这里要求 decorateRows 内部有 applyRowIcon(...) 调用，且图标表确有图片/视频/音频类。
+if ! grep -aqF "applyRowIcon(tr, String(d.name || baseName(d.path)), isDir);" \
+        "$BUILD/$NAME.dylib"; then
+  echo "✗ decorateRows 未按文件类型换图标（图标列会退回统一下载箭头）"
+  exit 1
+fi
+echo "✓ 图标列按文件类型换字形已挂在列表装饰流程里"
 
 # 负向：v1.1.5 的「点行即下载」入口必须彻底消失。用户明确要求取消；
 # 旧实现一旦回流，点名称又会触发下载，左侧热区也会被行级 handler 干扰。
@@ -216,6 +237,13 @@ if grep -aqF "openRow" "$BUILD/$NAME.dylib"; then
   exit 1
 fi
 echo "✓ 无 v1.1.5 点行下载残留"
+
+# v1.1.7：目录 ZIP 必须把顶层文件夹本身写成一条显式 0 字节目录条目。
+# v1.1.6 只把 "Docs/" 当文件名前缀，ZIP 里没有 "Docs/" 条目，部分解压工具
+# 不创建隐式目录，用户解压出来是一堆散装文件而不是一个文件夹。
+grep -aqF "dirs: [rootRel]" "$BUILD/$NAME.dylib" \
+  || { echo "✗ dylib 缺顶层目录条目（目录 ZIP 解压会得到散装文件）"; exit 1; }
+echo "✓ 目录 ZIP 显式写入顶层文件夹条目"
 
 # 负向闸门：v1.1.0 的独立拖放框 / 独立批量移动弹窗必须从产物里彻底消失。
 # 用户明确反馈过这两样占版面、另起一套入口不合理，不能让旧代码回流。
