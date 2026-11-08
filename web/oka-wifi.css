@@ -1,5 +1,6 @@
-/* OkaWiFi v1.1.4 — 网页增强层样式
- * 样式自 v1.1.2 起未改动；v1.1.4 只改了 JS（列表重建时重置选中状态）。
+/* OkaWiFi v1.1.5 — 网页增强层样式
+ * v1.1.4 只改了 JS（列表重建时重置选中状态），样式自 v1.1.2 起没动过；
+ * v1.1.5 新增文件夹琥珀黄配色与行内重命名按钮 / 输入框样式。
  * 只使用 oka- 前缀，不覆盖 Bootstrap 原类，保证原页面可用性不受影响。
  *
  * v1.1.1 布局原则（按用户反馈改）：
@@ -46,6 +47,35 @@
 #listing tr.row-file { cursor: pointer; }
 #listing tr.row-file.oka-selected { background: #e8f3ff !important; }
 #listing tr.row-file.oka-selected > td { border-top-color: #b9d9f5; }
+
+/* --- v1.1.5：文件夹用 Windows 资源管理器式琥珀黄，与文件明确区分 ---
+ * 原版目录和文件都只靠一个灰色的 btn-default glyphicon 区分，字号颜色完全一样。
+ * 这里给目录行四处着色：图标按钮底色、文件夹 glyph、名称文字、行首色条。
+ * 文件行保持中性蓝灰；选中态带 !important，优先级更高，不受配色影响。
+ */
+#listing tr.row-file.oka-dir-row .column-icon > .btn {
+  background-color: #fff2c8;
+  border-color: #e0b95e;
+  background-image: none;   /* 盖掉 Bootstrap 3 的 btn-default 渐变 */
+}
+#listing tr.row-file.oka-dir-row .column-icon > .btn:hover,
+#listing tr.row-file.oka-dir-row .column-icon > .btn:focus {
+  background-color: #ffe9a3;
+  border-color: #cf9f36;
+}
+#listing tr.row-file.oka-dir-row .glyphicon-folder-open { color: #c88200; }
+#listing tr.row-file.oka-dir-row .oka-name { color: #8a5a00; font-weight: 600; }
+#listing tr.row-file.oka-dir-row > .oka-check { border-left: 3px solid #e8b23a; }
+#listing tr.row-file.oka-file-row .oka-name { color: #2c3e50; font-weight: normal; }
+#listing tr.row-file.oka-file-row .glyphicon-download-alt { color: #5a6b7b; }
+
+/* 行内重命名按钮与编辑框：跟原版行末按钮同一尺寸，不撑高 40px 的行 */
+#listing .oka-rename-cell { width: 40px; text-align: center; }
+#listing .oka-name { margin: 0; }
+#listing .oka-rename-input {
+  display: inline-block; width: 90%; max-width: 420px;
+  height: 26px; padding: 2px 6px; font-size: 13px;
+}
 
 /* --- 上传任务面板：整块默认隐藏；有任务时也只显示一条折叠头 --- */
 .oka-tasks-wrap { margin-top: 10px; border: 1px solid #e3e8ec; border-radius: 6px; }

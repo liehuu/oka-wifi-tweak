@@ -25,7 +25,7 @@ on:
 
 env:
   # 版本号单一来源，禁止在别处硬编码（否则会出现「包名 v1.0、内容 v1.1」）。
-  VERSION: ${{ github.event.inputs.version || '1.1.4' }}
+  VERSION: ${{ github.event.inputs.version || '1.1.5' }}
   HOMEBREW_NO_AUTO_UPDATE: 1
 
 jobs:
@@ -82,7 +82,7 @@ jobs:
           set -eu
           python3 devkit/selftest-verify.py
 
-      # v1.1.4 前端资源闸门：
+      # v1.1.5 前端资源闸门：
       #  · node --check 用真实 JS 解析器验语法（不是正则数括号）；
       #  · selftest-webassets.py 做反向注入，证明危险字面量闸门会失败；
       #  · 生成一次头文件，确认往返解码自检在 CI 环境同样通过。

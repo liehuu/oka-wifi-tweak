@@ -6,7 +6,15 @@
 |---|---|---|
 | 1 | 桌面长按快捷开启 | 长按图标出现「开启 WiFi 传输」，点一下直接启动服务，地址自动复制到剪贴板并弹窗提示。不用进 App、不用点按钮 |
 | 2 | 蜂窝 / 热点可开启 | 用手机流量或个人热点时，WiFi 传输页面的「开始」按钮正常出现，可正常开启；且显示的地址是手机在热点网段的真实 IP（`172.20.10.1` 这类），不再是 `unknown` |
-| 3 | 电脑网页端增强（v1.1.4） | 保留原 `Upload Files` 按钮；**整个页面就是放置区**（没有独立拖放框），把单个/多个文件、整个文件夹拖进网页任意位置即可上传（拖入时全屏提示 + 成功/失败汇总 + 失败重试）；**复用原版行末「移动」按钮与原弹窗**，增强为目录浏览 + 可勾选批量移动 + 结果反馈。v1.1.2 另加：**文件夹排在最上面**（组内按名称自然序，不再与文件穿插）、**顶部设备名大标题收成一行小字**（文件列表上移约 100px）、**上传任务面板默认折叠成一条**，要看明细再点「展开」 |
+| 3 | 电脑网页端增强（v1.1.5） | 保留原 `Upload Files` 按钮；**整个页面就是放置区**（没有独立拖放框），把单个/多个文件、整个文件夹拖进网页任意位置即可上传（拖入时全屏提示 + 成功/失败汇总 + 失败重试）；**复用原版行末「移动」按钮与原弹窗**，增强为目录浏览 + 可勾选批量移动 + 结果反馈。v1.1.2 另加：**文件夹排在最上面**（组内按名称自然序，不再与文件穿插）、**顶部设备名大标题收成一行小字**（文件列表上移约 100px）、**上传任务面板默认折叠成一条**，要看明细再点「展开」。v1.1.5 另加：**文件夹改成 Windows 式琥珀黄**、**点行即下载 / 进入文件夹**、**重命名改成每行一个按钮** |
+
+> **v1.1.5：网页交互三项（按真机反馈改）。** ① 文件夹与文件不再「颜色太相似」：
+> 目录行用 Windows 资源管理器式琥珀黄（图标按钮、文件夹图标、名称、行首色条），文件保持中性蓝灰；
+> ② 原来点名称那一列会触发原版 jeditable 的重命名（名称列最宽，感觉就是「点行 = 重命名」），
+> 现在**点行 = 文件下载 / 文件夹进入**，多选只走行首复选框与「全选」；
+> ③ **重命名改为每行一个按钮**，点开内联输入框，Enter 提交 / Esc 取消，提交仍走原版
+> `POST move {oldPath, newPath: 当前目录 + 新名}`。原 `Upload Files`、移动弹窗、拖放上传、
+> 排序、紧凑布局、折叠任务面板与 v1.1.4 的选择重置全部保留。
 
 > **v1.1.4：修复「操作后勾选残留」。** 勾选 A 删除/移动后，下次勾选 B 点移动，
 > 「已选择项目」里不会再带上 A。列表每次重建（删除/移动/上传/新建/切目录/刷新）都会重置选择，
@@ -181,7 +189,7 @@ _GCDWebServerGetPrimaryIPAddress 硬编码 strcmp(ifa_name,"en0")
    - 挂**后台保活**（`AVAudioSession` Playback + 循环播放 App 自带的 `Happy Dreams.mp3`，音量 0）——否则切到后台几秒后进程被挂起、端口就断了；
    - 等 1.5s 读 App 自己写进 `ipAddress.text` 的 URL（`Helper` 是纯 Swift 类，ObjC runtime 反射不到 `uploader`）；读不到再用「本机 IP + 端口」兜底，复制到剪贴板并弹窗显示。
 
-### 功能 3 —— 电脑网页端增强（v1.1.2 定型，v1.1.3 未改前端）
+### 功能 3 —— 电脑网页端增强（v1.1.1 定型，v1.1.2 ~ v1.1.5 持续增强）
 
 **约束**：不能改 App 包内 `GCDWebUploader.bundle/Contents/Resources/` 的任何文件，那会破坏代码签名。所以采用「构建期把前端资源编进 dylib + 运行时注入 HTML」。
 
@@ -209,6 +217,22 @@ _GCDWebServerGetPrimaryIPAddress 硬编码 strcmp(ifa_name,"en0")
 | `POST delete` / `GET download` | `path` | 原页面逻辑，不改 |
 
 路径都经 `_GCDWebServerNormalizePath` 规范化。因为 `create` **不递归**，文件夹上传必须把目录按深度升序**逐级创建**，再逐个上传文件到对应子目录；重复拖入同名文件夹时，`create` 会失败，此时用 `list` 反查同名目录是否真的已存在，存在就当"目录已就绪"继续走，不吞掉真实失败。
+
+#### v1.1.5：文件夹配色与行点击语义（按真机反馈改）
+
+| 反馈 | 根因 | 改法 |
+|---|---|---|
+| 文件夹和文件的颜色太相似，看着分不清 | 原版 `template-listing` 里两者都只是 `btn-default` + 灰色 glyphicon，名称文字同色同字号 | 列表重建时给目录行加 `oka-dir-row`、文件行加 `oka-file-row`；CSS 把目录的图标按钮底色、文件夹 glyph、名称文字、行首色条统一成 Windows 式琥珀黄，文件保持中性蓝灰。选中态带 `!important`，优先级更高，不会被配色盖住 |
+| 点文件 / 文件夹所在行是重命名，想改成点行就下载 / 进入 | `jquery.jeditable.js` 第 125 行把 `click` **直接 bind** 在 `.column-name` 里的 `<p class="edit">` 上，handler 还 `e.stopPropagation()`；名称列又是最宽的一列，于是「点行」几乎必然落在它上面，连行级事件都收不到 | 不改 `index.js`、不改 bundle 模板（会破坏 App 签名）：在 `MutationObserver` 回调（microtask，晚于原版 `_reload` 里同步执行的 `$(".edit").editable(...)`）把 `<p class="edit">` **整个替换**成 `<p class="oka-name">`，绑在旧元素上的 jeditable handler 随元素一起失效。行点击改为 `openRow()`：文件走原版 `.button-download` 的 `download?path=`，文件夹走原版 `.button-open` 的 `_reload(path)` |
+| 把重命名改成每行一个按钮 | — | 每行末尾追加一个 `.oka-rename` 按钮（pencil glyph），点它才 `startRename()`：名称换成内联 `<input>`，Enter 提交 / Esc 取消 / 失焦提交，用 `settled` 标志防重复 POST。提交语义与原版 jeditable 完全一致：`POST move {oldPath: 当前 path, newPath: _path + 新名}`，成功后 `_reload(_path)` 并在原 `#alerts` 反馈成功或失败 |
+
+**为什么用「替换元素」而不是在捕获阶段拦 click**：jeditable 的 handler 绑在元素本身，
+且自己 `stopPropagation()`；在 `document` 捕获阶段拦会连行级点击一起吞掉
+（点名称就既不重命名、也不下载）。替换 DOM 元素是唯一能同时做到「点名称 = 行动作」
+和「jeditable 不再触发」的做法，而且不碰 App 包内任何文件。
+
+多选入口没丢：行首复选框、工具栏「全选 / 取消选择」以及原版行末「移动」按钮照常可用；
+点行不再切换选中，只是因为行点击被换成了下载 / 进入这个更常用的手势。
 
 #### v1.1.4：修复「操作后勾选残留」（按真机反馈）
 
@@ -268,9 +292,9 @@ v1.1.0 曾单独放了一块占大半个页面的虚线拖放框，又另起了�
 **不需要 Theos。** 构建是一台装了 Xcode 的 macOS（或 GitHub Actions 的 `macos-latest`）上跑三条命令：
 
 ```bash
-sh devkit/build.sh arm64e iphoneos-arm64e 1.1.4   # RootHide / roothide
-sh devkit/build.sh arm64  iphoneos-arm64  1.1.4   # rootless（Dopamine / palera1n）
-sh devkit/build.sh arm64  iphoneos-arm    1.1.4   # 传统 rootful
+sh devkit/build.sh arm64e iphoneos-arm64e 1.1.5   # RootHide / roothide
+sh devkit/build.sh arm64  iphoneos-arm64  1.1.5   # rootless（Dopamine / palera1n）
+sh devkit/build.sh arm64  iphoneos-arm    1.1.5   # 传统 rootful
 ```
 
 产物在 `.build/out/com.oka.wifitweak_<ver>_<arch>.deb`。
@@ -421,6 +445,12 @@ v1.1.3 起插件**不输出任何系统日志**，所以判据一律看功能表
      新建文件/文件夹后点 Refresh 仍保持有序。
    - 选择重置：勾选一个文件 → 点删除（或打开移动弹窗后直接关掉）→ 再勾另一个点移动，
      「本次移动」里应当**只有新勾选的这一个**，不带上次的文件。点删除后列表里的勾选也应全部消失。
+   - 文件夹配色：目录行的图标按钮是**琥珀黄底 + 黄色文件夹图标**，名称是琥珀色加粗，
+     行首有一条黄色竖线；文件行仍是灰色图标 + 普通深色名称，一眼可分。
+   - 点行手势：点文件名所在行 → 浏览器开始**下载该文件**；点文件夹名所在行 → **进入该文件夹**
+     （面包屑变成对应目录）。点名称**不再进入重命名编辑框**；点行首复选框仍只勾选、不触发下载。
+   - 行内重命名：点某行末尾的**铅笔按钮** → 名称变成输入框且自动全选 → 改名字按 Enter
+     → 页面 `#alerts` 显示「重命名成功」，列表刷新后显示新名字；按 Esc 或名字不变则什么都不做。
    - 浏览器「查看网页源代码」：`<body>` 里有且仅有一处 `<!-- OKA-WIFI-INJECTED -->`，
      源码里不应出现独立拖放框或第二个移动弹窗。
 
@@ -437,6 +467,10 @@ v1.1.3 起插件**不输出任何系统日志**，所以判据一律看功能表
 | 蜂窝下按钮还是不出现 | flags 没被改写 | 确认 prefs 的 `EnableCellular` 未被关掉；确认 App 是 1.7.5；重启 App 再试（层 2 兜底是 `viewDidLoad` / reachability 后强制显示按钮） |
 | 快捷菜单点了没反应 | `gServerPort` 未清零，被误判成「已在运行」 | 已 hook `-[GCDWebServer stop]` 清零；若 App 走别的停服路径会误判，重启 App 再试 |
 | 操作过一次后再点移动，仍带着上次勾选的文件 | 选中集合没随列表重建清空（v1.1.4 已修） | 确认装的是 1.1.4；控制台执行 `document.querySelectorAll('#listing .oka-checkbox:checked').length` 应为 0 |
+| 点名称还是进入重命名编辑框 | `decorateRows()` 没把 `.edit` 换掉（v1.1.5 已修） | 控制台执行 `document.querySelectorAll('#listing p.edit').length`，应为 **0**；为 1 说明装的是 v1.1.4 或更早，确认包版本后强刷（Ctrl+F5） |
+| 点文件行没下载 / 点文件夹行没进入 | 行点击被其它元素挡住，或 `openRow` 没注入 | 先确认 `window.__okaWiFiLoaded` 为真；再点该行第一列的原版下载 / 打开按钮，若原版按钮也没反应就是服务端问题。点行首复选框**不该**触发下载，这是设计如此 |
+| 找不到每行末尾的重命名按钮 | `.oka-rename` 没注入 | 控制台执行 `document.querySelectorAll('#listing .oka-rename').length`，应等于列表行数 |
+| 文件夹还是和文件一个颜色 | `oka-dir-row` 或注入的 CSS 没生效 | 控制台看目录行是否有 `oka-dir-row` class；为真但颜色没变就强刷（Ctrl+F5）排除缓存 |
 | 系统日志里还能看到 `[OkaWiFi]` | 装的不是 v1.1.3（或更早） | v1.1.3 起源码和产物里都不会有 `NSLog` / `[OkaWiFi]`；确认装的是 1.1.3 的包并重启 App |
 | CI 报 `CPU: unbound variable`，但编译和签名都成功了 | 某行 `echo` 里写了 `$CPU，`（后跟全角标点） | macOS 的 bash 3.2 把 `0xEF` 吞进变量名。改 `${CPU}`，并跑 `python3 devkit/check-shell.py .` 扫全仓库 |
 | CI 的 Verify deb 步骤报 `IndentationError` 或 YAML `ScannerError` | 在 `run: \|` 里内嵌了 Python heredoc | 这两个错误互斥、无解：YAML 要缩进、Python 要顶格。校验逻辑必须外置成 `.py` 文件 |
@@ -473,9 +507,9 @@ v1.1.3 起插件**不输出任何系统日志**，所以判据一律看功能表
 wifitweak/
 ├── Tweak.xm                    # 全部实现（约 1230 行，含逐条逆向依据注释）
 ├── OkaWiFi.plist               # CydiaSubstrate 过滤：只注入 com.blinker.documents
-├── web/                        # 网页端增强前端资源（v1.1.4 含选中残留修复，构建期内联进 dylib）
-│   ├── oka-wifi.js             # 列表排序 / 全页拖放 / 文件夹递归 / 折叠任务面板 / 复用原版移动弹窗
-│   └── oka-wifi.css            # oka- 前缀样式 + body.oka-compact 作用域的顶部紧凑布局
+├── web/                        # 网页端增强前端资源（v1.1.5 含文件夹配色 / 点行下载进入 / 行内重命名）
+│   ├── oka-wifi.js             # 列表排序 / 全页拖放 / 文件夹递归 / 折叠任务面板 / 复用原版移动弹窗 / 行交互
+│   └── oka-wifi.css            # oka- 前缀样式 + 顶部紧凑布局 + 文件夹琥珀黄 + 行内重命名
 ├── devkit/
 │   ├── build.sh                # 零 Theos 编译：资源内联 + xcrun clang + codesign + 闸门
 │   ├── mkdeb.sh                # 纯 Python 拼 ar 归档（不依赖 dpkg-deb）

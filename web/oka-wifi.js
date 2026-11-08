@@ -1,5 +1,5 @@
 /*
- * OkaWiFi v1.1.4 — GCDWebUploader 网页端增强层
+ * OkaWiFi v1.1.5 — GCDWebUploader 网页端增强层
  *
  * 注入方式：由 Tweak.xm hook +[GCDWebServerDataResponse responseWithHTMLTemplate:variables:]
  *          把本文件 + oka-wifi.css 追加到 epilogue 变量里，随首页 HTML 一起下发。
@@ -28,6 +28,20 @@
  *     ① 每次 GET list 响应到达（删除/移动/上传/新建/切目录/手动刷新都会走）
  *        就重置选择，DOM 与集合始终一致；
  *     ② 打开移动弹窗时只认当前列表里真实存在的行，幽灵项顺手剔除。
+ *
+ * v1.1.5 网页交互（按真机反馈改）：
+ *   · 文件夹换成 Windows 资源管理器式琥珀黄（图标按钮 + 名称 + 行首色条），
+ *     文件保持中性色，两者不再「看起来差不多」。
+ *   · 原版把 jeditable 的 click 直接 bind 在 .column-name 里的 <p class="edit"> 上
+ *     （jquery.jeditable.js 第 125 行），handler 里还 e.stopPropagation()；
+ *     名称列又是最宽的一列，于是用户感受到的是「点所在行就是重命名」，
+ *     连行级选中都点不到。这里在每次列表重建后把那个 <p> 整个换成
+ *     不带 .edit 的 <p class="oka-name">，绑在旧元素上的 jeditable handler
+ *     随元素一起失效 —— 不改 index.js、不改 bundle 模板（会破坏 App 签名）。
+ *   · 行点击改为「文件 → 下载，文件夹 → 进入」，与原版行首按钮同语义；
+ *     多选只走行首复选框与工具栏「全选 / 取消选择」。
+ *   · 重命名改成每行一个独立按钮，点开内联输入框；Enter 提交 / Esc 取消，
+ *     提交仍走原版同名语义的 POST move {oldPath, newPath: _path + 新名}。
  *
  * 设计约束：
  *   1. 原生 "Upload Files" 按钮 / #fileupload 的点击选择流程完全不动；
@@ -179,6 +193,21 @@
     return (b / 1000).toFixed(2) + ' KB';
   }
 
+  // v1.1.5：点行的语义与原版行首按钮一致 —— 文件下载，文件夹进目录。
+  // 下载沿用原版 .button-download 的写法（setTimeout + window.location），
+  // 进目录沿用原版 .button-open 的 _reload(path)。两者都不经过我们自己的
+  // 上传/移动管线，服务端接口一点没变。
+  function openRow(d) {
+    var isDir = (d.size == null) || String(d.path || '').slice(-1) === '/';
+    if (isDir) {
+      if (typeof window._reload === 'function') { window._reload(d.path); }
+      return;
+    }
+    setTimeout(function () {
+      window.location = 'download?path=' + encodeURIComponent(d.path);
+    }, 0);
+  }
+
   // ---------------------------------------------------------------------
   // 1. DOM 片段：都是默认隐藏 / 塞进原容器，不占额外版面
   // ---------------------------------------------------------------------
@@ -216,7 +245,7 @@
     '<span class="oka-list-tools">',
     '  <button type="button" class="btn btn-default btn-sm" id="oka-select-all">全选</button>',
     '  <button type="button" class="btn btn-default btn-sm" id="oka-select-none">取消选择</button>',
-    '  <span class="oka-hint">已选 <span id="oka-sel-count" class="badge">0</span> 项 &middot; 点行末移动按钮可批量移动</span>',
+    '  <span class="oka-hint">已选 <span id="oka-sel-count" class="badge">0</span> 项 &middot; 勾行首复选框可批量移动 &middot; 点行即下载 / 进入文件夹</span>',
     '</span>'
   ].join('\n');
 
@@ -660,21 +689,120 @@
     return live;
   }
 
-  function injectChecks() {
+  // 原版 _reload() 是同步的：先 append 完所有行，紧接着调 $(".edit").editable(...)，
+  // 把 click 直接 bind 在 <p class="edit"> 上（jquery.jeditable.js 第 125 行），
+  // 而且那个 handler 自己 e.stopPropagation()。名称列最宽，于是用户感受到
+  // 的就是「点所在行 = 重命名」，行级事件也收不到点击。
+  //
+  // MutationObserver 的回调是 microtask，一定晚于原版 done 里的同步代码；
+  // 此时把 <p class="edit"> 整个替换成 <p class="oka-name">，绑在旧元素上的
+  // jeditable handler 随元素一起失效。不改 index.js、不改 bundle 里的模板
+  // （那会破坏 App 签名），只动我们自己注入的 DOM 装饰。
+  function decorateRows() {
     var listing = document.getElementById('listing');
     if (!listing) { return; }
     var rows = listing.querySelectorAll('tr.row-file');
     for (var i = 0; i < rows.length; ++i) {
       var tr = rows[i];
-      if (tr.querySelector('.oka-check')) { continue; }
-      var td = document.createElement('td');
-      td.className = 'oka-check';
-      var cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.className = 'oka-checkbox';
-      td.appendChild(cb);
-      tr.insertBefore(td, tr.firstChild);
+
+      // ① 行首复选框（v1.1.0 起，保持不变）
+      if (!tr.querySelector('.oka-check')) {
+        var td = document.createElement('td');
+        td.className = 'oka-check';
+        var cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.className = 'oka-checkbox';
+        td.appendChild(cb);
+        tr.insertBefore(td, tr.firstChild);
+      }
+
+      var d = $(tr).data() || {};
+      var isDir = (d.size == null) || String(d.path || '').slice(-1) === '/';
+
+      // ② 文件夹 / 文件配色 class（v1.1.5）
+      if (isDir) {
+        tr.classList.add('oka-dir-row');
+        tr.classList.remove('oka-file-row');
+      } else {
+        tr.classList.add('oka-file-row');
+        tr.classList.remove('oka-dir-row');
+      }
+
+      // ③ 摘掉原版 jeditable 的点击目标（v1.1.5）
+      //    正在重命名时 .oka-name 仍在（只是 hide 了），.oka-rename-input 也在，
+      //    所以不会把用户正在编辑的输入框冲掉。
+      var nameCell = tr.querySelector('.column-name');
+      if (nameCell && !nameCell.querySelector('.oka-name, .oka-rename-input')) {
+        var editable = nameCell.querySelector('p.edit');
+        if (editable) {
+          var label = document.createElement('p');
+          label.className = 'oka-name';
+          label.textContent = editable.textContent;
+          nameCell.replaceChild(label, editable);
+        }
+      }
+
+      // ④ 每行一个独立重命名按钮（v1.1.5）
+      if (!tr.querySelector('.oka-rename')) {
+        var rtd = document.createElement('td');
+        rtd.className = 'oka-rename-cell';
+        var rbtn = document.createElement('button');
+        rbtn.type = 'button';
+        rbtn.className = 'btn btn-default btn-xs oka-rename';
+        rbtn.title = '重命名';
+        rbtn.setAttribute('aria-label', '重命名');
+        rbtn.innerHTML = '<span class="glyphicon glyphicon-pencil"></span>';
+        rtd.appendChild(rbtn);
+        tr.appendChild(rtd);
+      }
     }
+  }
+
+  // v1.1.5：重命名只由每行的独立按钮触发。
+  // 语义与原版 jeditable 完全一致：POST move {oldPath: 当前 path, newPath: _path + 新名}，
+  // 成功后 _reload(_path)。区别只是不再占用「点行」这个最自然的手势。
+  function startRename(tr) {
+    if (!tr) { return; }
+    var d = $(tr).data() || {};
+    if (!d.path) { return; }
+    var cell = $(tr).find('.column-name');
+    var label = cell.find('.oka-name');
+    if (!label.length || cell.find('.oka-rename-input').length) { return; }
+    var oldName = String(d.name || baseName(d.path));
+    var input = $('<input type="text" class="form-control input-sm oka-rename-input">')
+      .val(oldName);
+    label.hide();
+    cell.append(input);
+    var settled = false;
+
+    function finish(commit) {
+      if (settled) { return; }
+      settled = true;
+      var value = String(input.val() == null ? '' : input.val());
+      input.remove();
+      label.show();
+      if (!commit) { return; }
+      var name = value.replace(/^\s+|\s+$/g, '');
+      if (!name || name === oldName || name.indexOf('/') >= 0) { return; }
+      var oldPath = noSlash(d.path);
+      var newPath = noSlash(joinPath(curPath(), name));
+      if (newPath === oldPath) { return; }
+      ajaxForm('move', { oldPath: oldPath, newPath: newPath }).then(function () {
+        showResult('success', '<strong>重命名成功</strong> ' + esc(oldName) + ' → ' + esc(name));
+        reload();
+      }, function (err) {
+        showResult('danger', '<strong>重命名失败</strong> ' + esc(err && err.message ? err.message : err));
+      });
+    }
+
+    input.on('keydown', function (e) {
+      if (e.keyCode === 13) { e.preventDefault(); finish(true); }
+      else if (e.keyCode === 27) { e.preventDefault(); finish(false); }
+      e.stopPropagation();
+    });
+    input.on('click', function (e) { e.stopPropagation(); });
+    input.on('blur', function () { finish(true); });
+    if (input[0]) { input[0].focus(); input[0].select(); }
   }
 
   function syncSelectionUI() {
@@ -691,27 +819,35 @@
   }
 
   function bindSelection() {
-    injectChecks();
+    decorateRows();
     if (window.MutationObserver) {
       var listing = document.getElementById('listing');
       if (listing) {
         new MutationObserver(function () {
-          injectChecks();
+          decorateRows();
           syncSelectionUI();
         }).observe(listing, { childList: true });
       }
     } else {
-      setInterval(function () { injectChecks(); syncSelectionUI(); }, 600);
+      setInterval(function () { decorateRows(); syncSelectionUI(); }, 600);
     }
 
+    // v1.1.5：行点击 = 下载 / 进入目录，不再切换选中、也不再触发重命名。
+    // 多选只走行首复选框与工具栏的全选按钮；按钮 / 链接 / 输入框一律放行给
+    // 各自的 handler（原版 download/open/move/delete 按钮照常可用）。
     $(document).on('click', '#listing tr.row-file', function (e) {
-      if ($(e.target).closest('button, a, input, .edit').length) { return; }
+      if ($(e.target).closest('button, a, input, .oka-rename-input').length) { return; }
       var d = $(this).data() || {};
       if (!d.path) { return; }
-      if (selected[d.path]) { delete selected[d.path]; }
-      else { selected[d.path] = { path: d.path, name: d.name || baseName(d.path), isDir: (d.size == null) }; }
-      syncSelectionUI();
       e.preventDefault();
+      openRow(d);
+    });
+
+    // 每行一个独立重命名按钮：只有点它才进编辑态
+    $(document).on('click', '#listing .oka-rename', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      startRename($(this).closest('tr.row-file')[0]);
     });
 
     $(document).on('change', '#listing .oka-checkbox', function (e) {
