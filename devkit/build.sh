@@ -214,11 +214,13 @@ for sym in responseWithHTMLTemplate:variables: initWithHTMLTemplate:variables: \
            oka-preview-text oka-preview-download \
            applyRowIcon fileIconClass iconKind ICON_CLASS ICON_EXT \
            glyphicon-picture glyphicon-film glyphicon-music \
-           glyphicon-compressed oka-preview-unsupported listDir; do
+           glyphicon-compressed oka-preview-unsupported listDir \
+           oka-raw fetchBytes rawURL rawUsable saveBytesAs mimeOf \
+           navigateDownload DOWNLOAD_BLOB_MAX; do
   grep -aqF "$sym" "$BUILD/$NAME.dylib" \
     || { echo "✗ dylib 缺 ${sym}（网页增强会静默失效）"; exit 1; }
 done
-echo "✓ v1.1.7 网页交互指纹齐全（点目录进入 / 点文件预览 / 目录 ZIP 保留顶层文件夹 / 按类型换图标）"
+echo "✓ v1.1.8 网页交互指纹齐全（点目录进入 / 点文件预览 / 目录 ZIP 保留顶层文件夹 / 按类型换图标 / 内联读取 / Blob 下载）"
 
 # v1.1.7：按类型换图标必须真的挂在列表装饰流程里。
 # 只检查 ICON_CLASS 存在不够 —— 定义了却没人调用，图标照样全是下载箭头。
@@ -229,6 +231,85 @@ if ! grep -aqF "applyRowIcon(tr, String(d.name || baseName(d.path)), isDir);" \
   exit 1
 fi
 echo "✓ 图标列按文件类型换字形已挂在列表装饰流程里"
+
+# ---------- 4a) v1.1.8 内联读取接口闸门 ----------
+# 用户实测三个问题（下载被 Chrome 拦 / PDF 预览失败 / 目录下载弹一堆 IDM 窗）
+# 共同根因：/download 的响应固定带 Content-Disposition: attachment。
+# 解药是新增 GET /oka-raw，用 isAttachment:NO 返回同一份文件。
+#
+# 这一层必须查「成对结构」，不能只查符号存在：
+#   · responseWithFile:isAttachment: 在 /download 的实现里也有（传的是 YES），
+#     只查它存在等于没查；
+#   · 必须同时确认 initWithUploadDirectory: 被 hook 了，否则 handler 永远
+#     不会注册，前端静默回退，症状与修复前一模一样。
+for sym in oka-raw responseWithFile:isAttachment: initWithUploadDirectory: \
+           uploadDirectory stringByStandardizingPath responseWithClientError:message:; do
+  grep -aqF "$sym" "$BUILD/$NAME.dylib" \
+    || { echo "✗ dylib 缺 ${sym}（/oka-raw 内联接口不完整）"; exit 1; }
+done
+
+# ★ 关键判据：isAttachment 必须传 NO。
+#   源码里 OkaRawFileResponse 末尾是 `, abs, NO);`。编译成 dylib 后
+#   字符串常量不会保留实参，所以这里改从源码侧做结构确认（见下面
+#   devkit 的源码检查），dylib 侧只确认这条 selector 存在。
+if ! grep -aqF "@\"/oka-raw\"" "$BUILD/$NAME.dylib"; then
+  echo "✗ dylib 里没有 /oka-raw 路由路径常量"
+  exit 1
+fi
+echo "✓ v1.1.8 内联读取接口 /oka-raw 已编入产物"
+
+# 源码侧：isAttachment 必须显式传 NO，且不能出现 YES 的误用。
+# 写成「取反 if + exit 1」的真闸门，不用 || true 短路。
+#
+# ★ 判据要能失败：`OkaRawFileResponse` 里那一行是
+#      return ((OkaFileResp_t)(void *)objc_msgSend)((id)fileResp, sel, abs, NO);
+#   匹配 `, abs, NO);` 是精确到实参的，把它改成 YES 这一条一定 FAIL。
+#   不做 hasPrefix 之类的宽松匹配，也不用 `in` 判子串。
+if ! grep -qF ', abs, NO);' "$ROOT/Tweak.xm"; then
+  echo "✗ OkaRawFileResponse 未用 isAttachment:NO（响应仍会是 attachment）"
+  exit 1
+fi
+
+# 同一函数的 selector 必须取到 responseWithFile:isAttachment:。
+# 这条与上一条是「成对结构」：只查 selector 存在，把 NO 改成 YES 仍能通过；
+# 只查 NO 存在，selector 被换成 responseWithFile: 也仍能通过（那会走默认
+# isAttachment:YES）。两条都查才封住。
+if ! grep -qF 'NSSelectorFromString(@"responseWithFile:isAttachment:")' \
+        "$ROOT/Tweak.xm"; then
+  echo "✗ 未按 selector 名调用 responseWithFile:isAttachment:"
+  exit 1
+fi
+
+# 负向：绝不能出现 isAttachment:YES 的新增用法。
+# 原版 /download 的实现不在我们代码里，所以源码里不该有 YES。
+if grep -qF ', abs, YES);' "$ROOT/Tweak.xm"; then
+  echo "✗ 源码出现 isAttachment:YES（会让响应变回 attachment）"
+  exit 1
+fi
+echo "✓ 内联接口用 isAttachment:NO 返回（Content-Disposition: inline）"
+
+# v1.1.8 前端：下载必须走 Blob，不能再用 window.location 做导航式下载。
+# 用户实测「点下载要等半天，还报已阻止不安全的下载」的根因就是它：
+# 导航式下载在明文局域网源上会被 Chrome 安全策略拦截，且要读完才判定类型。
+# 判据绑成对结构：saveBytesAs 存在 + a.click() 拖着 blob URL 一起存在。
+# 少任何一个都说明下载链路退回旧写法。
+if ! grep -qF 'function saveBytesAs(name, bytes, mime)' "$ROOT/web/oka-wifi.js"; then
+  echo "✗ 缺 saveBytesAs（下载没有走 Blob）"
+  exit 1
+fi
+if ! grep -qF "a.download = name;" "$ROOT/web/oka-wifi.js"; then
+  echo "✗ 缺 a.download（Blob 下载未设置文件名）"
+  exit 1
+fi
+# 负向：window.location = 'download?...' 这种导航式下载只允许出现在
+# navigateDownload() 这个明确的兜底函数里，不能出现在 downloadItem 主体。
+# 用 awk 截出 downloadItem 函数体再查，避免整文件匹配把兜底函数也扫进来。
+if awk '/^  function downloadItem\(d\) \{/,/^  \}$/' "$ROOT/web/oka-wifi.js" \
+     | grep -qF "window.location"; then
+  echo "✗ downloadItem 里仍有 window.location（会触发不安全下载拦截）"
+  exit 1
+fi
+echo "✓ 下载走 Blob（saveBytesAs + a.download），导航式下载仅作兜底"
 
 # 负向：v1.1.5 的「点行即下载」入口必须彻底消失。用户明确要求取消；
 # 旧实现一旦回流，点名称又会触发下载，左侧热区也会被行级 handler 干扰。

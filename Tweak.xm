@@ -1125,6 +1125,200 @@ static void HookClassMethod(Class cls, SEL sel, IMP newImp, void **outOrig, cons
     method_setImplementation(m, newImp);
 }
 
+// ===========================================================================
+//  四、v1.1.8 内联读取接口 GET /oka-raw
+// ===========================================================================
+//  【为什么必须动服务端】
+//  用户实测三个问题，全部来自同一个根因：
+//
+//    (1) 点下载按钮要等很久、浏览器报「已阻止不安全的下载」，要手动点保留
+//    (2) PDF 点预览报「未能加载 PDF 文档」，但 IDM 弹出了下载窗口
+//    (3) 点下载文件夹，IDM 弹出很多个窗口，每个文件一个
+//
+//  /download 的响应是 `responseWithFile:isAttachment:YES`，它一定带：
+//      Content-Disposition: attachment; filename="..."
+//  于是：
+//    (1) 前端用 `window.location = 'download?...'` 做**顶层导航**去下载。
+//        这是一种「页面跳转触发的下载」，在 http://172.20.10.1:8080 这种
+//        明文局域网源上会被 Chrome 的安全下载策略判定为「不安全下载」并拦截，
+//        Chrome 还要先把它读完才知道是不是危险类型 —— 这就是「反应半天」。
+//    (2) 预览用 XHR 取字节本身没问题，但 IDM 的浏览器集成监听的是
+//        Content-Disposition: attachment 的响应，一旦看到就抢走它。
+//        抢走的后果是 iframe 拿到的 Blob 不完整 → 「未能加载 PDF 文档」。
+//    (3) 目录 ZIP 是前端逐文件发 XHR 取字节。每个响应都带 attachment，
+//        IDM 把每一条都当成一次下载任务 → 一个目录 N 个文件弹 N 个窗。
+//
+//  【解法】
+//  新增 GET /oka-raw?path=<相对路径>，用 `isAttachment:NO` 返回同一份文件：
+//      Content-Disposition: inline; filename="..."
+//  inline 的响应不会被 IDM 当作下载任务，也不会触发 Chrome 的
+//  「不安全下载」拦截（它压根不是下载，是普通 XHR 响应）。
+//  前端所有「把字节读进页面」的路径（预览 / 目录打包 / Blob 下载）全部改走它。
+//
+//  【为什么不直接把 /download 改成 inline】
+//  /download 是原版页面「点文件名下载」在用的接口，也是别的客户端
+//  （第三方工具、脚本）依赖的语义。改它的行为属于破坏性变更：
+//  在 Safari / 手机浏览器上 inline 会让 PDF 直接打开而不是存盘。
+//  新开一个路径，原路径行为一字不动 —— 出问题只需要不注册这个 handler。
+//
+//  【接口安全性】
+//  路径必须落在 uploadDirectory 之内。这里不自己拼字符串判断前缀
+//  （`/a/b` 与 `/a/bc` 同前缀会误判），而是：
+//    1) 先经 _GCDWebServerNormalizePath 消掉 ../ 与重复斜杠；
+//    2) 拼出绝对路径后取 standardized 形式；
+//    3) 用「等于根目录 或 以 根目录 + '/' 开头」判断，且拒绝根目录本身。
+//  最后再检查是普通文件（非目录、非符号链接指向外部）。
+// ===========================================================================
+
+//  GCDWebServer 的错误响应构造。签名：
+//      +[GCDWebServerErrorResponse responseWithClientError:message:]
+//  message 是格式串，这里只传不含 % 的固定串，不会被当格式符解析。
+static id OkaClientError(NSInteger code, NSString *msg) {
+    Class errCls = NSClassFromString(@"GCDWebServerErrorResponse");
+    SEL sel = NSSelectorFromString(@"responseWithClientError:message:");
+    if (!errCls || ![errCls respondsToSelector:sel]) { return nil; }
+    typedef id (*OkaErr_t)(id, SEL, NSInteger, NSString *);
+    return ((OkaErr_t)(void *)objc_msgSend)((id)errCls, sel, code, msg);
+}
+
+// 取 GCDWebUploader 的上传根目录。
+// 用 -[GCDWebUploader uploadDirectory]（R,N 只读属性，二进制里已确认存在），
+// 不读 ivar 偏移 —— 属性是 ObjC 层契约，App 升级重排版也不会失效。
+static NSString *OkaUploadDirectoryOf(id server) {
+    if (!server) { return nil; }
+    SEL sel = NSSelectorFromString(@"uploadDirectory");
+    if (![server respondsToSelector:sel]) { return nil; }
+    id dir = ((id (*)(id, SEL))objc_msgSend)(server, sel);
+    return [dir isKindOfClass:[NSString class]] ? (NSString *)dir : nil;
+}
+
+// /oka-raw 的实际处理：把 path 解析成上传根目录内的绝对路径，用
+// isAttachment:NO 返回，从而得到 Content-Disposition: inline。
+static id OkaRawFileResponse(id server, id request) {
+    NSString *root = OkaUploadDirectoryOf(server);
+    if (root.length == 0) { return OkaClientError(500, @"no upload directory"); }
+
+    NSString *rel = nil;
+    SEL selQuery = NSSelectorFromString(@"query");
+    if ([request respondsToSelector:selQuery]) {
+        id q = ((id (*)(id, SEL))objc_msgSend)(request, selQuery);
+        if ([q isKindOfClass:[NSDictionary class]]) {
+            id v = [(NSDictionary *)q objectForKey:@"path"];
+            if ([v isKindOfClass:[NSString class]]) { rel = (NSString *)v; }
+        }
+    }
+    if (rel.length == 0) { return OkaClientError(400, @"missing path"); }
+
+    // ★ 不依赖 GCDWebServer 内部的 _GCDWebServerNormalizePath：
+    //   那是 framework 私有 C 符号，有没有导出不确定，用 -undefined
+    //   dynamic_lookup 引用一个不存在的符号会在首次调用时直接崩。
+    //   这里用 Foundation 的 stringByStandardizingPath 做词法归一化
+    //   （消掉 ./ 与 ../ 以及重复斜杠），足够挡住目录穿越；
+    //   符号链接不在防护范围内（原版 download 同样不挡，保持一致）。
+    //
+    // ★ 方法名是 stringByStandardizingPath，不是 standardizingPath ——
+    //   后者是 Swift 那边的属性名，ObjC 里没有这个 selector，
+    //   写了会在编译期报 "no visible @interface declares the selector"。
+    //   去掉前导斜杠再拼：避免 root 末尾与 rel 开头各一个 '/' 拼出 '//'。
+    NSString *relClean = rel;
+    while ([relClean hasPrefix:@"/"]) {
+        relClean = [relClean substringFromIndex:1];
+    }
+    NSString *abs = [[root stringByAppendingPathComponent:relClean]
+                     stringByStandardizingPath];
+    NSString *rootStd = [root stringByStandardizingPath];
+
+    // ★ 围栏判断必须带路径分隔符，不能用 abs hasPrefix:rootStd 裸判：
+    //   根目录是 /a/b 时，/a/bc 也满足 hasPrefix(/a/b)，越界读就成立了。
+    //   这里要求「完全等于根」或「以 根 + '/' 开头」。
+    NSString *rootSlash = [rootStd hasSuffix:@"/"] ? rootStd
+                                                   : [rootStd stringByAppendingString:@"/"];
+    BOOL inside = [abs isEqualToString:rootStd] || [abs hasPrefix:rootSlash];
+    if (!inside) { return OkaClientError(403, @"invalid path"); }
+
+    BOOL isDir = NO;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:abs isDirectory:&isDir]) {
+        return OkaClientError(404, @"not found");
+    }
+    // 目录不在这里返回内容：目录交给前端的 ZIP 打包（它自己递归 list）。
+    if (isDir) { return OkaClientError(400, @"is a directory"); }
+
+    // ★★ 这一行就是三个问题的共同解药：
+    //    isAttachment:NO → Content-Disposition: inline
+    //    inline 响应不会被 IDM 当成下载任务抢走，也不会触发 Chrome 的
+    //    「已阻止不安全的下载」。
+    Class fileResp = NSClassFromString(@"GCDWebServerFileResponse");
+    SEL sel = NSSelectorFromString(@"responseWithFile:isAttachment:");
+    if (!fileResp || ![fileResp respondsToSelector:sel]) { return nil; }
+    typedef id (*OkaFileResp_t)(id, SEL, NSString *, BOOL);
+    return ((OkaFileResp_t)(void *)objc_msgSend)((id)fileResp, sel, abs, NO);
+}
+
+// handler 只注册一次。reload 插件、App 反复 init uploader 都可能重复进入，
+// 重复 addHandlerForMethod 会让 GCDWebServer 抛「handler already registered」。
+//
+// ★ 用 NSHashTable 弱引用存 server，不能用 `%p` 指针串当 key：
+//   旧 server 释放后新 server 完全可能拿到同一地址，那样第二个实例
+//   会被误判成「已注册」而跳过，接口就静默失效了。
+static NSHashTable *gOkaRawRegistered = nil;
+
+static void OkaRegisterRawHandler(id server) {
+    if (!server) { return; }
+
+    SEL selAdd = NSSelectorFromString(@"addHandlerForMethod:path:requestClass:processBlock:");
+    if (![server respondsToSelector:selAdd]) { return; }
+    Class reqCls = NSClassFromString(@"GCDWebServerRequest");
+    if (!reqCls) { return; }
+
+    if (!gOkaRawRegistered) {
+        gOkaRawRegistered = [NSHashTable weakObjectsHashTable];
+    }
+    if ([gOkaRawRegistered containsObject:server]) { return; }
+
+    typedef void (*OkaAddHandler_t)(id, SEL, NSString *, NSString *, Class, id);
+    OkaAddHandler_t fn = (OkaAddHandler_t)(void *)objc_msgSend;
+
+    // ★ block 必须用 block 类型声明，不能写 `id block = ^...`。
+    //   ARC 只在「赋给 block 类型变量」时把栈上的 block 拷到堆上；
+    //   赋给 `id` 变量不会 copy，函数返回后栈帧消失，handler 表里留下
+    //   一个悬垂 block。GCDWebServer 内部虽然会 [processBlock copy]，
+    //   但依赖「被调方一定 copy」是隐式契约，这里自己把类型写对。
+    //
+    //   block 弱引用 server：handler 表由 server 自己持有，强捕获会形成
+    //   server → handler → block → server 的环，server 永远不释放。
+    typedef id (^OkaProcessBlock_t)(id);
+    __weak id weakServer = server;
+    OkaProcessBlock_t block = ^id(id request) {
+        id strong = weakServer;
+        if (!strong) { return OkaClientError(500, @"server gone"); }
+        return OkaRawFileResponse(strong, request);
+    };
+
+    @try {
+        fn(server, selAdd, @"GET", @"/oka-raw", reqCls, (id)block);
+        [gOkaRawRegistered addObject:server];
+    } @catch (NSException *e) {
+        // 注册失败不能让 App 崩。
+        // 这里刻意不输出任何诊断日志：v1.1.3 起产物里禁止日志调用与前缀常量，
+        // build.sh 对源码与产物做双向负向检查，写了会让整个构建失败。
+        // 前端探测不到 /oka-raw 会自动回退到 /download，功能不丢。
+    }
+}
+
+// ★ 挂在 -[GCDWebUploader initWithUploadDirectory:] 上，而不是 init 之后找
+//   实例：只有在 init 里注册，handler 才一定早于 startWithOptions: 进入
+//   路由表。事后找实例注册，一旦服务已经在跑，新 handler 也可能因为
+//   GCDWebServer 的 handler 快照机制而不生效。
+//
+//   must-succeed 语义：hook 失败时前端探测不到 /oka-raw 会自己回退到
+//   /download（行为退回 v1.1.7：慢、会被 IDM 抢，但功能不丢）。
+static id (*orig_initWithUploadDirectory)(id, SEL, NSString *);
+static id my_initWithUploadDirectory(id self, SEL _cmd, NSString *path) {
+    id r = orig_initWithUploadDirectory(self, _cmd, path);
+    if (r) { OkaRegisterRawHandler(r); }
+    return r;
+}
+
 __attribute__((constructor))
 static void OkaWiFiInit(void) {
     @autoreleasepool {
@@ -1246,6 +1440,24 @@ static void OkaWiFiInit(void) {
                                    (IMP)my_initHTMLTemplate,
                                    (void **)&orig_initHTMLTemplate,
                                    "-[GCDWebServerDataResponse initWithHTMLTemplate:variables:]");
+            }
+
+            // ---- 3b: v1.1.8 内联读取接口 GET /oka-raw ----
+            // 让「预览 / 目录打包 / Blob 下载」能拿到不带
+            // Content-Disposition: attachment 的响应，从根上解决
+            // Chrome「已阻止不安全的下载」与 IDM 抢请求。
+            Class uploader = NSClassFromString(@"GCDWebUploader");
+            if (!uploader) {
+                dlopen("@rpath/GCDWebServer.framework/GCDWebServer", RTLD_LAZY);
+                dlopen("Frameworks/GCDWebServer.framework/GCDWebServer", RTLD_LAZY);
+                uploader = NSClassFromString(@"GCDWebUploader");
+            }
+            if (uploader) {
+                HookInstanceMethod(uploader,
+                                   NSSelectorFromString(@"initWithUploadDirectory:"),
+                                   (IMP)my_initWithUploadDirectory,
+                                   (void **)&orig_initWithUploadDirectory,
+                                   "-[GCDWebUploader initWithUploadDirectory:]");
             }
         }
 

@@ -6,7 +6,20 @@
 |---|---|---|
 | 1 | 桌面长按快捷开启 | 长按图标出现「开启 WiFi 传输」，点一下直接启动服务，地址自动复制到剪贴板并弹窗提示。不用进 App、不用点按钮 |
 | 2 | 蜂窝 / 热点可开启 | 用手机流量或个人热点时，WiFi 传输页面的「开始」按钮正常出现，可正常开启；且显示的地址是手机在热点网段的真实 IP（`172.20.10.1` 这类），不再是 `unknown` |
-| 3 | 电脑网页端增强（v1.1.7） | 保留原 `Upload Files` 按钮；**整个页面就是放置区**（没有独立拖放框），把单个/多个文件、整个文件夹拖进网页任意位置即可上传（拖入时全屏提示 + 成功/失败汇总 + 失败重试）；**复用原版行末「移动」按钮与原弹窗**，增强为目录浏览 + 可勾选批量移动 + 结果反馈。v1.1.2：**文件夹置顶**、**顶部紧凑**、**任务面板默认折叠**；v1.1.5：文件夹琥珀黄 + 行内重命名按钮；**v1.1.6：删除按钮挪到最右、重命名在它左边；文件名左侧整片区域点一下即选中；每行新增下载按钮，文件直接下载、整个文件夹自动打成 ZIP；点行不再下载**；**v1.1.7：点文件夹行进入目录、点文件行在线预览 txt / pdf / mp4 / 图片 / 音频；目录 ZIP 显式带顶层文件夹；图标列按文件类型显示不同图标（图片 / 视频 / 音频 / 压缩包 / 文档 / 文本），不再满屏下载箭头** |
+| 3 | 电脑网页端增强（v1.1.8） | 保留原 `Upload Files` 按钮；**整个页面就是放置区**（没有独立拖放框），把单个/多个文件、整个文件夹拖进网页任意位置即可上传（拖入时全屏提示 + 成功/失败汇总 + 失败重试）；**复用原版行末「移动」按钮与原弹窗**，增强为目录浏览 + 可勾选批量移动 + 结果反馈。v1.1.2：**文件夹置顶**、**顶部紧凑**、**任务面板默认折叠**；v1.1.5：文件夹琥珀黄 + 行内重命名按钮；**v1.1.6：删除按钮挪到最右、重命名在它左边；文件名左侧整片区域点一下即选中；每行新增下载按钮，文件直接下载、整个文件夹自动打成 ZIP；点行不再下载**；**v1.1.7：点文件夹行进入目录、点文件行在线预览 txt / pdf / mp4 / 图片 / 音频；目录 ZIP 显式带顶层文件夹；图标列按文件类型显示不同图标**；**v1.1.8：下载改 Blob 保存，不再触发 Chrome「已阻止不安全的下载」；PDF 预览可用；目录下载不再引发 IDM 弹一堆窗口** |
+
+> **v1.1.8：修掉下载被浏览器拦、PDF 预览失败、目录下载弹一堆 IDM 窗。** 三个问题同一个根因：
+> 服务端 `/download` 的响应固定带 `Content-Disposition: attachment`（`GCDWebUploader.m` 里是
+> `responseWithFile:isAttachment:YES`）。于是 ① `window.location = 'download?...'` 这种**导航式下载**
+> 在 `http://172.20.10.1:8080` 明文局域网源上被 Chrome 判为「已阻止不安全的下载」，且要先读完才判定
+> 类型 → 表现为「点了半天没动静，还得手动点保留」；② IDM 的浏览器集成见到 `attachment` 就抢，
+> 预览拿到的字节不完整 → PDF 报「未能加载 PDF 文档」；③ 目录 ZIP 是逐文件请求，每个响应都是
+> `attachment`，IDM 逐个接管 → **点一次下载文件夹弹出 N 个窗口**。
+> 修法是服务端新增 **`GET /oka-raw`**，用 `isAttachment:NO` 返回同一份文件（`inline`），
+> 前端所有「把字节读进页面」的路径（预览 / 目录打包 / Blob 下载）全部改走它；文件下载不再导航，
+> 改为 XHR 取字节 + `Blob` + `<a download>` 落盘（`blob:` 是页面自己产生的数据，不经过「不安全下载」
+> 判定）；PDF 容器从 `<iframe>` 换成 `<embed type="application/pdf">` 并带加载失败兜底。
+> `/download` 行为一字不动，插件没装上时前端探测到 404 会自动回退到旧路径，功能不丢。
 
 > **v1.1.7：四项网页改进。** ① **点文件夹所在行恢复进入文件夹**（v1.1.6 把行级 handler 整个删掉，连文件夹都进不去了），点文件所在行改为**在线预览**；
 > ② **目录 ZIP 显式写入顶层文件夹条目**：v1.1.6 只写了 `Docs/a.txt` 这类带前缀的文件条目，部分解压工具不建隐式目录，解压出来是散装文件，现在 ZIP 第一条就是 `Docs/`；
@@ -230,10 +243,46 @@ _GCDWebServerGetPrimaryIPAddress 硬编码 strcmp(ifa_name,"en0")
 | `POST move` | `oldPath` / `newPath`（完整目标路径） | `newAbsolutePath` 同样过 `_uniquePathForPath`：目标已存在时自动改名，不覆盖也不报错 |
 | `POST delete` | `path` | 原页面逻辑，不改 |
 
-**只有以上 6 个接口**（另有用 `GCDWebUploader.m` 源码交叉核对）：没有「把文件内容 inline 读出来」、
+**原版只有以上 6 个接口**（另有用 `GCDWebUploader.m` 源码交叉核对）：没有「把文件内容 inline 读出来」、
 `Content-Disposition: inline` 预览、覆盖写回、服务端打包 ZIP 之类的隐藏接口。
 
+> **v1.1.8 补了第 7 个**：插件在 `-[GCDWebUploader initWithUploadDirectory:]` 之后注册
+> `GET /oka-raw?path=`，用 `responseWithFile:isAttachment:NO` 返回同一份文件，响应头是
+> `Content-Disposition: inline`。它不是原版接口，是插件自己加的；只服务本插件前端，
+> `/download` 的语义与行为完全不变。见下面 v1.1.8 一节。
+> 覆盖写回、服务端打包 ZIP 仍然没有 —— 目录 ZIP 依旧在浏览器端拼。
+> 因此「网页里编辑文件再保存回手机」仍不可行。
+
 路径都经 `_GCDWebServerNormalizePath` 规范化。因为 `create` **不递归**，文件夹上传必须把目录按深度升序**逐级创建**，再逐个上传文件到对应子目录；重复拖入同名文件夹时，`create` 会失败，此时用 `list` 反查同名目录是否真的已存在，存在就当"目录已就绪"继续走，不吞掉真实失败。
+
+#### v1.1.8：下载被拦 / PDF 预览失败 / 目录下载弹 IDM 多窗口
+
+| 反馈 | 根因 | 改法 |
+|---|---|---|
+| 点下载按钮要反应半天，还报「已阻止不安全的下载」，得手动点保留 | `downloadItem()` 用 `window.location = 'download?path=...'` 做**顶层导航下载**。`/download` 的响应是 `responseWithFile:isAttachment:YES`，在 `http://172.20.10.1:8080` 这种**明文局域网源**上会被 Chrome 安全下载策略拦下（要求用户确认「保留」）；而且 Chrome 要先把响应读完才能判定类型，所以小文件也要等，大文件更慢 | 改为「XHR 取字节 → `Blob` → `<a download>` 点击」。`blob:` 是页面自身产生的数据，不经过「不安全下载」判定；进度由本页掌控。超过 `DOWNLOAD_BLOB_MAX`（512 MB）或取字节失败时，才退回导航式下载并明确提示如何在地址栏放行 |
+| PDF 点预览报「未能加载 PDF 文档」，但 IDM 弹了下载窗 | 两层原因叠加：① 预览用 XHR 打 `/download`，响应带 `attachment`，**IDM 的浏览器集成会抢走它**，页面拿到的字节不完整；② 容器是 `<iframe src="blob:...">`，Chromium 内嵌 PDF 依赖内置阅读器插件，被禁用 / 被扩展接管时就报这句 | 字节改走 `/oka-raw`（`inline`，IDM 不再视为下载任务）；容器换成 `<embed type="application/pdf">`，并显式给 `width` / `height`（`<embed>` 是 replaced element，只靠 CSS 会出现 0 高度空白）；挂 `error` 监听，失败时换成说明 + 「在新标签页打开」按钮，不留空白 |
+| 点下载文件夹，IDM 弹出很多个窗口，每个文件一个 | 目录 ZIP 是**逐文件**发 XHR 取字节。每个 `/download` 响应都带 `Content-Disposition: attachment`，IDM 把每一条都当成一次独立下载任务接管 → N 个文件弹 N 个窗 | 逐文件取字节改走 `/oka-raw`（`inline`），IDM 不再接管；一个目录只产生一次 Blob 落盘 |
+
+**为什么会这样**：`GCDWebUploader.m` 的 `downloadFile:` 结尾是
+
+```objc
+return [GCDWebServerFileResponse responseWithFile:absolutePath isAttachment:YES];
+```
+
+`isAttachment:YES` 会让 GCDWebServer 输出 `Content-Disposition: attachment; filename="..."`。
+这一个响应头同时触发了 Chrome 的下载安全策略与 IDM 的浏览器集成，三个问题都是它的下游症状。
+
+**服务端为什么新增接口而不是改 `/download`**：`/download` 是原版页面「点文件名下载」在用的接口，
+也可能是别的客户端 / 脚本依赖的语义；把它改成 `inline` 属于破坏性变更（Safari / 手机浏览器上 PDF
+会直接打开而不是存盘）。新开一个 `/oka-raw` 只服务本插件的前端，原路径行为一字不动。
+
+`/oka-raw` 的路径围栏用「等于根目录 **或** 以 `根 + '/'` 开头」判断，不用 `hasPrefix:root` 裸判 ——
+根是 `/a/b` 时 `/a/bc` 也满足裸 `hasPrefix`，越界读就成立了。归一走
+`stringByStandardizingPath`（**注意**：`standardizingPath` 是 Swift 属性名，ObjC 里没有这个 selector）。
+
+**前端如何兼容旧包**：`/oka-raw` 不存在时服务端返回 404，前端会先用 `/download` 重试一次来区分
+「接口缺失」与「文件真的不存在」——只有 `/download` 能拿到时才把 `rawUsable` 钉成 `false` 永久降级。
+一见 404 就降级的写法有隐性 bug：用户点一个已删除的文件，会让之后所有预览都退化成慢路径。
 
 #### v1.1.7：点目录进入 / 点文件预览 / 目录 ZIP 保留顶层文件夹 / 按类型换图标
 
@@ -241,10 +290,13 @@ _GCDWebServerGetPrimaryIPAddress 硬编码 strcmp(ifa_name,"en0")
 |---|---|---|
 | 点击文件夹所在行应该能进入文件夹，现在都进不去了 | v1.1.6 为取消「点行即下载」把**整个行级 click handler** 删掉，目录进入也一起没了 | 恢复 `$(document).on('click', '#listing tr.row-file', onRowAction)`：目录行调原版 `window._reload(d.path)`，文件行调 `openPreview(d)`。左侧热区在捕获阶段 `stopPropagation`，各按钮在自己 handler 里阻止冒泡，都不受影响；原版 `.button-delete` 没有 `stopPropagation`，所以 `onRowAction` 里显式排除 `button / a / input / select / textarea / .btn / .oka-rename-input` |
 | 下载文件夹得到的是文件夹里的各个文件，没有那个文件夹 | v1.1.6 的 ZIP 只有 `Docs/notes.txt` 这类**带前缀的文件条目**，没有显式写入 `Docs/` 这条 0 字节目录条目；部分解压工具不创建隐式目录 | `downloadDirectoryAsZip()` 把 `acc.dirs` 初始化为 `[rootRel]`，ZIP 第一条就是顶层文件夹。完成汇总里的子目录数用 `acc.dirs.length - 1`，不把顶层算进去 |
-| 能否点文件所在行直接打开 txt / pdf / mp4，起码预览一下 | 服务端 `download` 是 `isAttachment:YES`，直接在标签页打开只会下载；但**前端可以把字节取回页面内存**再渲染 | 原生 XHR 读 `download?path=` → `Uint8Array` → `Blob` → `URL.createObjectURL`：文本走 `<pre>`、PDF 走 `<iframe>`、图片/视频/音频走 `<img>/<video>/<audio>`；按**扩展名优先**判类型（服务端对 `.log` 常给 `application/octet-stream`），MIME 兜底。弹窗默认隐藏、关闭时清空 body + revoke Blob URL；超过 200 MB 或扩展名不认识就只给「下载原文件」，不把大文件读进内存 |
+| 能否点文件所在行直接打开 txt / pdf / mp4，起码预览一下 | 服务端 `download` 是 `isAttachment:YES`，直接在标签页打开只会下载；但**前端可以把字节取回页面内存**再渲染 | 原生 XHR 读 `download?path=` → `Uint8Array` → `Blob` → `URL.createObjectURL`：文本走 `<pre>`、图片/视频/音频走 `<img>/<video>/<audio>`；按**扩展名优先**判类型（服务端对 `.log` 常给 `application/octet-stream`），MIME 兜底。弹窗默认隐藏、关闭时清空 body + revoke Blob URL；超过 200 MB 或扩展名不认识就只给「下载原文件」，不把大文件读进内存。**（v1.1.8 已把取字节路径换成 `/oka-raw`、PDF 容器换成 `<embed>`，见上一节）** |
 
-**预览不改服务端**：仍然只用现有的 `GET download`，不需要 inline 接口，也不做覆盖写回。
-预览请求走原生 `XMLHttpRequest`，与被包装过的 `$.ajax` 完全隔离，不会触发排序或清空选中。
+**v1.1.8 起预览的字节来源改为 `GET /oka-raw`**（v1.1.7 用的是 `GET download`）：
+两者返回同一份文件，但 `/download` 带 `Content-Disposition: attachment`，会被 IDM 的浏览器集成抢走，
+导致预览字节不完整（PDF 尤甚）。`/oka-raw` 是 `inline`，不会被当成下载任务。
+前端仍用原生 `XMLHttpRequest`，与被包装过的 `$.ajax` 完全隔离，不会触发排序或清空选中。
+PDF 容器在 v1.1.8 从 `<iframe>` 换成 `<embed type="application/pdf">`。
 左侧热区、每行下载按钮、上传 / 移动 / 重命名 / 排序 / 折叠面板全部保持原样。
 
 **类型判定顺序**（`previewKind(ext, mime)`）：扩展名优先，服务端 `Content-Type` 兜底。
@@ -297,7 +349,9 @@ if (isDirectory) {
 ```
 
 一个 `download?path=<目录>` 请求必然 400，服务端也没有打包接口。所以目录下载在浏览器端做：
-原生 `XMLHttpRequest` 递归 `GET list` 展开目录树（带深度上限与防环 `seen`）→ 逐文件 `GET download`
+原生 `XMLHttpRequest` 递归 `GET list` 展开目录树（带深度上限与防环 `seen`）→ 逐文件
+`GET /oka-raw`（v1.1.7 及更早是 `GET download`，见 v1.1.8 一节：`download` 的 `attachment`
+响应头会让 IDM 把每个文件都当成一次下载任务，弹出一堆窗口）
 取 `ArrayBuffer` → 零依赖的 store 模式 ZIP（CRC32 + local headers + central directory + EOCD，
 文件名置 UTF-8 标志 `0x0800`）→ `Blob` + `<a download>` 触发 `<目录名>.zip`。空子目录也会写成
 以 `/` 结尾的 0 字节条目。打包进度与成功/失败汇总复用原页面 `#alerts`；某个文件失败不会

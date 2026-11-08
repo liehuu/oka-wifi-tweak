@@ -310,10 +310,63 @@
       xhr.onload = function () {
         if (xhr.status >= 200 && xhr.status < 300) {
           resolve(binary ? new Uint8Array(xhr.response) : xhr.responseText);
-        } else { reject(new Error('HTTP ' + xhr.status)); }
+        } else {
+          // ★ 把状态码挂到 Error 上：上层要靠它区分「接口不存在，该回退」
+          //   和「文件真的没了，不该回退」。只留一句 "HTTP 404" 的话，
+          //   调用方只能靠字符串匹配，改文案就断。
+          var e = new Error('HTTP ' + xhr.status);
+          e.status = xhr.status;
+          reject(e);
+        }
       };
       xhr.onerror = function () { reject(new Error('网络错误')); };
       xhr.send();
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // v1.1.8 内联读取：优先走插件新增的 GET /oka-raw
+  //
+  // 原版 GET /download 的响应固定带 Content-Disposition: attachment，于是：
+  //   · Chrome 把它当「页面导航触发的下载」，在 http://<局域网IP>:8080 这种
+  //     明文源上会判定为「已阻止不安全的下载」，还要等它读完才决定 → 卡半天；
+  //   · IDM 的浏览器集成见到 attachment 就抢，预览的 iframe 拿不到字节，
+  //     目录打包时每个文件都被当成一次下载任务 → 弹一堆窗口。
+  //
+  // /oka-raw 用 isAttachment:NO 返回，Content-Disposition 是 inline，
+  // 上面两种情况都不成立。地址、权限、目录围栏由服务端负责。
+  //
+  // 兼容：插件没装上（或注册失败）时 /oka-raw 是 404，这里自动回退到
+  //       /download —— 退回到 v1.1.7 的体验，功能不丢。
+  // ---------------------------------------------------------------------
+  var rawUsable = null;   // null = 还没探过；true / false = 已知
+
+  function rawURL(path) {
+    return 'oka-raw?path=' + encodeURIComponent(path);
+  }
+
+  // ★ 只有「接口确实不存在」才把 rawUsable 钉成 false。
+//   404 有两种可能：接口没注册，或文件/目录真的没了。
+//   判定方式：用 download 重试一次 —— 它也失败 = 文件问题（保持探测态）；
+//   它成功 = 接口问题（钉成 false，后续一律走 download）。
+  function fetchBytes(path) {
+    if (rawUsable === false) {
+      return xhrGet('download?path=' + encodeURIComponent(path), true);
+    }
+    return xhrGet(rawURL(path), true).then(function (bytes) {
+      rawUsable = true;
+      return bytes;
+    }, function (err) {
+      var st = err && err.status;
+      // 405 = 路由表里没有这个 GET；404 = 没有这个 handler。
+      if (st !== 404 && st !== 405) { throw err; }
+      return xhrGet('download?path=' + encodeURIComponent(path), true)
+        .then(function (bytes) {
+          rawUsable = false;   // download 能拿到，说明是接口缺失
+          return bytes;
+        }, function (e2) {
+          throw (e2 && e2.status === 404) ? err : e2;   // 文件问题，保持探测态
+        });
     });
   }
 
@@ -375,7 +428,11 @@
           chain = chain.then(function () {
             showResult('info', '<strong>正在打包目录</strong> ' + esc(rootRel) +
               ' · ' + (idx + 1) + '/' + acc.files.length);
-            return xhrGet('download?path=' + encodeURIComponent(f.path), true)
+            // ★ v1.1.8：走 fetchBytes（优先 /oka-raw 的 inline 响应）。
+            //   v1.1.7 直接打 /download，每条响应都带 Content-Disposition:
+            //   attachment，IDM 的浏览器集成会把它们逐个当成下载任务抢走，
+            //   所以「点一次下载文件夹，跳出 N 个 IDM 窗口」。
+            return fetchBytes(f.path)
               .then(function (bytes) { entries.push({ name: f.name, bytes: bytes }); },
                     function (err) { failures.push(f.name + '：' + err.message); });
           });
@@ -409,13 +466,81 @@
     }).then(function () { zipping = false; });
   }
 
-  // 每行下载按钮：文件走原版 download 接口，目录走上面的前端 ZIP 打包。
+  // 每行下载按钮：文件走 /oka-raw 取字节 + Blob，目录走上面的前端 ZIP 打包。
+  //
+  // ★ v1.1.8：不再用 `window.location = 'download?...'`。
+  //   v1.1.7 那种写法是「顶层导航触发下载」，在 http://<局域网IP>:8080 这种
+  //   明文源上会被 Chrome 的安全下载策略拦成「已阻止不安全的下载」，
+  //   必须手动点「保留」；而且 Chrome 要先把它读完才判定类型，大文件就
+  //   表现为「点了按钮半天没动静」。改成 Blob 下载后：
+  //     · blob: 是页面自己产生的数据，不经过「不安全下载」判定；
+  //     · 进度由本页控制，可以给出「正在下载 xx%」的反馈；
+  //     · 字节走 /oka-raw（inline），IDM 不会抢。
+  //
+  //   大文件不无条件读进内存：超过 DOWNLOAD_BLOB_MAX 就退回导航式下载
+  //   （那种情况浏览器自带进度条与存盘，体验反而更好），并明确告诉用户
+  //   如果被拦怎么放行。
+  var DOWNLOAD_BLOB_MAX = 512 * 1024 * 1024;   // 512 MB
+
+  function saveBytesAs(name, bytes, mime) {
+    var blob = new Blob([bytes], { type: mime || 'application/octet-stream' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.parentNode.removeChild(a);
+    // 60 秒后释放：给浏览器足够时间把 Blob 落到磁盘。
+    setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
+  }
+
+  function mimeOf(name) {
+    return MIME_EXT[fileExt(name)] || 'application/octet-stream';
+  }
+
+  // 导航式下载兜底（大文件 / Blob 失败）。仍然走 /download，
+  // 因为只有它会带 attachment —— 而 attachment 正是「存成文件」需要的。
+  function navigateDownload(path) {
+    setTimeout(function () {
+      window.location = 'download?path=' + encodeURIComponent(path);
+    }, 0);
+  }
+
   function downloadItem(d) {
     var isDir = (d.size == null) || String(d.path || '').slice(-1) === '/';
     if (isDir) { downloadDirectoryAsZip(d); return; }
-    setTimeout(function () {
-      window.location = 'download?path=' + encodeURIComponent(d.path);
-    }, 0);
+
+    var name = String(d.name || baseName(d.path));
+    var known = (typeof d.size === 'number' && d.size >= 0) ? d.size : null;
+
+    // 已知超大：直接走导航式下载，不读进内存。
+    if (known !== null && known > DOWNLOAD_BLOB_MAX) {
+      showResult('info', '<strong>文件较大</strong> ' + esc(name) +
+        ' · 交给浏览器下载。若提示「已阻止不安全的下载」，点地址栏右侧提示选「保留」。');
+      navigateDownload(d.path);
+      return;
+    }
+
+    showResult('info', '<strong>正在下载</strong> ' + esc(name));
+    fetchBytes(d.path).then(function (bytes) {
+      if (bytes.length > DOWNLOAD_BLOB_MAX) {
+        showResult('info', '<strong>文件较大</strong> ' + esc(name) +
+          ' · 改由浏览器下载。若被拦，点地址栏提示选「保留」。');
+        navigateDownload(d.path);
+        return;
+      }
+      saveBytesAs(name, bytes, mimeOf(name));
+      showResult('success', '<strong>已开始保存</strong> ' + esc(name) +
+        ' · ' + fmtSize(bytes.length));
+    }, function (err) {
+      // 取不到字节时不能让用户没路走：退回导航式下载。
+      // 这条路会被 Chrome / IDM 干预，但至少文件能下来。
+      navigateDownload(d.path);
+      showResult('warning', '<strong>已改用浏览器下载</strong> ' + esc(name) +
+        '（' + esc(err && err.message ? err.message : err) +
+        '）。若提示「已阻止不安全的下载」，点地址栏提示选「保留」。');
+    });
   }
 
   // ---------------------------------------------------------------------
@@ -430,6 +555,10 @@
   // ---------------------------------------------------------------------
   var PREVIEW_MAX = 200 * 1024 * 1024;   // 超过 200 MB 不读进内存，只给下载按钮
   var previewURL = null;
+  // 预览时读到的字节留一份，供「下载原文件」直接落盘，不再重复请求。
+  // 只存一个（同一时刻只可能有一个预览弹窗），关闭弹窗即释放。
+  var previewBytes = null;
+  var previewBytesPath = null;
 
   var TEXT_EXT = {
     txt: 1, log: 1, md: 1, markdown: 1, json: 1, xml: 1, csv: 1, js: 1,
@@ -483,7 +612,18 @@
       var settled = false;
       var abortReason = null;
       var xhr = new XMLHttpRequest();
-      xhr.open('GET', 'download?path=' + encodeURIComponent(path), true);
+      // ★ v1.1.8：优先 /oka-raw（Content-Disposition: inline）。
+      //   预览之所以必须走 inline：IDM 的浏览器集成见到 attachment 就抢，
+      //   抢走之后本页拿到的字节不完整，PDF 的 iframe 就报
+      //   「未能加载 PDF 文档」。inline 响应不会被当成下载任务。
+      //   这里不能复用 fetchBytes（它要先把整个 body 读完才能回退），
+      //   预览需要在 readyState 2 就判类型 / 拦大文件，所以自己开 XHR，
+      //   只借用 rawUsable 这个探测结果决定打哪个地址。
+      var url = (rawUsable === false)
+        ? 'download?path=' + encodeURIComponent(path)
+        : rawURL(path);
+      var usedRaw = (rawUsable !== false);   // 本次是否打在 /oka-raw 上
+      xhr.open('GET', url, true);
       xhr.responseType = 'arraybuffer';
 
       // ★ readyState 2 = HEADERS_RECEIVED：响应头已到、正文还没读。
@@ -517,9 +657,39 @@
         if (settled) { return; }
         settled = true;
         if (xhr.status < 200 || xhr.status >= 300) {
-          reject(new Error('HTTP ' + xhr.status));
+          var st = xhr.status;
+          // ★ 404 / 405 有两种可能：接口没注册，或文件真的不存在。
+          //   不能一见 404 就把 rawUsable 钉成 false —— 用户点一个已被删掉
+          //   的文件，会让之后所有预览都退化成慢路径，这就是「修了个 bug
+          //   换来个更隐蔽的 bug」。
+          //   做法：先按「接口不存在」重试一次 download。
+          //     · download 也失败 → 文件真的没了，rawUsable 保持原值，
+          //       把错误抛出去；
+          //     · download 成功 → 说明接口确实没注册，才把 rawUsable 置 false。
+          if (rawUsable === null && usedRaw && (st === 404 || st === 405)) {
+            var fallback = 'download?path=' + encodeURIComponent(path);
+            var probe = new XMLHttpRequest();
+            probe.open('GET', fallback, true);
+            probe.responseType = 'arraybuffer';
+            probe.onload = function () {
+              if (probe.status >= 200 && probe.status < 300) {
+                rawUsable = false;   // 接口确实缺失，后续都走 download
+                resolve({
+                  bytes: new Uint8Array(probe.response || 0),
+                  type: probe.getResponseHeader('Content-Type') || ''
+                });
+              } else {
+                reject(new Error('HTTP ' + st));   // 文件不存在，保持探测态
+              }
+            };
+            probe.onerror = function () { reject(new Error('网络错误')); };
+            probe.send();
+            return;
+          }
+          reject(new Error('HTTP ' + st));
           return;
         }
+        if (rawUsable === null) { rawUsable = true; }
         var bytes = new Uint8Array(xhr.response || 0);
         if (bytes.length > PREVIEW_MAX) {
           reject(new Error('文件超过 ' + fmtSize(PREVIEW_MAX) + '，请用下载按钮'));
@@ -579,8 +749,22 @@
         el = document.createElement('audio');
         el.setAttribute('controls', 'controls');
       } else if (kind === 'pdf') {
-        el = document.createElement('iframe');
+        // ★ v1.1.8：从 <iframe> 改为 <embed type="application/pdf">。
+        //   用户实测：iframe 报「未能加载 PDF 文档」，同时 IDM 弹下载窗。
+        //   两个原因叠在一起：
+        //     ① 取字节的请求打的是 /download，带 Content-Disposition:
+        //        attachment，IDM 抢走 → iframe 收到的 Blob 不完整；
+        //     ② 即使字节完整，Chrome 对 blob: URL 的 PDF 在 iframe 里
+        //        依赖内置 PDF 阅读器插件，插件被禁用 / 被扩展接管时就报这句。
+        //   <embed> 是 PDF 的推荐容器，没有插件时的失败也会走 onerror，
+        //   可以降级成明确的提示，而不是留一片空白。
+        el = document.createElement('embed');
         el.className = 'oka-preview-frame';
+        el.setAttribute('type', 'application/pdf');
+        // <embed> 的默认尺寸由属性决定，CSS 只在部分引擎生效，
+        // 两处都设，避免出现 0 高度的空白区域。
+        el.setAttribute('width', '100%');
+        el.setAttribute('height', '66vh');
       }
       if (el) {
         var blob = new Blob([bytes], {
@@ -589,7 +773,37 @@
         previewURL = URL.createObjectURL(blob);
         el.src = previewURL;
         body.appendChild(el);
-        note = '在线预览 · 只读；如浏览器无法播放请用下载按钮';
+
+        // ★ PDF 的加载失败必须能被接住。
+        //   Chrome 在 PDF 阅读器被禁用 / 被扩展接管时不会渲染内容，
+        //   但 <embed> 会触发 error 事件。这里把它换成明确的说明 +
+        //   「在新标签页打开」的出口 —— 新标签页走浏览器自己的 PDF 查看器，
+        //   比嵌在弹窗里更容易成功，且不会留一片空白让用户以为坏了。
+        if (kind === 'pdf') {
+          el.addEventListener('error', function () {
+            var box = document.getElementById('oka-preview-body');
+            if (!box) { return; }
+            box.innerHTML = '';
+            var tip = document.createElement('div');
+            tip.className = 'alert alert-warning oka-preview-unsupported';
+            tip.innerHTML = '浏览器未能内嵌显示这份 PDF（可能是 PDF 阅读器被禁用）。' +
+              '可以用下面的按钮在新标签页打开，或直接点「下载原文件」。';
+            box.appendChild(tip);
+            if (previewURL) {
+              var open = document.createElement('a');
+              open.className = 'btn btn-default';
+              open.href = previewURL;
+              open.target = '_blank';
+              open.rel = 'noopener';
+              open.textContent = '在新标签页打开';
+              box.appendChild(open);
+            }
+          });
+        }
+
+        note = (kind === 'pdf')
+          ? '在线预览 · 只读；若显示空白请点「下载原文件」'
+          : '在线预览 · 只读；如浏览器无法播放请用下载按钮';
       } else {
         // 兜底：走到这里说明类型在 fetchPreview 之后仍判不出来（例如服务端
         // 返回了空 Content-Type 且扩展名未知）。不能留一个空白弹窗。
@@ -628,9 +842,16 @@
     var ext = fileExt(name);
     $('#oka-preview-title').text(name);
     $('#oka-preview-note').text('');
+    // ★ v1.1.8：「下载原文件」不再用 href 直连 /download。
+    //   href 直连既会被 IDM 抢，也会触发 Chrome 的「不安全的下载」拦截，
+    //   而且它无法在预览已经拿到字节时复用内存里的数据。
+    //   改成按钮，里面对已缓存的文件直接落盘，没缓存才去取。
     $('#oka-preview-download')
-      .attr('href', 'download?path=' + encodeURIComponent(d.path))
-      .attr('download', name);
+      .attr('href', '#')
+      .attr('download', name)
+      .data('oka-path', d.path)
+      .data('oka-name', name)
+      .data('oka-size', typeof d.size === 'number' ? d.size : null);
     $('#oka-preview-body').html('<div class="oka-preview-loading">正在读取文件…</div>');
     $('#oka-preview-modal').modal('show');
 
@@ -646,9 +867,15 @@
     //   现在由 fetchPreview() 在 HEADERS_RECEIVED 阶段结合 Content-Type 判定，
     //   判不出就 abort 并回报 code='unsupported'，MIME 兜底真正生效。
     fetchPreview(d.path, ext).then(function (res) {
+      // 存一份给「下载原文件」用。这里存的是同一份 Uint8Array 引用，
+      // 不额外复制内存；弹窗关闭时置 null 释放。
+      previewBytes = res.bytes;
+      previewBytesPath = d.path;
       renderPreviewBody(name, previewKind(ext, res.type), res.bytes, res.type);
     }, function (err) {
       clearPreviewURL();
+      previewBytes = null;
+      previewBytesPath = null;
       if (err && err.code === 'unsupported') {
         showUnsupportedPreview();
         return;
@@ -1685,9 +1912,27 @@
       // 关闭预览：停掉媒体播放 + 释放 Blob URL，反复预览不会累积内存。
       $('#oka-preview-modal').on('hidden.bs.modal', function () {
         clearPreviewURL();
+        previewBytes = null;      // 顺带丢掉预览缓存，不让大对象常驻
+        previewBytesPath = null;
         var body = document.getElementById('oka-preview-body');
         if (body) { body.innerHTML = ''; }
         $('#oka-preview-note').text('');
+      });
+
+      // 「下载原文件」：优复用预览时已经读进内存的字节，避免再请求一次；
+      // 没有缓存（走了不支持预览 / 直接点按钮）时才去取。
+      $(document).on('click', '#oka-preview-download', function (e) {
+        e.preventDefault();
+        var $b = $(this);
+        var path = $b.data('oka-path');
+        var name = String($b.data('oka-name') || '');
+        if (!path) { return; }
+        if (previewBytes && previewBytesPath === path) {
+          saveBytesAs(name, previewBytes, mimeOf(name));
+          $('#oka-preview-note').text('已开始保存；若没弹出保存提示，请检查浏览器下载设置');
+          return;
+        }
+        downloadItem({ path: path, name: name, size: $b.data('oka-size') });
       });
 
       // ---- 改造原版 #move-modal ----
