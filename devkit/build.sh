@@ -252,8 +252,21 @@ done
 #   源码里 OkaRawFileResponse 末尾是 `, abs, NO);`。编译成 dylib 后
 #   字符串常量不会保留实参，所以这里改从源码侧做结构确认（见下面
 #   devkit 的源码检查），dylib 侧只确认这条 selector 存在。
-if ! grep -aqF "@\"/oka-raw\"" "$BUILD/$NAME.dylib"; then
-  echo "✗ dylib 里没有 /oka-raw 路由路径常量"
+# ★ 这条判据只能在**源码**里查，不能在 dylib 里查：
+#   · 编进 Mach-O 后 `@"..."` 的 `@` 不保留，只剩 `/oka-raw`；
+#   · 而前端 JS 的注释里也写着 `/oka-raw`（JS 会被编进同一个 dylib），
+#     所以 `grep -aqF "/oka-raw" dylib` 即使服务端 handler 被整个删掉
+#     也照样命中 —— 那就成了永远通过的装饰。
+#   源码里 `@"/oka-raw"` 这个形式只出现在真正的 handler 注册行，
+#   注释用的是 `/oka-raw`（无 @），所以能如实区分。
+if ! grep -qF '@"/oka-raw"' "$ROOT/Tweak.xm"; then
+  echo "✗ Tweak.xm 里没有 handler 注册用的 @\"/oka-raw\" 字面量"
+  exit 1
+fi
+# dylib 侧只确认「注册调用确实编进去了」—— 这条与上面成对：
+# 有 selector + 有 route 字面量，才算 handler 真的存在。
+if ! grep -aqF "addHandlerForMethod:path:requestClass:processBlock:" "$BUILD/$NAME.dylib"; then
+  echo "✗ dylib 里没有 addHandlerForMethod（/oka-raw 注册调用未编入）"
   exit 1
 fi
 echo "✓ v1.1.8 内联读取接口 /oka-raw 已编入产物"
