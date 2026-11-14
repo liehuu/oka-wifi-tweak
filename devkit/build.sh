@@ -218,7 +218,9 @@ for sym in responseWithHTMLTemplate:variables: initWithHTMLTemplate:variables: \
            oka-raw fetchBytes rawURL rawUsable saveBytesAs mimeOf \
            DOWNLOAD_BLOB_MAX onprogress ontimeout \
            oka-stat statURL fetchStat applyRowTimes refreshRowTimes \
-           oka-mtime-cell fmtMtime invalidateStat; do
+           oka-mtime-cell fmtMtime invalidateStat \
+           shareURL copyText copyShareLink oka-share oka-share-cell \
+           oka-share-url oka-share-manual; do
   grep -aqF "$sym" "$BUILD/$NAME.dylib" \
     || { echo "✗ dylib 缺 ${sym}（网页增强会静默失效）"; exit 1; }
 done
@@ -227,7 +229,7 @@ done
 #   所以「只在注释里出现的字符串」照样匹配成功。留着它等于给自己留一条
 #   永远 PASS 的装饰判据，还会掩盖「函数其实没删干净」这种真回归。
 #   这里改成显式负向：dylib 里除注释外不该再出现它，靠下面的 python3 剥注释判据兜住。
-echo "✓ v1.1.9 网页交互指纹齐全（点目录进入 / 点文件预览 / 目录 ZIP 保留顶层文件夹 / 按类型换图标 / 内联读取 / Blob 下载 / 读取进度与超时）"
+echo "✓ v1.2.0 网页交互指纹齐全（点目录进入 / 点文件预览 / 目录 ZIP 保留顶层文件夹 / 按类型换图标 / 内联读取 / Blob 下载 / 读取进度与超时 / 最后修改时间 / 复制下载链接）"
 
 # v1.1.7：按类型换图标必须真的挂在列表装饰流程里。
 # 只检查 ICON_CLASS 存在不够 —— 定义了却没人调用，图标照样全是下载箭头。
@@ -405,6 +407,32 @@ if ! grep -qF "if (st === 404 || st === 405) {" "$ROOT/web/oka-wifi.js"; then
   exit 1
 fi
 echo "✓ 时间列：写入幂等 / 锚定大小列之后 / 在原版 done 后刷新 / 404 时整列降级"
+
+# ---------- 4a-4) v1.2.0 复制下载链接闸门 ----------
+# 三条不能妥协的性质：
+#
+# ① 分享出去的必须是**原版 /download**（带 Content-Disposition: attachment），
+#    这样对方浏览器右键另存、IDM、迅雷都能正常接管。用 /oka-raw 分享的话
+#    （isAttachment:NO，不带该头）对方浏览器会内联打开而不是存盘，用途不对。
+# ② 必须是绝对地址且端口不写死。相对路径发给别人没意义；端口由 App
+#    每次启动决定，写死 8080 迟早失效。
+# ③ 复制必须走 execCommand。真机是 http://192.168.x.x 非安全源，
+#    实测 navigator.clipboard 整个是 undefined（不是调用被拒）。
+if ! grep -qF "var rel = 'download?path=' + encodeURIComponent(path);" \
+        "$ROOT/web/oka-wifi.js"; then
+  echo "✗ 分享链接没走原版 /download（用 /oka-raw 分享会让对方内联打开而非存盘）"
+  exit 1
+fi
+if ! grep -qF "document.execCommand('copy');" "$ROOT/web/oka-wifi.js"; then
+  echo "✗ 复制没走 execCommand（非安全源下 navigator.clipboard 不存在）"
+  exit 1
+fi
+# display:none 的元素无法被 select()，copy 会拿到空内容
+if grep -qF "ta.style.display = 'none';" "$ROOT/web/oka-wifi.js"; then
+  echo "✗ 复制用的 textarea 用了 display:none（select() 选不中，复制到空内容）"
+  exit 1
+fi
+echo "✓ 复制下载链接：走原版 /download / 绝对地址 / execCommand 复制"
 
 # 负向：v1.1.5 的「点行即下载」入口必须彻底消失。用户明确要求取消；
 # 旧实现一旦回流，点名称又会触发下载，左侧热区也会被行级 handler 干扰。

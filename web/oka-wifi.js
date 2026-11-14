@@ -1,5 +1,5 @@
 /*
- * OkaWiFi v1.1.9 — GCDWebUploader 网页端增强层
+ * OkaWiFi v1.2.0 — GCDWebUploader 网页端增强层
  *
  * 注入方式：由 Tweak.xm hook +[GCDWebServerDataResponse responseWithHTMLTemplate:variables:]
  *          把本文件 + oka-wifi.css 追加到 epilogue 变量里，随首页 HTML 一起下发。
@@ -22,6 +22,10 @@
  *   v1.1.8 下载改 Blob 保存 / PDF 换 embed 容器 / 新增 inline 读取接口 /oka-raw。
  *   v1.1.9 彻底删除导航式下载（IDM 接管与「不安全下载」的唯一来源），
  *          空响应不再当成功，读取过程带进度；新增每行最后修改时间列。
+ *
+ *   v1.2.0 新增「复制下载链接」：文件行多一个按钮，点一下把
+ *          http://<host>:<port>/download?path=<path> 复制到剪贴板，
+ *          可以直接发给别人用浏览器/IDM 下载。目录行不出这个按钮。
  *
  * v1.1.9 两项修正（按真机反馈改）：
  *   ① **删掉导航式下载这条退路**。v1.1.8 虽然主路径改成 Blob，但仍在
@@ -419,6 +423,112 @@
 
   function rawURL(path) {
     return 'oka-raw?path=' + encodeURIComponent(path);
+  }
+
+  // ---------------------------------------------------------------------
+  // v1.2.0 复制真实下载链接：GET /download?path=<path>
+  //
+  // 【为什么用原版的 /download 而不是 /oka-raw】
+  //   分享链接的用途是「对方拿去下载 / 存档 / 丢给下载器」，
+  //   这正好需要 Content-Disposition: attachment —— 原版 /download 就是
+  //   isAttachment:YES，浏览器右键另存、IDM、迅雷、aria2 都能正常接管。
+  //   /oka-raw 是我为「页面内部取字节」准备的（不带 attachment），
+  //   拿它去分享会让对方浏览器直接内联显示而不是存盘，用途不对。
+  //
+  // 【必须是绝对地址】
+  //   页面上所有请求都用相对路径（list / download / oka-raw），
+  //   因为页面本身就在服务根目录下。但分享出去的链接要给别人用，
+  //   相对路径在对方那里没有意义，所以这里用 location 拼绝对地址。
+  //
+  // 【协议和端口取 location，不写死】
+  //   端口是 App 每次启动决定的（可能不是 8080），host 也可能因
+  //   蜂窝/热点修复而变。location.origin 是浏览器实际访问到的地址，
+  //   它就是最能自证的那个来源 —— 页自己能打开，说明这个 origin 通。
+  function shareURL(path) {
+    var rel = 'download?path=' + encodeURIComponent(path);
+    // location.origin 在老 WebView 上可能缺，兜底用 protocol + host。
+    var origin = location.origin;
+    if (!origin) { origin = location.protocol + '//' + location.host; }
+    if (!origin || origin === 'null') { return rel; }
+    // 去掉 origin 末尾的斜杠再接相对路径，避免出现 "//download"。
+    return origin.replace(/\/+$/, '') + '/' + rel;
+  }
+
+  // 复制到剪贴板。返回 true / false，调用方负责给用户反馈。
+  //
+  // 【为什么不用 navigator.clipboard】
+  //   它是 Secure Context 限定 API。真机访问的是 http://192.168.x.x:8080，
+  //   实测 isSecureContext=false 时 navigator.clipboard **整个是 undefined**
+  //   （不是「调用被拒」，是对象不存在）。所以只能走 execCommand。
+  //
+  // 【为什么连安全源也用 execCommand，而不是优先 clipboard】
+  //   clipboard.writeText 是异步的，而这里需要**同步**的成败结论来决定
+  //   提示「已复制」还是「请手动复制」。写成「先 return true，异步失败再
+  //   改提示」的话，失败时用户已经看到「已复制」了，等于骗人。
+  //   实测 execCommand('copy') 在两种源上都能真写进剪贴板
+  //   （C:/tmp/probe-copy-verify.js：非安全源 + 真实点击 + Ctrl+V 回读一致），
+  //   所以统一用它，成败同步可得。
+  function copyText(text) {
+    var s = String(text == null ? '' : text);
+    if (!s) { return false; }
+    var ta = null;
+    try {
+      ta = document.createElement('textarea');
+      ta.value = s;
+      // readonly 防止弹出软键盘；不影响 select() 选中内容
+      ta.setAttribute('readonly', '');
+      // 用 fixed + 负偏移挪出视口，而不是 display:none ——
+      // 隐藏元素无法被 select()，copy 会拿到空内容。
+      ta.style.position = 'fixed';
+      ta.style.top = '-9999px';
+      ta.style.left = '-9999px';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      ta.setSelectionRange(0, ta.value.length);
+      var ok = false;
+      try { ok = document.execCommand('copy'); } catch (e2) { ok = false; }
+      return !!ok;
+    } catch (e) {
+      return false;
+    } finally {
+      // finally 里删，保证任何分支都不留垃圾节点
+      if (ta && ta.parentNode) { ta.parentNode.removeChild(ta); }
+    }
+  }
+
+  // 点「复制链接」：拿当前行的 path 拼绝对地址、复制、给反馈。
+  function copyShareLink(tr) {
+    if (!tr) { return; }
+    var d = $(tr).data() || {};
+    var path = String(d.path || '');
+    if (!path) { return; }
+    var name = String(d.name || baseName(path));
+    var isDir = (d.size == null) || path.slice(-1) === '/';
+
+    // 目录没有单链接可给：/download 对目录返回 400（原版行为），
+    // 而目录打包是浏览器端做的，没法变成一个服务端地址。
+    // 直接说清楚，不要给一个点开就 400 的链接。
+    if (isDir) {
+      showResult('warning', '<strong>文件夹没有直接下载链接</strong> ' +
+        esc(name) + ' 需要在页面上点下载按钮打包成 ZIP。' +
+        '可以分享单个文件的链接，或把 ZIP 下好后再分享文件本身。');
+      return;
+    }
+
+    var url = shareURL(path);
+    if (copyText(url)) {
+      showResult('success', '<strong>下载链接已复制</strong> ' +
+        '<span class="oka-share-url">' + esc(url) + '</span>' +
+        '<span class="oka-hint">对方需与本机在同一局域网，且 WiFi 传输保持开启。</span>');
+    } else {
+      // 复制失败不静默：把链接摆出来让用户手动选，比什么都不做强。
+      showResult('warning', '<strong>复制失败，请手动复制</strong> ' +
+        '<input type="text" class="form-control input-sm oka-share-manual" readonly value="' +
+        esc(url) + '">');
+      var box = $('#alerts .oka-share-manual')[0];
+      if (box) { box.focus(); box.select(); }
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -1834,6 +1944,30 @@
         if (delCell) { tr.insertBefore(rtd, delCell); }
         else { tr.appendChild(rtd); }
       }
+
+      // ⑤b v1.2.0：复制真实下载链接按钮。
+      //     位置：下载按钮右边、原版「移动」左边。
+      //     行为上和下载是一组（一个直接下、一个把地址给别人下），
+      //     但列顺序上必须插在 column-move 之前 —— 原版移动按钮是行内
+      //     第一个「原版自带」的操作格，把新按钮插到它右边会被夹在
+      //     移动与重命名之间，跟下载按钮隔开一格，看着不像一组。
+      //     目录行不出这个按钮：/download 对目录返回 400，给了也是死链；
+      //     这里直接不渲染，比渲染出来再点一次报错干净。
+      if (!isDir && !tr.querySelector('.oka-share')) {
+        var std = document.createElement('td');
+        std.className = 'oka-share-cell';
+        var sbtn = document.createElement('button');
+        sbtn.type = 'button';
+        sbtn.className = 'btn btn-default btn-xs oka-share';
+        sbtn.title = '复制下载链接（可发给别人）';
+        sbtn.setAttribute('aria-label', '复制下载链接');
+        sbtn.innerHTML = '<span class="glyphicon glyphicon-link"></span>';
+        std.appendChild(sbtn);
+        var shareAnchor = tr.querySelector('.column-move') ||
+                          tr.querySelector('.oka-rename-cell');
+        if (shareAnchor) { tr.insertBefore(std, shareAnchor); }
+        else { tr.appendChild(std); }
+      }
     }
 
     // ⑥ v1.1.9：最后修改时间列。
@@ -1932,7 +2066,7 @@
     if (t.closest('button, a, input, select, textarea, .btn, .oka-rename-input')) { return; }
     // 行末那几个 40px 宽的按钮格：按钮本身已被上面排掉，但格子里的空白
     // 仍会漏下来。点空白不该触发「进入目录 / 预览」，否则删除旁边一点就跳页。
-    if (t.closest('td.column-move, td.column-delete, td.oka-download-cell, td.oka-rename-cell')) { return; }
+    if (t.closest('td.column-move, td.column-delete, td.oka-download-cell, td.oka-rename-cell, td.oka-share-cell')) { return; }
     var tr = t.closest('#listing tr.row-file');
     if (!tr) { return; }
     var d = $(tr).data() || {};
@@ -1992,6 +2126,14 @@
       e.preventDefault();
       e.stopPropagation();
       startRename($(this).closest('tr.row-file')[0]);
+    });
+
+    // v1.2.0：复制下载链接。与下载按钮一样 stopPropagation，
+    // 否则点它会顺带触发 onRowAction 里的文件预览。
+    $(document).on('click', '#listing .oka-share', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      copyShareLink($(this).closest('tr.row-file')[0]);
     });
 
     $(document).on('change', '#listing .oka-checkbox', function (e) {

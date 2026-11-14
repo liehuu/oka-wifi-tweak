@@ -1,4 +1,4 @@
-/* OkaWiFi v1.1.9 — 网页增强层样式
+/* OkaWiFi v1.2.0 — 网页增强层样式
  * v1.1.5 新增文件夹琥珀黄配色与行内重命名按钮 / 输入框样式；
  * v1.1.6 新增左侧选中热区（图标按钮改为纯视觉、不再可点）、独立下载按钮列，
  *         并把重命名列与下载列的宽度收窄，保持删除按钮在最右。
@@ -221,6 +221,33 @@ body.oka-compact .container > p.footer { margin-top: 6px; }
  * 用 display:none 而不是 visibility，让表格宽度重新分配。 */
 @media (max-width: 560px) {
   #listing tr.row-file .oka-mtime-cell { display: none !important; }
+}
+
+/* --- v1.2.0 复制下载链接 --- */
+/* 反馈条里展示链接：等宽字体 + 允许换行。
+ * 链接含 192.168.x.x:8080/download?path=... 会有四五十个字符，
+ * 用 nowrap 会撑破窄屏，用 break-all 才能在任意位置断开。 */
+#alerts .oka-share-url {
+  display: inline-block;
+  margin: 2px 4px;
+  padding: 1px 5px;
+  font-family: Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: #2f6fb4;
+  background: #eef4fb;
+  border-radius: 3px;
+  word-break: break-all;
+}
+/* 复制失败时的手动兜底输入框：默认宽度会撑满整条，收窄一点 */
+#alerts .oka-share-manual {
+  margin-top: 4px;
+  font-family: Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+/* 窄屏进一步收：操作列已经四个按钮，把链接按钮的左右内边距压掉，
+ * 保证 .column-name 还能占到足够宽度。 */
+@media (max-width: 560px) {
+  #listing tr.row-file .oka-share-cell { padding-left: 2px; padding-right: 2px; }
 }
 
 #oka-preview-modal .modal-body {
