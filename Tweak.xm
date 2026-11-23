@@ -71,61 +71,6 @@
 #import <netdb.h>      // getaddrinfo / getnameinfo（主机名实测）
 #import <string.h>
 #import <stdio.h>        // snprintf（OkaGWSKey 拼符号名用）
-#import <stdarg.h>      // va_list（追踪函数用）
-
-// ---- 追踪（写文件，Filza 可读；不调用任何控制台输出宏）------------------
-static void OkaTrace(NSString *fmt, ...) {
-    static unsigned long calls = 0;
-    if (++calls > 400) return;                 // 上限保护，避免无限增长
-    va_list ap;
-    va_start(ap, fmt);
-    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
-    va_end(ap);
-    NSString *line = [NSString stringWithFormat:@"[%.3f] %@\n",
-                      [[NSDate date] timeIntervalSince1970], msg];
-    NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
-    NSArray *paths = @[[NSTemporaryDirectory() stringByAppendingPathComponent:@"oka_wifi_trace.txt"],
-                       @"/tmp/oka_wifi_trace.txt"];
-    for (NSString *path in paths) {
-        NSFileManager *fm = [NSFileManager defaultManager];
-        if (![fm fileExistsAtPath:path]) {
-            [fm createFileAtPath:path contents:data attributes:nil];
-            continue;
-        }
-        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
-        if (!fh) continue;
-        @try {
-            [fh seekToEndOfFile];
-            [fh writeData:data];
-            [fh closeFile];
-        } @catch (__unused NSException *e) {}
-    }
-}
-
-// 把被约束钉死的高度放开到至少 need（改常量而不是改 frame ——
-// 改 frame 会在下一次 layout 被 Auto Layout 复位）。
-static void OkaRelaxHeight(UIView *host, CGFloat need) {
-    if (!host || !host.superview) return;
-    BOOL hit = NO;
-    for (NSLayoutConstraint *c in host.constraints) {
-        if (c.firstAttribute == NSLayoutAttributeHeight && c.constant < need) {
-            c.constant = need;
-            hit = YES;
-        }
-    }
-    for (NSLayoutConstraint *c in host.superview.constraints) {
-        if (c.firstItem != host && c.secondItem != host) continue;
-        if (c.firstAttribute != NSLayoutAttributeHeight &&
-            c.secondAttribute != NSLayoutAttributeHeight) continue;
-        if (c.constant < need) {
-            c.constant = need;
-            hit = YES;
-        }
-    }
-    if (hit) [host.superview layoutIfNeeded];
-    OkaTrace(@"relaxHeight host=%.0fx%.0f need=%.0f hit=%d",
-            CGRectGetWidth(host.bounds), CGRectGetHeight(host.bounds), need, (int)hit);
-}
 #import <stdlib.h>
 #import <unistd.h>
 #import <dlfcn.h>
@@ -394,6 +339,18 @@ static BOOL IsPlausibleIPAddress(NSString *s) {
     return NO;
 }
 
+// 生成「IP + 真实端口」的访问地址，给「WiFi 传输已开启」弹窗用。
+// 与页面上的 <设备名>.local 互补：IP 在任何系统/任何网络下都能连，
+// .local 靠 mDNS 解析（老系统不装 Bonjour、或热点下 mDNS 不稳时会失败）。
+static NSString *OkaIPURLString(void) {
+    NSString *ip = BestLocalIPAddress(NO);
+    if (!ip.length) return nil;
+    NSUInteger port = gServerPort;
+    if (!port) port = gFixedPort;
+    if (!port) return nil;
+    return [NSString stringWithFormat:@"http://%@:%lu/", ip, (unsigned long)port];
+}
+
 static NSString *my_GetPrimaryIPAddress(BOOL includeIPv6) {
     NSString *r = orig_GetPrimaryIPAddress ? orig_GetPrimaryIPAddress(includeIPv6) : nil;
     if (!gEnableIPFix) return r;
@@ -659,7 +616,7 @@ static NSString *OkaFixedHost(void) {
 }
 
 static NSURL *(*orig_serverURL)(id, SEL);
-static NSURL *OkaComputeServerURL(id self, SEL _cmd) {
+static NSURL *my_serverURL(id self, SEL _cmd) {
     NSURL *url = orig_serverURL ? orig_serverURL(self, _cmd) : nil;
 
     // 运行状态 / 真实端口一律从实例取（权威判据，不猜端口）
@@ -704,24 +661,6 @@ static NSURL *OkaComputeServerURL(id self, SEL _cmd) {
         }
     }
     return url;
-}
-
-// ★ v1.3.2：事件驱动补拍。App 每次取地址都会经过 serverURL，
-//   在它把结果写进 ipAddress 之后补一次备用行 —— 比定时追逐可靠，
-//   因为服务器真正起来的时间不稳定（可能 > 3s）。
-static void AppendBackupAddressIfNeeded(id page);   // 前向声明见上
-
-static NSURL *my_serverURL(id self, SEL _cmd) {
-    NSURL *r = OkaComputeServerURL(self, _cmd);
-    if (gEnableFixedAddr) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                   (int64_t)(0.25 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            id page = gLastPage;
-            if (page) AppendBackupAddressIfNeeded(page);
-        });
-    }
-    return r;
 }
 
 // ===========================================================================
@@ -915,122 +854,7 @@ static void my_reachabilityChanged(id self, SEL _cmd, id note) {
     });
 }
 
-// ★★ 地址控件可能是 UILabel，也可能是 UITextView（BNHttpServerPage.nib 里两者都在）。
-//    UILabel 默认 numberOfLines = 1 —— 两行文本写进去也只画第一行，
-//    这正是 v1.3.0 / v1.3.1「备用行写了却看不见」的真正原因。
-//    这里统一放开行数，并在高度不足时按内容撑高（只动自己的 frame）。
-// ===== 备用地址副标题（v1.3.3）===========================================
-// 原控件的行数/高度不受我们控制（nib 里可能是 UILabel + numberOfLines=1，
-// 或被 Auto Layout 钉成一行高）。与其继续跟它搏斗，不如自己加一个副标题：
-// 位置、高度都由我们算，主行文案保持单行 —— 复制与二维码完全不受影响。
-static UILabel *gOkaBackupLabel = nil;
-
-static UILabel *OkaBackupLabelShared(UIView *host __unused) {
-    if (!gOkaBackupLabel) {
-        UILabel *l = [[UILabel alloc] initWithFrame:CGRectZero];
-        l.font = [UIFont systemFontOfSize:13.0];
-        if (@available(iOS 13.0, *)) {
-            l.textColor = [UIColor secondaryLabelColor];
-        } else {
-            l.textColor = [UIColor grayColor];
-        }
-        l.textAlignment = NSTextAlignmentCenter;
-        l.numberOfLines = 1;
-        l.adjustsFontSizeToFitWidth = YES;
-        l.minimumScaleFactor = 0.6;
-        l.userInteractionEnabled = NO;
-        l.backgroundColor = [UIColor clearColor];
-        gOkaBackupLabel = l;
-    }
-    return gOkaBackupLabel;
-}
-
-// text 为空 => 隐藏副标题（例如 mDNS 不可用、主行本身就是 IP）
-static void OkaUpdateBackupLabel(UIView *host, NSString *text) {
-    if (!host) return;
-    UIView *parent = host.superview;
-    if (!parent) return;
-    UILabel *l = OkaBackupLabelShared(host);
-
-    if (!text.length) {
-        l.hidden = YES;
-        return;
-    }
-    l.hidden = NO;
-    l.text = text;
-
-    CGFloat h = 18.0;
-    // 先把被钉死的高度放开到两行（改约束常量，layout 不会复位）
-    OkaRelaxHeight(host, h * 2.0 + 4.0);
-
-    CGRect hr = host.frame;
-    CGFloat below = CGRectGetHeight(parent.bounds) - CGRectGetMaxY(hr) - 2.0;
-    OkaTrace(@"label: host=%@ %.0fx%.0f parent=%@ %.0fx%.0f below=%.0f",
-             NSStringFromClass([host class]),
-             CGRectGetWidth(host.bounds), CGRectGetHeight(host.bounds),
-             NSStringFromClass([parent class]),
-             CGRectGetWidth(parent.bounds), CGRectGetHeight(parent.bounds), below);
-
-    if (below >= h) {
-        // 下方有空间：贴在原控件正下方（最理想，不遮挡任何东西）
-        if (l.superview != parent) {
-            [l removeFromSuperview];
-            [parent addSubview:l];
-        }
-        l.backgroundColor = [UIColor clearColor];
-        if (@available(iOS 13.0, *)) {
-            l.textColor = [UIColor secondaryLabelColor];
-        } else {
-            l.textColor = [UIColor grayColor];
-        }
-        l.frame = CGRectMake(CGRectGetMinX(hr), CGRectGetMaxY(hr) + 1.0,
-                             CGRectGetWidth(hr), h);
-    } else {
-        // 下方没空间：贴在原控件内部底部，加半透明底衬保证可读
-        if (l.superview != host) {
-            [l removeFromSuperview];
-            [host addSubview:l];
-        }
-        l.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.6];
-        l.textColor = [UIColor whiteColor];
-        l.layer.cornerRadius = 4.0;
-        l.clipsToBounds = YES;
-        l.frame = CGRectMake(0, MAX(0.0, CGRectGetHeight(host.bounds) - h),
-                             CGRectGetWidth(host.bounds), h);
-    }
-    [l.superview bringSubviewToFront:l];   // l 可能挂在 parent 或 host 上
-    OkaTrace(@"label placed: super=%@ frame=%@ textLen=%lu",
-             NSStringFromClass([l.superview class]), NSStringFromCGRect(l.frame),
-             (unsigned long)l.text.length);
-}
-
-static BOOL OkaPrepareAddressViewForMultipleLines(id tv) {
-    if (!tv) return NO;
-    if ([tv isKindOfClass:[UILabel class]]) {
-        UILabel *l = (UILabel *)tv;
-        l.numberOfLines = 0;                       // 0 = 不限行数
-        l.lineBreakMode = NSLineBreakByCharWrapping;
-        CGFloat w = l.bounds.size.width;
-        if (w > 1.0) {
-            CGSize fit = [l sizeThatFits:CGSizeMake(w, CGFLOAT_MAX)];
-            if (fit.height > l.bounds.size.height + 0.5) {
-                CGRect f = l.frame;
-                f.size.height = fit.height;
-                l.frame = f;
-            }
-        }
-        return YES;
-    }
-    if ([tv isKindOfClass:[UITextView class]]) {
-        UITextView *tvw = (UITextView *)tv;
-        tvw.scrollEnabled = NO;                    // 两行不该出现滚动
-        tvw.textContainer.lineFragmentPadding = 0;
-        return YES;
-    }
-    return NO;
-}
-
-static void AppendBackupAddressIfNeeded(id page);   // 定义在下方（备用行）
+// hook: viewDidLoad —— 首次进入页面时立刻放行按钮 + 校正地址
 static void (*orig_viewDidLoad)(id, SEL);
 static void my_viewDidLoad(id self, SEL _cmd) {
     if (orig_viewDidLoad) orig_viewDidLoad(self, _cmd);
@@ -1051,7 +875,6 @@ static void my_viewDidLoad(id self, SEL _cmd) {
                    dispatch_get_main_queue(), ^{
         if (weakPageForIP) {
             RewriteAddressIfNeeded(weakPageForIP);
-            AppendBackupAddressIfNeeded(weakPageForIP);
         }
     });
     // ★ v1.3.1：直接进页面时 changeWifiTransferStateAction: 不会触发，
@@ -1061,7 +884,6 @@ static void my_viewDidLoad(id self, SEL _cmd) {
                    dispatch_get_main_queue(), ^{
         if (weakPageForIP) {
             RewriteAddressIfNeeded(weakPageForIP);
-            AppendBackupAddressIfNeeded(weakPageForIP);
         }
     });
 }
@@ -1443,33 +1265,10 @@ static BOOL AddressLooksBroken(NSString *s) {
 //      第二行  备用：http://<当前IP>:<端口>/（原版方式）
 //  复制时由 URLTextFromPage 只取第一行，不会把"备用："带进剪贴板。
 
-// 需要追加时返回要拼的字符串；不需要则返回 nil（幂等，可反复调用）。
-// 需要时返回「纯备用 URL」；不需要返回 nil。
-// 注意：不再返回带换行/「备用：」前缀的整段文本 —— 那是 v1.3.0~1.3.2 的做法，
-// 依赖原控件能画两行，实测行不通。
-static NSString *OkaBackupURLIfNeeded(NSString *cur) {
-    if (!cur.length) return nil;
-    if (AddressLooksBroken(cur)) return nil;
-
-    NSString *ip = BestLocalIPAddress(NO);
-    if (!ip.length) return nil;
-
-    // 主行本身就是 IP（mDNS 不可用）：再显示一条相同的 IP 没意义
-    NSString *curHost = HostFromURLString(cur);
-    if (curHost.length && IsPlausibleIPAddress(curHost)) return nil;
-
-    NSUInteger port = ResolveLivePort(cur, ip);
-    if (!port) port = gServerPort ? gServerPort : gFixedPort;
-
-    return [NSString stringWithFormat:@"http://%@:%lu/", ip, (unsigned long)port];
-}
-
 // 探测成功后强制重写一次地址：此时 App 已写过 IP，普通路径（只在地址坏时改）
 // 不会覆盖它，所以这里直接按「mDNS 主行 + IP 备用行」重写。
 static void OkaRefreshVisiblePage(void) {
     id page = gLastPage;
-    OkaTrace(@"refresh: page=%@ addr=%d", page ? NSStringFromClass([page class]) : @"(nil)",
-             (int)gEnableFixedAddr);
     if (!page || !gEnableFixedAddr) return;
     id tv = GetIvar(page, "ipAddress");
     if (!tv) return;
@@ -1487,45 +1286,13 @@ static void OkaRefreshVisiblePage(void) {
 
     NSString *primary = [NSString stringWithFormat:@"http://%@:%lu/",
                          host, (unsigned long)port];
-    NSString *backup = [NSString stringWithFormat:@"http://%@:%lu/",
-                        ip, (unsigned long)port];
-    OkaPrepareAddressViewForMultipleLines(tv);
-    OkaUpdateBackupLabel((UIView *)tv,
-                         [primary isEqualToString:backup] ? nil : backup);
+    // ★ v1.4.0：只写主行（理由同上）
     NSString *text = primary;
     if ([text isEqualToString:cur]) return;
 
     SEL setText = @selector(setText:);
     if (![tv respondsToSelector:setText]) return;
     ((void (*)(id, SEL, id))objc_msgSend)(tv, setText, text);
-}
-
-static void AppendBackupAddressIfNeeded(id page) {
-    if (!page) return;
-    id tv = GetIvar(page, "ipAddress");
-    if (!tv || ![tv isKindOfClass:[UIView class]]) return;
-    SEL sel = @selector(text);
-    if (![tv respondsToSelector:sel]) return;
-    NSString *cur = ((id (*)(id, SEL))objc_msgSend)(tv, sel);
-    if (![cur isKindOfClass:[NSString class]]) return;
-
-
-    // 旧版本可能已经把两行写进去了：主行先裁回首行，避免控件只显示半截。
-    NSRange nl = [(NSString *)cur rangeOfString:@"\n"];
-    if (nl.location != NSNotFound) {
-        NSString *first = [(NSString *)cur substringToIndex:nl.location];
-        SEL setText = @selector(setText:);
-        if (first.length && [tv respondsToSelector:setText]) {
-            ((void (*)(id, SEL, id))objc_msgSend)(tv, setText, first);
-            cur = first;
-        }
-    }
-
-    NSString *backup = OkaBackupURLIfNeeded((NSString *)cur);
-    OkaTrace(@"append: cls=%@ cur=%@ ip=%@ backup=%@",
-             NSStringFromClass([tv class]), cur, BestLocalIPAddress(NO),
-             backup ? backup : @"(nil)");
-    OkaUpdateBackupLabel((UIView *)tv, backup);
 }
 
 // 在 App 写完地址之后调用（v1.0.2 起降为**兜底**，主力是 my_serverURL）。
@@ -1558,13 +1325,8 @@ static void RewriteAddressIfNeeded(id page) {
         }
     }
 
-    // 第二行固定给 IP —— 原版访问方式必须始终可见可用。
-    NSString *backup = [NSString stringWithFormat:@"http://%@:%lu/",
-                        ip, (unsigned long)livePort];
-    OkaPrepareAddressViewForMultipleLines(tv);
-    // 备用地址交给自建副标题，主行只写一行（控件可能只画一行高）
-    OkaUpdateBackupLabel((UIView *)tv,
-                         [primary isEqualToString:backup] ? nil : backup);
+    // ★ v1.4.0：只写主行。控件实测只能画一行（UILabel + 固定高度），
+    //   写第二行只会被裁掉；IP 地址改由「WiFi 传输已开启」弹窗给出。
     NSString *text = primary;
 
     SEL setText = @selector(setText:);
@@ -1593,14 +1355,12 @@ static void my_changeWiFiState(id self, SEL _cmd, id sender) {
                    dispatch_get_main_queue(), ^{
         if (weakSelf) {
             RewriteAddressIfNeeded(weakSelf);
-            AppendBackupAddressIfNeeded(weakSelf);
         }
     });
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.8 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         if (weakSelf) {
             RewriteAddressIfNeeded(weakSelf);
-            AppendBackupAddressIfNeeded(weakSelf);
         }
     });
     // ★ v1.3.1：服务器启动是异步的，App 有时在 2s 之后才写 ipAddress，
@@ -1609,29 +1369,45 @@ static void my_changeWiFiState(id self, SEL _cmd, id sender) {
                    dispatch_get_main_queue(), ^{
         if (weakSelf) {
             RewriteAddressIfNeeded(weakSelf);
-            AppendBackupAddressIfNeeded(weakSelf);
         }
     });
 }
 
 // 弹出结果提示
-static void ShowResultAlert(NSString *urlString, BOOL copied) {
+// ★ v1.4.0：两个地址一起给 ——
+//   · IP 地址（弹窗里显示、并复制到剪贴板）：任何系统/网络都能连，最稳；
+//   · 固定地址（<设备名>.local）：换网络不用改地址，由 WiFi 传输页显示。
+//   这样不依赖页面控件能否画两行，两个地址用户都看得到。
+static void ShowResultAlert(NSString *fixedURL, NSString *ipURL, BOOL copied) {
     UIWindow *win = KeyWindow();
     UIViewController *vc = win.rootViewController;
     while (vc.presentedViewController) vc = vc.presentedViewController;
     if (!vc) return;
 
-    NSString *msg = urlString.length ? urlString : @"已在后台开启，请在 App 的 WiFi 传输页查看地址";
-    if (copied && urlString.length) msg = [msg stringByAppendingString:@"\n\n（地址已复制到剪贴板）"];
+    NSMutableArray *lines = [NSMutableArray array];
+    if (ipURL.length) [lines addObject:ipURL];
+    if (fixedURL.length && ![fixedURL isEqualToString:ipURL]) {
+        [lines addObject:[NSString stringWithFormat:@"固定地址：%@", fixedURL]];
+    }
+    if (!lines.count) [lines addObject:@"已在后台开启，请在 App 的 WiFi 传输页查看地址"];
+
+    NSString *msg = [lines componentsJoinedByString:@"\n"];
+    if (copied && ipURL.length) msg = [msg stringByAppendingString:@"\n\n（IP 已复制到剪贴板）"];
 
     UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"WiFi 传输已开启"
                                                               message:msg
                                                        preferredStyle:UIAlertControllerStyleAlert];
     [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
-    if (urlString.length) {
-        [ac addAction:[UIAlertAction actionWithTitle:@"再复制一次" style:UIAlertActionStyleDefault
+    if (ipURL.length) {
+        [ac addAction:[UIAlertAction actionWithTitle:@"再复制 IP" style:UIAlertActionStyleDefault
                                             handler:^(UIAlertAction *a) {
-            UIPasteboard.generalPasteboard.string = urlString;
+            UIPasteboard.generalPasteboard.string = ipURL;
+        }]];
+    }
+    if (fixedURL.length && ![fixedURL isEqualToString:ipURL]) {
+        [ac addAction:[UIAlertAction actionWithTitle:@"复制固定地址" style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *a) {
+            UIPasteboard.generalPasteboard.string = fixedURL;
         }]];
     }
     [vc presentViewController:ac animated:YES completion:nil];
@@ -1644,7 +1420,7 @@ static void StartWiFiTransfer(BOOL fromShortcut) {
     if (!page) page = MakeHeadlessPage();
 
     if (!page) {
-        if (fromShortcut) ShowResultAlert(nil, NO);
+        if (fromShortcut) ShowResultAlert(nil, nil, NO);
         return;
     }
 
@@ -1653,9 +1429,11 @@ static void StartWiFiTransfer(BOOL fromShortcut) {
     BOOL portLive = (gServerPort != 0);
     if (existing.length || portLive) {
         NSString *s = existing.length ? existing : FallbackServerURLString();
-        if (fromShortcut && gCopyURLOnShortcut && s.length)
-            UIPasteboard.generalPasteboard.string = s;
-        if (fromShortcut) ShowResultAlert(s, gCopyURLOnShortcut && s.length);
+        // ★ 复制给用户的是 IP：它一定能连；.local 在老系统/热点下可能解析不了。
+        NSString *ipURL = OkaIPURLString();
+        if (fromShortcut && gCopyURLOnShortcut && ipURL.length)
+            UIPasteboard.generalPasteboard.string = ipURL;
+        if (fromShortcut) ShowResultAlert(s, ipURL, gCopyURLOnShortcut && ipURL.length);
         // 即便是"已开启"也要确保保活挂着（上次可能是手动开的）
         if (fromShortcut) StartBackgroundKeepAlive();
         return;
@@ -1663,7 +1441,7 @@ static void StartWiFiTransfer(BOOL fromShortcut) {
 
     SEL toggle = NSSelectorFromString(@"changeWifiTransferStateAction:");
     if (![page respondsToSelector:toggle]) {
-        if (fromShortcut) ShowResultAlert(nil, NO);
+        if (fromShortcut) ShowResultAlert(nil, nil, NO);
         return;
     }
     ((void (*)(id, SEL, id))objc_msgSend)(page, toggle, nil);
@@ -1682,8 +1460,9 @@ static void StartWiFiTransfer(BOOL fromShortcut) {
         // 优先用 App 自己写进 ipAddress 的地址（它走的是 serverURL，最权威）
         NSString *s = URLTextFromPage(p);
         if (!s.length) s = FallbackServerURLString();
-        if (s.length && gCopyURLOnShortcut) UIPasteboard.generalPasteboard.string = s;
-        ShowResultAlert(s, gCopyURLOnShortcut && s.length);
+        NSString *ipURL = OkaIPURLString();
+        if (ipURL.length && gCopyURLOnShortcut) UIPasteboard.generalPasteboard.string = ipURL;
+        ShowResultAlert(s, ipURL, gCopyURLOnShortcut && ipURL.length);
     });
 }
 
