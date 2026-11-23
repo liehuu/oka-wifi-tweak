@@ -69,6 +69,7 @@
 #import <arpa/inet.h>
 #import <net/if.h>
 #import <string.h>
+#import <stdio.h>        // snprintf（OkaGWSKey 拼符号名用）
 #import <stdlib.h>
 #import <unistd.h>
 #import <dlfcn.h>
@@ -130,6 +131,17 @@ static BOOL gEnableIPFix       = YES;   // 功能 2b：热点 IP 修正
 static BOOL gEnableWebEnhance  = YES;   // 功能 3：电脑网页端拖放上传 / 批量移动
 static BOOL gCopyURLOnShortcut = YES;   // 长按开启后把地址复制到剪贴板
 
+// ★ v1.3.0 固定访问地址（只加不改）
+//   原版端口本来就是固定的 5426，http://<IP>:5426 的访问方式**原样保留**。
+//   这里额外多给一条 http://<设备名>.local:5426 —— IP 随「个人热点 /
+//   家里 WiFi / 公司 WiFi」变化，主机名不变，电脑只需记一条地址。
+//   ★ 默认不覆盖监听端口（gEnableFixedPort = NO）：一旦覆盖，App 原本的
+//     http://IP:5426 就直接连不上，等于把用户原有的访问方式弄丢了。
+static BOOL gEnableFixedAddr = YES;     // 额外产出 mDNS 形式的地址（不改端口）
+static BOOL gEnableFixedPort = NO;      // 是否强制覆盖监听端口（默认关）
+static NSUInteger gFixedPort  = 5426;   // 原版端口；仅在 EnableFixedPort 开启时生效
+static NSString  *gFixedHost  = nil;    // 自定义主机名前缀（留空 = 取设备名）
+
 static void LoadPrefs(void) {
     NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
     if (!d) return;
@@ -138,6 +150,15 @@ static void LoadPrefs(void) {
     if (d[@"EnableIPFix"])       gEnableIPFix       = [d[@"EnableIPFix"] boolValue];
     if (d[@"EnableWebEnhance"])  gEnableWebEnhance  = [d[@"EnableWebEnhance"] boolValue];
     if (d[@"CopyURLOnShortcut"]) gCopyURLOnShortcut = [d[@"CopyURLOnShortcut"] boolValue];
+    if (d[@"EnableFixedAddr"])   gEnableFixedAddr   = [d[@"EnableFixedAddr"] boolValue];
+    if (d[@"EnableFixedPort"])   gEnableFixedPort   = [d[@"EnableFixedPort"] boolValue];
+    if (d[@"FixedPort"]) {
+        NSInteger p = [d[@"FixedPort"] integerValue];
+        if (p > 0 && p < 65536) gFixedPort = (NSUInteger)p;
+    }
+    if ([d[@"FixedHost"] isKindOfClass:[NSString class]] && [d[@"FixedHost"] length]) {
+        gFixedHost = d[@"FixedHost"];
+    }
 }
 
 // 保存一份强引用，避免"无界面实例"被提前释放导致 httpServer 消失
@@ -352,40 +373,134 @@ static NSString *my_GetPrimaryIPAddress(BOOL includeIPv6) {
 //  一定命中（GCDWebUploader 继承 GCDWebServer，方法查找走到父类 IMP）。
 //  另外 GCDWebServer 公开 port(NSUInteger) / isRunning(BOOL)，
 //  真实端口和运行状态都能直接从实例取，不用猜 8080、不用扫端口。
+// ---------------------------------------------------------------------------
+//  ★ v1.2.0 mDNS 主机名
+// ---------------------------------------------------------------------------
+//  iOS 的 mDNSResponder 会无条件把「设备名」注册成 <设备名>.local，这一步是
+//  系统行为：App 不需要发布 Bonjour 服务，Info.plist 也不需要声明
+//  NSBonjourServices（当前包里只有 _smb._tcp，走这条路不受影响）。
+//
+//  唯一要求是主机名必须是合法 DNS 标签：ASCII、小写、只含 a-z0-9 和连字符、
+//  不以连字符开头结尾、长度 <= 63。设备名可能是中文（「张三的 iPhone」），
+//  所以这里做一次规范化；规范化后为空（纯中文名）就返回 nil，调用方退回 IP。
+//
+//  ★ 一个坑：改了设备名，地址就变了。所以设备名要当「固定配置」看待，
+//    建议在 设置 → 通用 → 关于本机 → 名称 里设成短英文（如 oka / oka-air）。
+//  主机名的权威来源：读 mDNSResponder 实际注册的那个名字。
+//  ★ UIDevice.name 与它不一定相同 —— 系统会把空格换成连字符、丢掉非法字符，
+//    同名设备还会自动追加 -2 / -3 后缀。名字对不上，<name>.local 就解析不到，
+//    电脑浏览器直接打不开，所以必须优先读系统登记值，而不是自己猜。
+//  SCDynamicStoreCopyLocalHostName 由 SystemConfiguration 导出（iOS 上可用）；
+//  用 dlsym 解析，解析不到或返回 nil 时再退回设备名规范化，不产生硬依赖。
+typedef CFStringRef (*CopyLocalHostName_t)(void *);
+static NSString *OkaLocalHostNameFromSystem(void) {
+    static CopyLocalHostName_t fn = NULL;
+    static BOOL tried = NO;
+    if (!tried) {
+        tried = YES;
+        fn = (CopyLocalHostName_t)dlsym(RTLD_DEFAULT, "SCDynamicStoreCopyLocalHostName");
+    }
+    if (!fn) return nil;
+    CFStringRef s = fn(NULL);
+    if (!s) return nil;
+    return CFBridgingRelease(s);      // Copy 命名规则 -> 所有权交还 ARC
+}
+
+static NSString *OkaFixedHostLabel(void) {
+    if (gFixedHost.length) return gFixedHost;
+
+    // ① 系统实际注册的主机名：本身已是合法 DNS 标签，原样使用最可靠。
+    NSString *sysName = OkaLocalHostNameFromSystem();
+    if (sysName.length) return sysName;
+
+    // ② 退化路径：拿设备名做规范化（纯中文名会被压成纯字母片段）。
+    NSString *name = [[UIDevice currentDevice] name];
+    if (!name.length) return nil;
+
+    NSMutableString *out = [NSMutableString stringWithCapacity:name.length];
+    BOOL lastDash = YES;                      // 起始时禁止以连字符开头
+    for (NSUInteger i = 0; i < name.length; i++) {
+        unichar c = [name characterAtIndex:i];
+        if (c >= 'a' && c <= 'z') {
+            [out appendFormat:@"%c", (char)c];
+            lastDash = NO;
+        } else if (c >= 'A' && c <= 'Z') {
+            [out appendFormat:@"%c", (char)(c - 'A' + 'a')];
+            lastDash = NO;
+        } else if (c >= '0' && c <= '9') {
+            [out appendFormat:@"%c", (char)c];
+            lastDash = NO;
+        } else if (!lastDash) {
+            [out appendString:@"-"];           // 连续的非字母数字只压成一个连字符
+            lastDash = YES;
+        }
+    }
+    while (out.length && [out hasSuffix:@"-"]) {
+        [out deleteCharactersInRange:NSMakeRange(out.length - 1, 1)];
+    }
+    if (!out.length) return nil;
+
+    if (out.length > 40) {                     // 留余量，避开 63 上限
+        out = [[out substringToIndex:40] mutableCopy];
+        while (out.length && [out hasSuffix:@"-"]) {
+            [out deleteCharactersInRange:NSMakeRange(out.length - 1, 1)];
+        }
+    }
+    return out.length ? out : nil;
+}
+
+static NSString *OkaFixedHost(void) {
+    NSString *label = OkaFixedHostLabel();
+    if (!label.length) return nil;
+    return [label stringByAppendingString:@".local"];
+}
+
 static NSURL *(*orig_serverURL)(id, SEL);
 static NSURL *my_serverURL(id self, SEL _cmd) {
     NSURL *url = orig_serverURL ? orig_serverURL(self, _cmd) : nil;
-    if (!gEnableIPFix) return url;
 
-    // 运行状态是权威判据（不再靠 gServerPort 猜）
-    SEL selRun = @selector(isRunning);
-    if ([self respondsToSelector:selRun]) {
-        gServerRunning = ((BOOL (*)(id, SEL))objc_msgSend)(self, selRun);
+    // 运行状态 / 真实端口一律从实例取（权威判据，不猜端口）
+    BOOL running = NO;
+    if ([self respondsToSelector:@selector(isRunning)]) {
+        running = ((BOOL (*)(id, SEL))objc_msgSend)(self, @selector(isRunning));
     }
+    gServerRunning = running;
 
-    // WiFi 下原 URL 的 host 本来就是合法 IP —— 原样返回，零副作用。
-    NSString *host = [url host];
-    if (IsPlausibleIPAddress(host)) return url;
-
-    // 真实端口：实例自己的 port 属性 > 原 URL 的 port > hook 记录 > 8080
     NSUInteger port = 0;
-    SEL selPort = @selector(port);
-    if ([self respondsToSelector:selPort]) {
-        port = ((NSUInteger (*)(id, SEL))objc_msgSend)(self, selPort);
+    if ([self respondsToSelector:@selector(port)]) {
+        port = ((NSUInteger (*)(id, SEL))objc_msgSend)(self, @selector(port));
     }
     if (!port) port = [[url port] unsignedIntegerValue];
     if (port) gServerPort = port;
 
-    // 服务没在跑就别造地址：此时 unknown / 空白是正确状态。
-    if (!gServerRunning && !port) return url;
+    // 服务没在跑就别造地址：此时空白 / unknown 是正确状态。
+    if (!running && !port) return url;
 
-    NSString *ip = BestLocalIPAddress(NO);
-    if (!ip) { return url; }
-    if (!port) port = gServerPort ? gServerPort : 8080;
+    NSUInteger livePort = port ? port : gFixedPort;
 
-    NSURL *fixed = [NSURL URLWithString:
-                    [NSString stringWithFormat:@"http://%@:%lu/", ip, (unsigned long)port]];
-    return fixed;
+    // ① 固定地址：<设备名>.local:<固定端口>
+    //    与当前 IP 完全解耦，热点换成 WiFi 也不用改地址。
+    if (gEnableFixedAddr) {
+        NSString *mdnsHost = OkaFixedHost();
+        if (mdnsHost.length) {
+            return [NSURL URLWithString:
+                    [NSString stringWithFormat:@"http://%@:%lu/",
+                     mdnsHost, (unsigned long)livePort]];
+        }
+    }
+
+    // ② IP 修正（原逻辑保留）：主机名规范化失败时退回 IP，
+    //    WiFi 下原本就正常的 IP 地址原样透传。
+    if (gEnableIPFix) {
+        if (IsPlausibleIPAddress([url host])) return url;
+        NSString *ip = BestLocalIPAddress(NO);
+        if (ip.length) {
+            return [NSURL URLWithString:
+                    [NSString stringWithFormat:@"http://%@:%lu/",
+                     ip, (unsigned long)livePort]];
+        }
+    }
+    return url;
 }
 
 // ===========================================================================
@@ -528,7 +643,16 @@ static NSString *URLTextFromPage(id page) {
     if (str.length == 0) return nil;
     // App 在未启动时可能显示占位文案，只认 http(s):// 开头的
     if (![str.lowercaseString hasPrefix:@"http"]) return nil;
-    return str;
+    // ★ v1.3.0：ipAddress 现在是两行（固定地址 + 备用 IP）。
+    //   这里只取第一行：否则复制进剪贴板会连"备用："那行一起，
+    //   粘到浏览器里直接打不开。二维码不受影响 —— 它走 serverURL。
+    NSRange nl = [str rangeOfString:@"\n"];
+    if (nl.location != NSNotFound && nl.location > 0) {
+        str = [str substringToIndex:nl.location];
+        str = [str stringByTrimmingCharactersInSet:
+               [NSCharacterSet whitespaceCharacterSet]];
+    }
+    return str.length ? str : nil;
 }
 
 // 强制把"开始"按钮放出来（startBtn / connectionView 都是 weak outlet，取到才动）
@@ -716,6 +840,79 @@ static BOOL my_startWithPort(id self, SEL _cmd, NSUInteger port, NSString *name)
     return ok;
 }
 
+// ★ v1.2.0 固定端口
+//   GCDWebServer 的 -startWithPort:bonjourName: 内部实现就是
+//       options[GCDWebServerOption_Port] = @(port); ...;
+//       return [self startWithOptions:options error:NULL];
+//   而 -startWithOptions:（单参版）也是转调 -startWithOptions:error:。
+//   所以在 -startWithOptions:error: 这一层重写 Port 一处，两条启动路径全覆盖，
+//   不用分别改 startWithPort / startWithOptions。
+//
+//   GCDWebServer 的 options 键就是常量名本身（@"GCDWebServerOption_Port"），
+//   已由 GCDWebServer.framework 字符串表核实存在该常量。
+// ---------------------------------------------------------------------------
+//  ★ 取 GCDWebServer 选项键的**真实值**
+// ---------------------------------------------------------------------------
+//  坑：GCDWebServer.h 里声明的是
+//        extern NSString* const GCDWebServerOption_Port;
+//      所以「符号名」是 GCDWebServerOption_Port，但「它指向的 CFString」不是这个名字。
+//      实测 GCDWebServer.framework 符号表：
+//        _GCDWebServerOption_Port        -> @"Port"
+//        _GCDWebServerOption_BonjourName -> @"BonjourName"
+//        _GCDWebServerOption_ServerName  -> @"ServerName"
+//      写成 options[@"GCDWebServerOption_Port"] = @(8080) 只会往字典里塞一个
+//      GCDWebServer 永不读取的键：端口照旧随机，界面照旧显示随机端口，
+//      而且没有任何报错——属于「看起来改了、其实没生效」的静默失效。
+//
+//      这里 dlsym 拿符号地址，再读它指向的 NSString。dlsym 传的名字不带前导下划线。
+//      取不到（框架未加载 / 符号被裁）才退回 fallback，保证不会崩。
+static NSString *OkaGWSKey(const char *bare, NSString *fallback) {
+    char sym[96];
+    int n = snprintf(sym, sizeof(sym), "GCDWebServerOption_%s", bare);
+    if (n <= 0 || n >= (int)sizeof(sym)) return fallback;
+
+    void *h = dlsym(RTLD_DEFAULT, sym);
+    if (!h) {
+        dlopen("@rpath/GCDWebServer.framework/GCDWebServer", RTLD_LAZY);
+        dlopen("Frameworks/GCDWebServer.framework/GCDWebServer", RTLD_LAZY);
+        h = dlsym(RTLD_DEFAULT, sym);
+    }
+    if (!h) return fallback;
+
+    NSString *v = *(NSString * const *)h;   // 符号指向的是 NSString * const 变量
+    return v.length ? v : fallback;
+}
+
+static BOOL (*orig_startWithOptions)(id, SEL, NSDictionary *, NSError **);
+static BOOL my_startWithOptions(id self, SEL _cmd, NSDictionary *options, NSError **error) {
+    if (!orig_startWithOptions) return NO;
+
+    NSDictionary *use = options;
+    // ★ 只有显式开启 gEnableFixedPort 才覆盖端口。
+    //   默认 NO -> options 原样传给 GCDWebServer，App 自己的 5426 一分不差。
+    if (gEnableFixedPort) {
+        NSMutableDictionary *m = options ? [options mutableCopy]
+                                        : [NSMutableDictionary dictionary];
+        static NSString *portKey = nil;
+        if (!portKey) portKey = OkaGWSKey("Port", @"Port");
+        m[portKey] = @(gFixedPort);
+        use = m;
+    }
+
+    BOOL ok = orig_startWithOptions(self, _cmd, use, error);
+
+    // 固定端口被别的进程占用时退一步：用 App 原本的端口再试一次。
+    // 宁可地址回到随机端口（功能不丢），也不要开不起来。
+    if (!ok && gEnableFixedPort && use != options) {
+        ok = orig_startWithOptions(self, _cmd, options, error);
+    }
+
+    NSUInteger real = ((NSUInteger (*)(id, SEL))objc_msgSend)(self, @selector(port));
+    if (real) gServerPort = real;
+    if (ok) gServerRunning = YES;
+    return ok;
+}
+
 // 停服时要把 gServerPort 清掉。
 // 不清的后果很实际：用户开过一次 → App 里手动停掉 → 再长按快捷方式，
 // 我们会因为 gServerPort != 0 误判"已在运行"，于是永远不再真正启动。
@@ -729,11 +926,20 @@ static void my_stop(id self, SEL _cmd) {
 
 // 兜底算地址：自己的 IP + 记录到的端口
 static NSString *FallbackServerURLString(void) {
+    NSUInteger port = gServerPort ? gServerPort : gFixedPort;
+
+    // 与 my_serverURL 保持同一口径：优先 mDNS 主机名，拿不到才退回 IP。
+    if (gEnableFixedAddr) {
+        NSString *mdnsHost = OkaFixedHost();
+        if (mdnsHost.length) {
+            return [NSString stringWithFormat:@"http://%@:%lu/",
+                    mdnsHost, (unsigned long)port];
+        }
+    }
+
     NSString *ip = BestLocalIPAddress(NO);
     if (!ip) return nil;
-    NSUInteger port = gServerPort;
-    if (!port) port = 8080;
-    return [NSString stringWithFormat:@"http://%@:%lu", ip, (unsigned long)port];
+    return [NSString stringWithFormat:@"http://%@:%lu/", ip, (unsigned long)port];
 }
 
 // ---------------------------------------------------------------------------
@@ -825,7 +1031,7 @@ static BOOL PortIsListeningAddr(struct in_addr a, NSUInteger port) {
     return rc == 0;
 }
 
-// 候选端口按可信度排序：start hook 记录 > App 文案里抠出来的 > 默认 8080。
+// 候选端口按可信度排序：start hook 记录 > App 文案里抠出来的 > 原版 5426 > 8080/8081（历史兼容）。
 // 回环 + 对外 IP 各试一次：GCDWebServer 可能绑 0.0.0.0，也可能只绑热点接口。
 static NSUInteger ResolveLivePort(NSString *cur, NSString *localIP) {
     struct in_addr lo, lan;
@@ -839,8 +1045,9 @@ static NSUInteger ResolveLivePort(NSString *cur, NSString *localIP) {
     if (gServerPort && gServerPort <= 65535) cand[n++] = gServerPort;
     NSUInteger fromText = PortFromText(cur);
     if (fromText && fromText != gServerPort) cand[n++] = fromText;
-    if (8080 != gServerPort && 8080 != fromText)  cand[n++] = 8080;
-    if (8081 != gServerPort && 8081 != fromText)  cand[n++] = 8081;
+    if (gFixedPort != gServerPort && gFixedPort != fromText) cand[n++] = gFixedPort;
+    if (8080 != gServerPort && 8080 != fromText && 8080 != gFixedPort) cand[n++] = 8080;
+    if (8081 != gServerPort && 8081 != fromText && 8081 != gFixedPort) cand[n++] = 8081;
 
     for (int i = 0; i < n; i++) {
         if (PortIsListeningAddr(lo, cand[i]) ||
@@ -854,7 +1061,7 @@ static NSUInteger ResolveLivePort(NSString *cur, NSString *localIP) {
         return gServerPort;
     }
     if (gServerRunning) {
-        return 8080;
+        return gFixedPort;
     }
     return 0;
 }
@@ -869,7 +1076,58 @@ static BOOL AddressLooksBroken(NSString *s) {
     NSString *host = HostFromURLString(s);
     if (!host) return YES;
     if ([low rangeOfString:@"localhost"].location != NSNotFound) return YES;
+    // ★ v1.2.0：mDNS 主机名是合法地址，不能判成「坏地址」再被改回 IP，
+    //   否则兜底逻辑会每秒把固定地址覆盖掉。
+    if ([host.lowercaseString hasSuffix:@".local"]) return NO;
     return !IsPlausibleIPAddress(host);
+}
+
+// ---------------------------------------------------------------------------
+//  ★ v1.3.0 备用行：把原版可用的 IP 地址永远留在屏幕上
+// ---------------------------------------------------------------------------
+//  mDNS（<设备名>.local）不是万能的：Windows 老系统没装 Bonjour、部分网络
+//  禁组播时，固定地址解析不到。原版用 http://<IP>:5426 一直可用，用户明确
+//  要求「不要去掉我输入网址能访问网页的功能」。
+//  ipAddress 是 UITextView，支持换行，所以两行都放得下：
+//      第一行  固定地址（主）
+//      第二行  备用：http://<当前IP>:<端口>/（原版方式）
+//  复制时由 URLTextFromPage 只取第一行，不会把"备用："带进剪贴板。
+
+// 需要追加时返回要拼的字符串；不需要则返回 nil（幂等，可反复调用）。
+static NSString *OkaBackupLineIfNeeded(NSString *cur) {
+    if (!cur.length) return nil;
+    if (AddressLooksBroken(cur)) return nil;          // 坏地址交给 RewriteAddressIfNeeded
+    // 已经有第二行就别再追加（0.6s / 1.8s 两次调度都会走到这里）
+    if ([cur rangeOfString:@"\n"].location != NSNotFound) return nil;
+    if ([cur rangeOfString:@"备用"].location != NSNotFound) return nil;
+
+    NSString *ip = BestLocalIPAddress(NO);
+    if (!ip.length) return nil;                       // 没有可用 IP 就不造这一行
+
+    NSUInteger port = ResolveLivePort(cur, ip);
+    if (!port) port = gServerPort ? gServerPort : gFixedPort;
+
+    return [NSString stringWithFormat:@"\n备用：http://%@:%lu/",
+            ip, (unsigned long)port];
+}
+
+static void AppendBackupAddressIfNeeded(id page) {
+    if (!page) return;
+    id tv = GetIvar(page, "ipAddress");
+    if (!tv) return;
+    SEL sel = @selector(text);
+    if (![tv respondsToSelector:sel]) return;
+    NSString *cur = ((id (*)(id, SEL))objc_msgSend)(tv, sel);
+    if (![cur isKindOfClass:[NSString class]]) return;
+
+    NSString *add = OkaBackupLineIfNeeded((NSString *)cur);
+    if (!add.length) return;
+
+    NSString *merged = [(NSString *)cur stringByAppendingString:add];
+    SEL setText = @selector(setText:);
+    if ([tv respondsToSelector:setText]) {
+        ((void (*)(id, SEL, id))objc_msgSend)(tv, setText, merged);
+    }
 }
 
 // 在 App 写完地址之后调用（v1.0.2 起降为**兜底**，主力是 my_serverURL）。
@@ -889,11 +1147,27 @@ static void RewriteAddressIfNeeded(id page) {
     NSUInteger port = ResolveLivePort(cur, ip);
     if (!port) return;   // 服务没在跑：unknown / 空白是正确状态，不造假地址
 
-    NSString *url = [NSString stringWithFormat:@"http://%@:%lu", ip, (unsigned long)port];
+    NSUInteger livePort = port;      // port 已被 ResolveLivePort 确定为真实监听端口
+
+    // 主行：固定地址优先（与 my_serverURL 同口径），拿不到主机名才退回 IP。
+    NSString *primary = [NSString stringWithFormat:@"http://%@:%lu/",
+                         ip, (unsigned long)livePort];
+    if (gEnableFixedAddr) {
+        NSString *h = OkaFixedHost();
+        if (h.length) {
+            primary = [NSString stringWithFormat:@"http://%@:%lu/",
+                       h, (unsigned long)livePort];
+        }
+    }
+
+    // 第二行固定给 IP —— 原版访问方式必须始终可见可用。
+    NSString *backup = [NSString stringWithFormat:@"http://%@:%lu/",
+                        ip, (unsigned long)livePort];
+    NSString *text = [NSString stringWithFormat:@"%@\n备用：%@", primary, backup];
 
     SEL setText = @selector(setText:);
     if ([tv respondsToSelector:setText]) {
-        ((void (*)(id, SEL, id))objc_msgSend)(tv, setText, url);
+        ((void (*)(id, SEL, id))objc_msgSend)(tv, setText, text);
     }
 }
 
@@ -911,13 +1185,21 @@ static void (*orig_changeWiFiState)(id, SEL, id);
 static void my_changeWiFiState(id self, SEL _cmd, id sender) {
     if (orig_changeWiFiState) orig_changeWiFiState(self, _cmd, sender);
     __weak id weakSelf = self;
+    // ★ v1.3.0：先修坏地址，再补备用行。顺序不能反 ——
+    //   顺序反了会出现「先追加备用行、随后整段被判为坏地址再被改写」的来回跳。
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        if (weakSelf) RewriteAddressIfNeeded(weakSelf);
+        if (weakSelf) {
+            RewriteAddressIfNeeded(weakSelf);
+            AppendBackupAddressIfNeeded(weakSelf);
+        }
     });
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.8 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        if (weakSelf) RewriteAddressIfNeeded(weakSelf);
+        if (weakSelf) {
+            RewriteAddressIfNeeded(weakSelf);
+            AppendBackupAddressIfNeeded(weakSelf);
+        }
     });
 }
 
@@ -1488,6 +1770,10 @@ static void OkaWiFiInit(void) {
                 HookInstanceMethod(gws, @selector(startWithPort:bonjourName:),
                                    (IMP)my_startWithPort, (void **)&orig_startWithPort,
                                    "-[GCDWebServer startWithPort:bonjourName:]");
+                // ★ v1.2.0 固定端口：两条启动路径的真正交汇点
+                HookInstanceMethod(gws, @selector(startWithOptions:error:),
+                                   (IMP)my_startWithOptions, (void **)&orig_startWithOptions,
+                                   "-[GCDWebServer startWithOptions:error:]");
                 // 同时挂 stop，用于清 gServerPort / gServerRunning
                 HookInstanceMethod(gws, @selector(stop),
                                    (IMP)my_stop, (void **)&orig_stop,
