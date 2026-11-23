@@ -605,7 +605,7 @@ static NSString *OkaFixedHost(void) {
 }
 
 static NSURL *(*orig_serverURL)(id, SEL);
-static NSURL *my_serverURL(id self, SEL _cmd) {
+static NSURL *OkaComputeServerURL(id self, SEL _cmd) {
     NSURL *url = orig_serverURL ? orig_serverURL(self, _cmd) : nil;
 
     // 运行状态 / 真实端口一律从实例取（权威判据，不猜端口）
@@ -650,6 +650,24 @@ static NSURL *my_serverURL(id self, SEL _cmd) {
         }
     }
     return url;
+}
+
+// ★ v1.3.2：事件驱动补拍。App 每次取地址都会经过 serverURL，
+//   在它把结果写进 ipAddress 之后补一次备用行 —— 比定时追逐可靠，
+//   因为服务器真正起来的时间不稳定（可能 > 3s）。
+static void AppendBackupAddressIfNeeded(id page);   // 前向声明见上
+
+static NSURL *my_serverURL(id self, SEL _cmd) {
+    NSURL *r = OkaComputeServerURL(self, _cmd);
+    if (gEnableFixedAddr) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                   (int64_t)(0.25 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            id page = gLastPage;
+            if (page) AppendBackupAddressIfNeeded(page);
+        });
+    }
+    return r;
 }
 
 // ===========================================================================
@@ -844,6 +862,36 @@ static void my_reachabilityChanged(id self, SEL _cmd, id note) {
 }
 
 // hook: viewDidLoad —— 首次进入页面时立刻放行按钮 + 校正地址
+// ★★ 地址控件可能是 UILabel，也可能是 UITextView（BNHttpServerPage.nib 里两者都在）。
+//    UILabel 默认 numberOfLines = 1 —— 两行文本写进去也只画第一行，
+//    这正是 v1.3.0 / v1.3.1「备用行写了却看不见」的真正原因。
+//    这里统一放开行数，并在高度不足时按内容撑高（只动自己的 frame）。
+static BOOL OkaPrepareAddressViewForMultipleLines(id tv) {
+    if (!tv) return NO;
+    if ([tv isKindOfClass:[UILabel class]]) {
+        UILabel *l = (UILabel *)tv;
+        l.numberOfLines = 0;                       // 0 = 不限行数
+        l.lineBreakMode = NSLineBreakByCharWrapping;
+        CGFloat w = l.bounds.size.width;
+        if (w > 1.0) {
+            CGSize fit = [l sizeThatFits:CGSizeMake(w, CGFLOAT_MAX)];
+            if (fit.height > l.bounds.size.height + 0.5) {
+                CGRect f = l.frame;
+                f.size.height = fit.height;
+                l.frame = f;
+            }
+        }
+        return YES;
+    }
+    if ([tv isKindOfClass:[UITextView class]]) {
+        UITextView *tvw = (UITextView *)tv;
+        tvw.scrollEnabled = NO;                    // 两行不该出现滚动
+        tvw.textContainer.lineFragmentPadding = 0;
+        return YES;
+    }
+    return NO;
+}
+
 static void AppendBackupAddressIfNeeded(id page);   // 定义在下方（备用行）
 static void (*orig_viewDidLoad)(id, SEL);
 static void my_viewDidLoad(id self, SEL _cmd) {
@@ -1303,6 +1351,8 @@ static void OkaRefreshVisiblePage(void) {
                          host, (unsigned long)port];
     NSString *backup = [NSString stringWithFormat:@"http://%@:%lu/",
                         ip, (unsigned long)port];
+    OkaPrepareAddressViewForMultipleLines(tv);
+
     NSString *text = [primary isEqualToString:backup]
                    ? primary
                    : [NSString stringWithFormat:@"%@\n备用：%@", primary, backup];
@@ -1324,6 +1374,8 @@ static void AppendBackupAddressIfNeeded(id page) {
 
     NSString *add = OkaBackupLineIfNeeded((NSString *)cur);
     if (!add.length) return;
+
+    OkaPrepareAddressViewForMultipleLines(tv);
 
     NSString *merged = [(NSString *)cur stringByAppendingString:add];
     SEL setText = @selector(setText:);
@@ -1365,6 +1417,8 @@ static void RewriteAddressIfNeeded(id page) {
     // 第二行固定给 IP —— 原版访问方式必须始终可见可用。
     NSString *backup = [NSString stringWithFormat:@"http://%@:%lu/",
                         ip, (unsigned long)livePort];
+    OkaPrepareAddressViewForMultipleLines(tv);
+
     // 主行与备用行相同时（mDNS 不可用）只写一行，避免两行一模一样。
     NSString *text = [primary isEqualToString:backup]
                    ? primary
