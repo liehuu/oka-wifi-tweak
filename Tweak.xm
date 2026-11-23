@@ -68,6 +68,7 @@
 #import <netinet/in.h>
 #import <arpa/inet.h>
 #import <net/if.h>
+#import <netdb.h>      // getaddrinfo / getnameinfo（主机名实测）
 #import <string.h>
 #import <stdio.h>        // snprintf（OkaGWSKey 拼符号名用）
 #import <stdlib.h>
@@ -406,41 +407,90 @@ static NSString *OkaLocalHostNameFromSystem(void) {
     return CFBridgingRelease(s);      // Copy 命名规则 -> 所有权交还 ARC
 }
 
-static NSString *OkaFixedHostLabel(void) {
-    if (gFixedHost.length) return gFixedHost;
+// ---- 候选主机名收集 --------------------------------------------------------
+// 为什么不能只用 UIDevice.name：iOS 16+ 在无 entitlement 时恒定返回 "iPhone"，
+// 与用户设置里的名称无关，拼出来的 <name>.local 根本解析不到本机 —— 这正是
+// 界面上出现「iphone.local」又把用户带偏的原因。
+// 为什么不能盲信 SCDynamicStoreCopyLocalHostName：它在 App 沙箱内常返回 nil
+// （符号存在但无权限），于是静默退化成上面那个错名字。
+// 所以：把所有来源都列出来，逐个用 getaddrinfo 实测，只采用真的能解析到本机的。
 
-    // ① 系统实际注册的主机名：本身已是合法 DNS 标签，原样使用最可靠。
-    NSString *sysName = OkaLocalHostNameFromSystem();
-    if (sysName.length) return sysName;
+static BOOL OkaIPv4IsLocal(const char *dotted) {
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    if (!dotted || sscanf(dotted, "%u.%u.%u.%u", &a, &b, &c, &d) != 4) return NO;
+    if (a == 10) return YES;                                // 10.0.0.0/8
+    if (a == 172 && b >= 16 && b <= 31) return YES;          // 172.16.0.0/12
+    if (a == 192 && b == 168) return YES;                    // 192.168.0.0/16
+    if (a == 169 && b == 254) return YES;                    // 自分配地址
+    if (a == 172 && b == 20 && c == 10) return YES;          // 个人热点常见段
+    return NO;
+}
 
-    // ② 退化路径：拿设备名做规范化（纯中文名会被压成纯字母片段）。
-    NSString *name = [[UIDevice currentDevice] name];
-    if (!name.length) return nil;
+// host 能否解析到「本机的局域网地址」。只认私有段，避免 127.0.0.1 造成假阳性。
+static BOOL OkaHostResolvesToSelf(NSString *host) {
+    if (!host.length) return NO;
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    int rc = getaddrinfo(host.UTF8String, NULL, &hints, &res);
+    if (rc != 0 || !res) return NO;
 
-    NSMutableString *out = [NSMutableString stringWithCapacity:name.length];
-    BOOL lastDash = YES;                      // 起始时禁止以连字符开头
-    for (NSUInteger i = 0; i < name.length; i++) {
-        unichar c = [name characterAtIndex:i];
-        if (c >= 'a' && c <= 'z') {
-            [out appendFormat:@"%c", (char)c];
-            lastDash = NO;
-        } else if (c >= 'A' && c <= 'Z') {
-            [out appendFormat:@"%c", (char)(c - 'A' + 'a')];
-            lastDash = NO;
-        } else if (c >= '0' && c <= '9') {
-            [out appendFormat:@"%c", (char)c];
-            lastDash = NO;
-        } else if (!lastDash) {
-            [out appendString:@"-"];           // 连续的非字母数字只压成一个连字符
-            lastDash = YES;
+    BOOL ok = NO;
+    for (struct addrinfo *p = res; p && !ok; p = p->ai_next) {
+        char buf[INET6_ADDRSTRLEN] = {0};
+        if (p->ai_family == AF_INET) {
+            struct sockaddr_in *sa = (struct sockaddr_in *)p->ai_addr;
+            if (!inet_ntop(AF_INET, &sa->sin_addr, buf, sizeof(buf))) continue;
+            ok = OkaIPv4IsLocal(buf);
+        } else if (p->ai_family == AF_INET6) {
+            struct sockaddr_in6 *sa6 = (struct sockaddr_in6 *)p->ai_addr;
+            if (!inet_ntop(AF_INET6, &sa6->sin6_addr, buf, sizeof(buf))) continue;
+            // 链路本地 fe80:: 与唯一本地 fc00::/fd00:: 才算本机
+            if (strncasecmp(buf, "fe80", 4) == 0 ||
+                strncasecmp(buf, "fc", 2) == 0 ||
+                strncasecmp(buf, "fd", 2) == 0) ok = YES;
         }
+    }
+    freeaddrinfo(res);
+    return ok;
+}
+
+// 把任意来源压成可用标签：mode=0 宽松（仅小写、空格→连字符，保留中文等 UTF-8），
+// mode=1 激进（只留 ASCII 字母数字，其余压成一个连字符，去首尾，截 40）。
+static NSString *OkaNormalizeHostLabel(NSString *raw, int mode) {
+    if (!raw.length) return nil;
+    NSString *s = [raw stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if ([s.lowercaseString hasSuffix:@".local"]) {
+        s = [s substringToIndex:s.length - 6];
+    }
+    if (!s.length) return nil;
+
+    if (mode == 0) {
+        NSMutableString *loose = [NSMutableString stringWithCapacity:s.length];
+        for (NSUInteger i = 0; i < s.length; i++) {
+            unichar c = [s characterAtIndex:i];
+            if (c == ' ' || c == '\t') [loose appendString:@"-"];
+            else [loose appendFormat:@"%C", c];
+        }
+        NSString *res = [loose lowercaseString];
+        return res.length ? res : nil;
+    }
+
+    NSMutableString *out = [NSMutableString stringWithCapacity:s.length];
+    BOOL lastDash = YES;
+    for (NSUInteger i = 0; i < s.length; i++) {
+        unichar c = [s characterAtIndex:i];
+        if (c >= 'a' && c <= 'z') { [out appendFormat:@"%c", (char)c]; lastDash = NO; }
+        else if (c >= 'A' && c <= 'Z') { [out appendFormat:@"%c", (char)(c - 'A' + 'a')]; lastDash = NO; }
+        else if (c >= '0' && c <= '9') { [out appendFormat:@"%c", (char)c]; lastDash = NO; }
+        else if (!lastDash) { [out appendString:@"-"]; lastDash = YES; }
     }
     while (out.length && [out hasSuffix:@"-"]) {
         [out deleteCharactersInRange:NSMakeRange(out.length - 1, 1)];
     }
-    if (!out.length) return nil;
-
-    if (out.length > 40) {                     // 留余量，避开 63 上限
+    if (out.length > 40) {
         out = [[out substringToIndex:40] mutableCopy];
         while (out.length && [out hasSuffix:@"-"]) {
             [out deleteCharactersInRange:NSMakeRange(out.length - 1, 1)];
@@ -448,6 +498,105 @@ static NSString *OkaFixedHostLabel(void) {
     }
     return out.length ? out : nil;
 }
+
+static void OkaCollectHostCandidates(NSMutableArray *out) {
+    // ① 反查本机 IP 的 PTR —— mDNSResponder 实际注册了什么名字，这里就返回什么。
+    //    这是唯一「问系统」的权威来源，放第一位；静态的读法（UIDevice.name）
+    //    在 iOS 16+ 恒为 "iPhone"，正是假名字的来源。
+    NSString *selfIP = BestLocalIPAddress(NO);
+    if (selfIP.length) {
+        struct addrinfo qh, *qres = NULL;
+        memset(&qh, 0, sizeof(qh));
+        qh.ai_family = AF_INET;
+        qh.ai_flags = AI_NUMERICHOST;
+        if (getaddrinfo(selfIP.UTF8String, NULL, &qh, &qres) == 0 && qres) {
+            char pname[NI_MAXHOST] = {0};
+            if (getnameinfo(qres->ai_addr, qres->ai_addrlen, pname, sizeof(pname),
+                            NULL, 0, NI_NAMEREQD) == 0 && pname[0]) {
+                NSString *s = [NSString stringWithUTF8String:pname];
+                if (s.length) [out addObject:s];
+            }
+            freeaddrinfo(qres);
+        }
+    }
+
+    // ② SystemConfiguration 登记值（沙箱内常为 nil）
+    NSString *sysName = OkaLocalHostNameFromSystem();
+    if (sysName.length) [out addObject:sysName];
+
+    // ③ gethostname()：部分越狱环境返回真实 LocalHostName
+    char hbuf[256] = {0};
+    if (gethostname(hbuf, sizeof(hbuf) - 1) == 0 && hbuf[0]) {
+        NSString *s = [NSString stringWithUTF8String:hbuf];
+        if (s.length) [out addObject:s];
+    }
+
+    // ④ NSProcessInfo.hostName：沙箱内多为 localhost，越狱环境可能给真名
+    NSString *pn = [[NSProcessInfo processInfo] hostName];
+    if (pn.length) [out addObject:pn];
+
+    // ⑥ 最后才是设备名（iOS 16+ 多为 "iPhone"，仅作兜底）
+    NSString *dev = [[UIDevice currentDevice] name];
+    if (dev.length) [out addObject:dev];
+}
+
+// ★ 阻塞探测：只在后台队列调用。名字不存在时 getaddrinfo 要等 mDNS 超时
+//   （数秒），所以绝不能在 App 取地址的路径上（主线程）同步执行。
+static NSString *OkaProbeHostLabelBlocking(void) {
+    NSMutableArray *cands = [NSMutableArray array];
+    OkaCollectHostCandidates(cands);
+
+    // 每个候选先按宽松规范化（保留中文）试，再按激进规范化试；
+    // 只有 getaddrinfo 真能解析到本机私有地址的才采纳。
+    for (NSString *raw in cands) {
+        for (int mode = 0; mode <= 1; mode++) {
+            NSString *label = OkaNormalizeHostLabel(raw, mode);
+            if (!label.length) continue;
+            if ([label isEqualToString:@"localhost"]) continue;
+            NSString *full = [label stringByAppendingString:@".local"];
+            if (OkaHostResolvesToSelf(full)) return label;
+        }
+    }
+    // 一个都解析不到：返回 nil，让上层退回纯 IP 地址。
+    // 宁可不显示固定地址，也不能显示一个打不开的假名字。
+    return nil;
+}
+
+static void OkaRefreshVisiblePage(void);   // 定义在页面区（探测成功后重写地址）
+static __weak id gLastPage = nil;          // 最近打开的传输页
+
+static NSString *gHostLabel = nil;          // 探测成功后的缓存
+static BOOL gHostProbeRunning = NO;
+static NSTimeInterval gHostProbedAt = 0;
+static const NSTimeInterval kHostRetryInterval = 30.0;
+
+static NSString *OkaFixedHostLabel(void) {
+    if (gFixedHost.length) return gFixedHost;      // 用户显式配置，信任
+    if (gHostLabel.length) return gHostLabel;      // 命中缓存
+
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    BOOL due = !gHostProbeRunning &&
+               (gHostProbedAt <= 0 || (now - gHostProbedAt) > kHostRetryInterval);
+    if (due) {
+        gHostProbeRunning = YES;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            NSString *found = OkaProbeHostLabelBlocking();
+            dispatch_async(dispatch_get_main_queue(), ^{
+                gHostProbeRunning = NO;
+                gHostProbedAt = [NSDate timeIntervalSinceReferenceDate];
+                if (found.length) {
+                    gHostLabel = found;
+                    // 探测成功：已打开的页面可能还写着 IP，主动刷新一次。
+                    OkaRefreshVisiblePage();
+                }
+            });
+        });
+    }
+    // 探测未完成（或失败）：返回 nil，让上层先走纯 IP。
+    // 先显示 IP 是安全的；显示一个解析不到的假名字才是坑。
+    return nil;
+}
+
 
 static NSString *OkaFixedHost(void) {
     NSString *label = OkaFixedHostLabel();
@@ -695,9 +844,11 @@ static void my_reachabilityChanged(id self, SEL _cmd, id note) {
 }
 
 // hook: viewDidLoad —— 首次进入页面时立刻放行按钮 + 校正地址
+static void AppendBackupAddressIfNeeded(id page);   // 定义在下方（备用行）
 static void (*orig_viewDidLoad)(id, SEL);
 static void my_viewDidLoad(id self, SEL _cmd) {
     if (orig_viewDidLoad) orig_viewDidLoad(self, _cmd);
+    gLastPage = self;                       // 供后台探测成功后刷新地址
     if (gEnableCellular) {
         ForceStartButtonVisible(self);
         // reachability 通知可能在 viewDidLoad 之后才到，补一个延迟兜底
@@ -712,7 +863,20 @@ static void my_viewDidLoad(id self, SEL _cmd) {
     __weak id weakPageForIP = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        if (weakPageForIP) RewriteAddressIfNeeded(weakPageForIP);
+        if (weakPageForIP) {
+            RewriteAddressIfNeeded(weakPageForIP);
+            AppendBackupAddressIfNeeded(weakPageForIP);
+        }
+    });
+    // ★ v1.3.1：直接进页面时 changeWifiTransferStateAction: 不会触发，
+    //   备用行（原版 http://IP:端口）就一直不出现 —— 用户实测只看到一行。
+    //   这里补一拍更晚的：App 可能在 1.2s 之后才把地址写进 ipAddress。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.6 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (weakPageForIP) {
+            RewriteAddressIfNeeded(weakPageForIP);
+            AppendBackupAddressIfNeeded(weakPageForIP);
+        }
     });
 }
 
@@ -1104,11 +1268,49 @@ static NSString *OkaBackupLineIfNeeded(NSString *cur) {
     NSString *ip = BestLocalIPAddress(NO);
     if (!ip.length) return nil;                       // 没有可用 IP 就不造这一行
 
+    // ★ 主行本身就是 IP（mDNS 不可用）：再加一行相同的 IP 毫无意义，
+    //   还会让用户以为「备用」是另一条路。
+    NSString *curHost = HostFromURLString(cur);
+    if (curHost.length && IsPlausibleIPAddress(curHost)) return nil;
+
     NSUInteger port = ResolveLivePort(cur, ip);
     if (!port) port = gServerPort ? gServerPort : gFixedPort;
 
     return [NSString stringWithFormat:@"\n备用：http://%@:%lu/",
             ip, (unsigned long)port];
+}
+
+// 探测成功后强制重写一次地址：此时 App 已写过 IP，普通路径（只在地址坏时改）
+// 不会覆盖它，所以这里直接按「mDNS 主行 + IP 备用行」重写。
+static void OkaRefreshVisiblePage(void) {
+    id page = gLastPage;
+    if (!page || !gEnableFixedAddr) return;
+    id tv = GetIvar(page, "ipAddress");
+    if (!tv) return;
+    NSString *ip = BestLocalIPAddress(NO);
+    if (!ip.length) return;
+    NSString *host = OkaFixedHost();
+    if (!host.length) return;
+
+    SEL getText = @selector(text);
+    if (![tv respondsToSelector:getText]) return;
+    NSString *cur = ((id (*)(id, SEL))objc_msgSend)(tv, getText);
+    if (![cur isKindOfClass:[NSString class]] || !cur.length) return;
+    NSUInteger port = ResolveLivePort(cur, ip);
+    if (!port) return;                     // 服务没在跑，不造假地址
+
+    NSString *primary = [NSString stringWithFormat:@"http://%@:%lu/",
+                         host, (unsigned long)port];
+    NSString *backup = [NSString stringWithFormat:@"http://%@:%lu/",
+                        ip, (unsigned long)port];
+    NSString *text = [primary isEqualToString:backup]
+                   ? primary
+                   : [NSString stringWithFormat:@"%@\n备用：%@", primary, backup];
+    if ([text isEqualToString:cur]) return;
+
+    SEL setText = @selector(setText:);
+    if (![tv respondsToSelector:setText]) return;
+    ((void (*)(id, SEL, id))objc_msgSend)(tv, setText, text);
 }
 
 static void AppendBackupAddressIfNeeded(id page) {
@@ -1163,7 +1365,10 @@ static void RewriteAddressIfNeeded(id page) {
     // 第二行固定给 IP —— 原版访问方式必须始终可见可用。
     NSString *backup = [NSString stringWithFormat:@"http://%@:%lu/",
                         ip, (unsigned long)livePort];
-    NSString *text = [NSString stringWithFormat:@"%@\n备用：%@", primary, backup];
+    // 主行与备用行相同时（mDNS 不可用）只写一行，避免两行一模一样。
+    NSString *text = [primary isEqualToString:backup]
+                   ? primary
+                   : [NSString stringWithFormat:@"%@\n备用：%@", primary, backup];
 
     SEL setText = @selector(setText:);
     if ([tv respondsToSelector:setText]) {
@@ -1195,6 +1400,15 @@ static void my_changeWiFiState(id self, SEL _cmd, id sender) {
         }
     });
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.8 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (weakSelf) {
+            RewriteAddressIfNeeded(weakSelf);
+            AppendBackupAddressIfNeeded(weakSelf);
+        }
+    });
+    // ★ v1.3.1：服务器启动是异步的，App 有时在 2s 之后才写 ipAddress，
+    //   把已经补好的两行覆盖回一行。第三拍专治这个。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.2 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         if (weakSelf) {
             RewriteAddressIfNeeded(weakSelf);
