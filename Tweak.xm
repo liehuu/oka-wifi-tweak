@@ -71,6 +71,61 @@
 #import <netdb.h>      // getaddrinfo / getnameinfo（主机名实测）
 #import <string.h>
 #import <stdio.h>        // snprintf（OkaGWSKey 拼符号名用）
+#import <stdarg.h>      // va_list（追踪函数用）
+
+// ---- 追踪（写文件，Filza 可读；不调用任何控制台输出宏）------------------
+static void OkaTrace(NSString *fmt, ...) {
+    static unsigned long calls = 0;
+    if (++calls > 400) return;                 // 上限保护，避免无限增长
+    va_list ap;
+    va_start(ap, fmt);
+    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
+    va_end(ap);
+    NSString *line = [NSString stringWithFormat:@"[%.3f] %@\n",
+                      [[NSDate date] timeIntervalSince1970], msg];
+    NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
+    NSArray *paths = @[[NSTemporaryDirectory() stringByAppendingPathComponent:@"oka_wifi_trace.txt"],
+                       @"/tmp/oka_wifi_trace.txt"];
+    for (NSString *path in paths) {
+        NSFileManager *fm = [NSFileManager defaultManager];
+        if (![fm fileExistsAtPath:path]) {
+            [fm createFileAtPath:path contents:data attributes:nil];
+            continue;
+        }
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (!fh) continue;
+        @try {
+            [fh seekToEndOfFile];
+            [fh writeData:data];
+            [fh closeFile];
+        } @catch (__unused NSException *e) {}
+    }
+}
+
+// 把被约束钉死的高度放开到至少 need（改常量而不是改 frame ——
+// 改 frame 会在下一次 layout 被 Auto Layout 复位）。
+static void OkaRelaxHeight(UIView *host, CGFloat need) {
+    if (!host || !host.superview) return;
+    BOOL hit = NO;
+    for (NSLayoutConstraint *c in host.constraints) {
+        if (c.firstAttribute == NSLayoutAttributeHeight && c.constant < need) {
+            c.constant = need;
+            hit = YES;
+        }
+    }
+    for (NSLayoutConstraint *c in host.superview.constraints) {
+        if (c.firstItem != host && c.secondItem != host) continue;
+        if (c.firstAttribute != NSLayoutAttributeHeight &&
+            c.secondAttribute != NSLayoutAttributeHeight) continue;
+        if (c.constant < need) {
+            c.constant = need;
+            hit = YES;
+        }
+    }
+    if (hit) [host.superview layoutIfNeeded];
+    OkaTrace(@"relaxHeight host=%.0fx%.0f need=%.0f hit=%d",
+            CGRectGetWidth(host.bounds), CGRectGetHeight(host.bounds), need, (int)hit);
+}
 #import <stdlib.h>
 #import <unistd.h>
 #import <dlfcn.h>
@@ -905,8 +960,16 @@ static void OkaUpdateBackupLabel(UIView *host, NSString *text) {
     l.text = text;
 
     CGFloat h = 18.0;
+    // 先把被钉死的高度放开到两行（改约束常量，layout 不会复位）
+    OkaRelaxHeight(host, h * 2.0 + 4.0);
+
     CGRect hr = host.frame;
     CGFloat below = CGRectGetHeight(parent.bounds) - CGRectGetMaxY(hr) - 2.0;
+    OkaTrace(@"label: host=%@ %.0fx%.0f parent=%@ %.0fx%.0f below=%.0f",
+             NSStringFromClass([host class]),
+             CGRectGetWidth(host.bounds), CGRectGetHeight(host.bounds),
+             NSStringFromClass([parent class]),
+             CGRectGetWidth(parent.bounds), CGRectGetHeight(parent.bounds), below);
 
     if (below >= h) {
         // 下方有空间：贴在原控件正下方（最理想，不遮挡任何东西）
@@ -936,6 +999,9 @@ static void OkaUpdateBackupLabel(UIView *host, NSString *text) {
                              CGRectGetWidth(host.bounds), h);
     }
     [l.superview bringSubviewToFront:l];   // l 可能挂在 parent 或 host 上
+    OkaTrace(@"label placed: super=%@ frame=%@ textLen=%lu",
+             NSStringFromClass([l.superview class]), NSStringFromCGRect(l.frame),
+             (unsigned long)l.text.length);
 }
 
 static BOOL OkaPrepareAddressViewForMultipleLines(id tv) {
@@ -1402,6 +1468,8 @@ static NSString *OkaBackupURLIfNeeded(NSString *cur) {
 // 不会覆盖它，所以这里直接按「mDNS 主行 + IP 备用行」重写。
 static void OkaRefreshVisiblePage(void) {
     id page = gLastPage;
+    OkaTrace(@"refresh: page=%@ addr=%d", page ? NSStringFromClass([page class]) : @"(nil)",
+             (int)gEnableFixedAddr);
     if (!page || !gEnableFixedAddr) return;
     id tv = GetIvar(page, "ipAddress");
     if (!tv) return;
@@ -1454,6 +1522,9 @@ static void AppendBackupAddressIfNeeded(id page) {
     }
 
     NSString *backup = OkaBackupURLIfNeeded((NSString *)cur);
+    OkaTrace(@"append: cls=%@ cur=%@ ip=%@ backup=%@",
+             NSStringFromClass([tv class]), cur, BestLocalIPAddress(NO),
+             backup ? backup : @"(nil)");
     OkaUpdateBackupLabel((UIView *)tv, backup);
 }
 
