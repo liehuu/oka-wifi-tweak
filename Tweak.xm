@@ -71,7 +71,6 @@
 #import <netdb.h>      // getaddrinfo / getnameinfo（主机名实测）
 #import <string.h>
 #import <stdio.h>        // snprintf（OkaGWSKey 拼符号名用）
-#import <stdarg.h>      // va_list（OkaDiag 诊断日志）
 #import <stdlib.h>
 #import <unistd.h>
 #import <dlfcn.h>
@@ -598,7 +597,6 @@ static NSString *OkaFixedHostLabel(void) {
     return nil;
 }
 
-
 static NSString *OkaFixedHost(void) {
     NSString *label = OkaFixedHostLabel();
     if (!label.length) return nil;
@@ -862,37 +860,6 @@ static void my_reachabilityChanged(id self, SEL _cmd, id note) {
     });
 }
 
-// hook: viewDidLoad —— 首次进入页面时立刻放行按钮 + 校正地址
-// ---- 诊断日志（v1.3.3）---------------------------------------------------
-// 真机上看不到 NSLog 时唯一的取证手段：/tmp/oka_wifi_diag.txt（Filza 可读）。
-static void OkaDiag(NSString *fmt, ...) {
-    va_list ap;
-    va_start(ap, fmt);
-    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
-    va_end(ap);
-    NSString *line = [NSString stringWithFormat:@"[%@] %@\n",
-                      [NSDate date], msg];
-    NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
-    NSArray *paths = @[@"/tmp/oka_wifi_diag.txt",
-                       [NSTemporaryDirectory() stringByAppendingPathComponent:@"oka_wifi_diag.txt"]];
-    for (NSString *path in paths) {
-        NSFileManager *fm = [NSFileManager defaultManager];
-        if (![fm fileExistsAtPath:path]) {
-            [fm createFileAtPath:path contents:data attributes:nil];
-            continue;
-        }
-        NSDictionary *attrs = [fm attributesOfItemAtPath:path error:NULL];
-        if ([attrs fileSize] > 256 * 1024) continue;   // 防止无限增长
-        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
-        if (!fh) continue;
-        @try {
-            [fh seekToEndOfFile];
-            [fh writeData:data];
-            [fh closeFile];
-        } @catch (__unused NSException *e) {}
-    }
-}
-
 // ★★ 地址控件可能是 UILabel，也可能是 UITextView（BNHttpServerPage.nib 里两者都在）。
 //    UILabel 默认 numberOfLines = 1 —— 两行文本写进去也只画第一行，
 //    这正是 v1.3.0 / v1.3.1「备用行写了却看不见」的真正原因。
@@ -955,7 +922,6 @@ static void OkaUpdateBackupLabel(UIView *host, NSString *text) {
         }
         l.frame = CGRectMake(CGRectGetMinX(hr), CGRectGetMaxY(hr) + 1.0,
                              CGRectGetWidth(hr), h);
-        OkaDiag(@"backup label -> below host (%.0fx%.0f)", CGRectGetWidth(hr), h);
     } else {
         // 下方没空间：贴在原控件内部底部，加半透明底衬保证可读
         if (l.superview != host) {
@@ -968,10 +934,8 @@ static void OkaUpdateBackupLabel(UIView *host, NSString *text) {
         l.clipsToBounds = YES;
         l.frame = CGRectMake(0, MAX(0.0, CGRectGetHeight(host.bounds) - h),
                              CGRectGetWidth(host.bounds), h);
-        OkaDiag(@"backup label -> inside host (parentH=%.0f hostMaxY=%.0f)",
-                CGRectGetHeight(parent.bounds), CGRectGetMaxY(hr));
     }
-    [parent bringSubviewToFront:l];
+    [l.superview bringSubviewToFront:l];   // l 可能挂在 parent 或 host 上
 }
 
 static BOOL OkaPrepareAddressViewForMultipleLines(id tv) {
@@ -1477,8 +1441,6 @@ static void AppendBackupAddressIfNeeded(id page) {
     NSString *cur = ((id (*)(id, SEL))objc_msgSend)(tv, sel);
     if (![cur isKindOfClass:[NSString class]]) return;
 
-    OkaDiag(@"append: cls=%@ text=%@", NSStringFromClass([tv class]),
-            [cur stringByReplacingOccurrencesOfString:@"\n" withString:@"\\n"]);
 
     // 旧版本可能已经把两行写进去了：主行先裁回首行，避免控件只显示半截。
     NSRange nl = [(NSString *)cur rangeOfString:@"\n"];
