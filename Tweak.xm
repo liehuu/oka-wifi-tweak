@@ -71,6 +71,7 @@
 #import <netdb.h>      // getaddrinfo / getnameinfo（主机名实测）
 #import <string.h>
 #import <stdio.h>        // snprintf（OkaGWSKey 拼符号名用）
+#import <stdarg.h>      // va_list（OkaDiag 诊断日志）
 #import <stdlib.h>
 #import <unistd.h>
 #import <dlfcn.h>
@@ -862,10 +863,117 @@ static void my_reachabilityChanged(id self, SEL _cmd, id note) {
 }
 
 // hook: viewDidLoad —— 首次进入页面时立刻放行按钮 + 校正地址
+// ---- 诊断日志（v1.3.3）---------------------------------------------------
+// 真机上看不到 NSLog 时唯一的取证手段：/tmp/oka_wifi_diag.txt（Filza 可读）。
+static void OkaDiag(NSString *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
+    va_end(ap);
+    NSString *line = [NSString stringWithFormat:@"[%@] %@\n",
+                      [NSDate date], msg];
+    NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
+    NSArray *paths = @[@"/tmp/oka_wifi_diag.txt",
+                       [NSTemporaryDirectory() stringByAppendingPathComponent:@"oka_wifi_diag.txt"]];
+    for (NSString *path in paths) {
+        NSFileManager *fm = [NSFileManager defaultManager];
+        if (![fm fileExistsAtPath:path]) {
+            [fm createFileAtPath:path contents:data attributes:nil];
+            continue;
+        }
+        NSDictionary *attrs = [fm attributesOfItemAtPath:path error:NULL];
+        if ([attrs fileSize] > 256 * 1024) continue;   // 防止无限增长
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (!fh) continue;
+        @try {
+            [fh seekToEndOfFile];
+            [fh writeData:data];
+            [fh closeFile];
+        } @catch (__unused NSException *e) {}
+    }
+}
+
 // ★★ 地址控件可能是 UILabel，也可能是 UITextView（BNHttpServerPage.nib 里两者都在）。
 //    UILabel 默认 numberOfLines = 1 —— 两行文本写进去也只画第一行，
 //    这正是 v1.3.0 / v1.3.1「备用行写了却看不见」的真正原因。
 //    这里统一放开行数，并在高度不足时按内容撑高（只动自己的 frame）。
+// ===== 备用地址副标题（v1.3.3）===========================================
+// 原控件的行数/高度不受我们控制（nib 里可能是 UILabel + numberOfLines=1，
+// 或被 Auto Layout 钉成一行高）。与其继续跟它搏斗，不如自己加一个副标题：
+// 位置、高度都由我们算，主行文案保持单行 —— 复制与二维码完全不受影响。
+static UILabel *gOkaBackupLabel = nil;
+
+static UILabel *OkaBackupLabelShared(UIView *host __unused) {
+    if (!gOkaBackupLabel) {
+        UILabel *l = [[UILabel alloc] initWithFrame:CGRectZero];
+        l.font = [UIFont systemFontOfSize:13.0];
+        if (@available(iOS 13.0, *)) {
+            l.textColor = [UIColor secondaryLabelColor];
+        } else {
+            l.textColor = [UIColor grayColor];
+        }
+        l.textAlignment = NSTextAlignmentCenter;
+        l.numberOfLines = 1;
+        l.adjustsFontSizeToFitWidth = YES;
+        l.minimumScaleFactor = 0.6;
+        l.userInteractionEnabled = NO;
+        l.backgroundColor = [UIColor clearColor];
+        gOkaBackupLabel = l;
+    }
+    return gOkaBackupLabel;
+}
+
+// text 为空 => 隐藏副标题（例如 mDNS 不可用、主行本身就是 IP）
+static void OkaUpdateBackupLabel(UIView *host, NSString *text) {
+    if (!host) return;
+    UIView *parent = host.superview;
+    if (!parent) return;
+    UILabel *l = OkaBackupLabelShared(host);
+
+    if (!text.length) {
+        l.hidden = YES;
+        return;
+    }
+    l.hidden = NO;
+    l.text = text;
+
+    CGFloat h = 18.0;
+    CGRect hr = host.frame;
+    CGFloat below = CGRectGetHeight(parent.bounds) - CGRectGetMaxY(hr) - 2.0;
+
+    if (below >= h) {
+        // 下方有空间：贴在原控件正下方（最理想，不遮挡任何东西）
+        if (l.superview != parent) {
+            [l removeFromSuperview];
+            [parent addSubview:l];
+        }
+        l.backgroundColor = [UIColor clearColor];
+        if (@available(iOS 13.0, *)) {
+            l.textColor = [UIColor secondaryLabelColor];
+        } else {
+            l.textColor = [UIColor grayColor];
+        }
+        l.frame = CGRectMake(CGRectGetMinX(hr), CGRectGetMaxY(hr) + 1.0,
+                             CGRectGetWidth(hr), h);
+        OkaDiag(@"backup label -> below host (%.0fx%.0f)", CGRectGetWidth(hr), h);
+    } else {
+        // 下方没空间：贴在原控件内部底部，加半透明底衬保证可读
+        if (l.superview != host) {
+            [l removeFromSuperview];
+            [host addSubview:l];
+        }
+        l.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.6];
+        l.textColor = [UIColor whiteColor];
+        l.layer.cornerRadius = 4.0;
+        l.clipsToBounds = YES;
+        l.frame = CGRectMake(0, MAX(0.0, CGRectGetHeight(host.bounds) - h),
+                             CGRectGetWidth(host.bounds), h);
+        OkaDiag(@"backup label -> inside host (parentH=%.0f hostMaxY=%.0f)",
+                CGRectGetHeight(parent.bounds), CGRectGetMaxY(hr));
+    }
+    [parent bringSubviewToFront:l];
+}
+
 static BOOL OkaPrepareAddressViewForMultipleLines(id tv) {
     if (!tv) return NO;
     if ([tv isKindOfClass:[UILabel class]]) {
@@ -1306,26 +1414,24 @@ static BOOL AddressLooksBroken(NSString *s) {
 //  复制时由 URLTextFromPage 只取第一行，不会把"备用："带进剪贴板。
 
 // 需要追加时返回要拼的字符串；不需要则返回 nil（幂等，可反复调用）。
-static NSString *OkaBackupLineIfNeeded(NSString *cur) {
+// 需要时返回「纯备用 URL」；不需要返回 nil。
+// 注意：不再返回带换行/「备用：」前缀的整段文本 —— 那是 v1.3.0~1.3.2 的做法，
+// 依赖原控件能画两行，实测行不通。
+static NSString *OkaBackupURLIfNeeded(NSString *cur) {
     if (!cur.length) return nil;
-    if (AddressLooksBroken(cur)) return nil;          // 坏地址交给 RewriteAddressIfNeeded
-    // 已经有第二行就别再追加（0.6s / 1.8s 两次调度都会走到这里）
-    if ([cur rangeOfString:@"\n"].location != NSNotFound) return nil;
-    if ([cur rangeOfString:@"备用"].location != NSNotFound) return nil;
+    if (AddressLooksBroken(cur)) return nil;
 
     NSString *ip = BestLocalIPAddress(NO);
-    if (!ip.length) return nil;                       // 没有可用 IP 就不造这一行
+    if (!ip.length) return nil;
 
-    // ★ 主行本身就是 IP（mDNS 不可用）：再加一行相同的 IP 毫无意义，
-    //   还会让用户以为「备用」是另一条路。
+    // 主行本身就是 IP（mDNS 不可用）：再显示一条相同的 IP 没意义
     NSString *curHost = HostFromURLString(cur);
     if (curHost.length && IsPlausibleIPAddress(curHost)) return nil;
 
     NSUInteger port = ResolveLivePort(cur, ip);
     if (!port) port = gServerPort ? gServerPort : gFixedPort;
 
-    return [NSString stringWithFormat:@"\n备用：http://%@:%lu/",
-            ip, (unsigned long)port];
+    return [NSString stringWithFormat:@"http://%@:%lu/", ip, (unsigned long)port];
 }
 
 // 探测成功后强制重写一次地址：此时 App 已写过 IP，普通路径（只在地址坏时改）
@@ -1352,10 +1458,9 @@ static void OkaRefreshVisiblePage(void) {
     NSString *backup = [NSString stringWithFormat:@"http://%@:%lu/",
                         ip, (unsigned long)port];
     OkaPrepareAddressViewForMultipleLines(tv);
-
-    NSString *text = [primary isEqualToString:backup]
-                   ? primary
-                   : [NSString stringWithFormat:@"%@\n备用：%@", primary, backup];
+    OkaUpdateBackupLabel((UIView *)tv,
+                         [primary isEqualToString:backup] ? nil : backup);
+    NSString *text = primary;
     if ([text isEqualToString:cur]) return;
 
     SEL setText = @selector(setText:);
@@ -1366,22 +1471,28 @@ static void OkaRefreshVisiblePage(void) {
 static void AppendBackupAddressIfNeeded(id page) {
     if (!page) return;
     id tv = GetIvar(page, "ipAddress");
-    if (!tv) return;
+    if (!tv || ![tv isKindOfClass:[UIView class]]) return;
     SEL sel = @selector(text);
     if (![tv respondsToSelector:sel]) return;
     NSString *cur = ((id (*)(id, SEL))objc_msgSend)(tv, sel);
     if (![cur isKindOfClass:[NSString class]]) return;
 
-    NSString *add = OkaBackupLineIfNeeded((NSString *)cur);
-    if (!add.length) return;
+    OkaDiag(@"append: cls=%@ text=%@", NSStringFromClass([tv class]),
+            [cur stringByReplacingOccurrencesOfString:@"\n" withString:@"\\n"]);
 
-    OkaPrepareAddressViewForMultipleLines(tv);
-
-    NSString *merged = [(NSString *)cur stringByAppendingString:add];
-    SEL setText = @selector(setText:);
-    if ([tv respondsToSelector:setText]) {
-        ((void (*)(id, SEL, id))objc_msgSend)(tv, setText, merged);
+    // 旧版本可能已经把两行写进去了：主行先裁回首行，避免控件只显示半截。
+    NSRange nl = [(NSString *)cur rangeOfString:@"\n"];
+    if (nl.location != NSNotFound) {
+        NSString *first = [(NSString *)cur substringToIndex:nl.location];
+        SEL setText = @selector(setText:);
+        if (first.length && [tv respondsToSelector:setText]) {
+            ((void (*)(id, SEL, id))objc_msgSend)(tv, setText, first);
+            cur = first;
+        }
     }
+
+    NSString *backup = OkaBackupURLIfNeeded((NSString *)cur);
+    OkaUpdateBackupLabel((UIView *)tv, backup);
 }
 
 // 在 App 写完地址之后调用（v1.0.2 起降为**兜底**，主力是 my_serverURL）。
@@ -1418,11 +1529,10 @@ static void RewriteAddressIfNeeded(id page) {
     NSString *backup = [NSString stringWithFormat:@"http://%@:%lu/",
                         ip, (unsigned long)livePort];
     OkaPrepareAddressViewForMultipleLines(tv);
-
-    // 主行与备用行相同时（mDNS 不可用）只写一行，避免两行一模一样。
-    NSString *text = [primary isEqualToString:backup]
-                   ? primary
-                   : [NSString stringWithFormat:@"%@\n备用：%@", primary, backup];
+    // 备用地址交给自建副标题，主行只写一行（控件可能只画一行高）
+    OkaUpdateBackupLabel((UIView *)tv,
+                         [primary isEqualToString:backup] ? nil : backup);
+    NSString *text = primary;
 
     SEL setText = @selector(setText:);
     if ([tv respondsToSelector:setText]) {
