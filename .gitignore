@@ -16,6 +16,10 @@ obj/
 __pycache__/
 *.pyc
 
+# 改源码前的本地备份（Tweak.xm.bak-v1xx 这类）。
+# 不进仓库：它们是逐版本的临时副本，提交上去只会让 diff 噪音变大。
+Tweak.xm.bak*
+
 # 系统
 .DS_Store
 Thumbs.db

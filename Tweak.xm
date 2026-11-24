@@ -154,6 +154,17 @@ static NSString  *gFixedHost  = nil;    // 自定义主机名前缀（留空 = �
 static NSString  *gWebUser     = nil;   // 认证用户名（默认 oka）
 static NSString  *gWebPassword = nil;   // 认证密码（空 = 不启用）
 
+// ★ v1.6.0：在 App 内提供设置入口（不必再去 Filza 改 plist）。
+//   默认开。想彻底隐藏入口时在偏好里写 EnableWebPasswordUI = false。
+static BOOL gEnableWebPasswordUI = YES;
+
+// App 内保存设置用 NSUserDefaults（沙箱内，一定可写）。
+//   kPrefsPath 在 /var/mobile/Library/Preferences/，位于 App 沙箱之外，
+//   写入多半被拒，因此只作兼容读取与 best-effort 写入。
+static NSString *const kOkaWebUserKey = @"OkaWebUsername";
+static NSString *const kOkaWebPassKey = @"OkaWebPassword";
+static NSString *const kOkaWebSetKey  = @"OkaWebAuthConfigured";
+
 static void LoadPrefs(void) {
     NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
     if (!d) return;
@@ -177,6 +188,17 @@ static void LoadPrefs(void) {
     if ([d[@"WebPassword"] isKindOfClass:[NSString class]] && [d[@"WebPassword"] length]) {
         gWebPassword = d[@"WebPassword"];
     }
+
+    // ★ v1.6.0：App 内设置存在 NSUserDefaults。
+    //   只有存在 OkaWebAuthConfigured 标记时才认它 —— 否则用户点了"关闭密码"、
+    //   把值写成空串之后，上面从 plist 读到的旧密码会把它复活。
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    if ([ud boolForKey:kOkaWebSetKey]) {
+        NSString *u = [ud stringForKey:kOkaWebUserKey];
+        NSString *p = [ud stringForKey:kOkaWebPassKey];
+        gWebUser     = u.length ? u : nil;
+        gWebPassword = p.length ? p : nil;
+    }
 }
 
 // 保存一份强引用，避免"无界面实例"被提前释放导致 httpServer 消失
@@ -192,74 +214,6 @@ static void RetainObject(id o) {
 // port / isRunning 更新，比 startWithPort: hook 可靠（App 可能走 startWithOptions:）。
 static NSUInteger gServerPort = 0;
 static BOOL gServerRunning = NO;
-
-// ===========================================================================
-//  〇、后台保活
-// ===========================================================================
-//  App 的 UIBackgroundModes 只有 audio / fetch，没有 voip。
-//  从桌面快捷方式开启后如果直接切后台，系统几秒内就挂起进程，
-//  GCDWebServer 的监听 socket 也随之停摆 —— 电脑就连不上了。
-//  这里用"后台播一段静音音频"把它钉在活跃态。App 包里自带 "Happy Dreams.mp3"，
-//  直接复用它（不用往包里加文件），拿不到就静默跳过。
-// ===========================================================================
-static void *gKeepAlivePlayer = NULL;   // AVAudioPlayer*
-static BOOL gKeepAliveOn = NO;
-
-static void StartBackgroundKeepAlive(void) {
-    if (gKeepAliveOn) return;
-
-    Class avSessionCls = NSClassFromString(@"AVAudioSession");
-    if (avSessionCls) {
-        id session = ((id (*)(id, SEL))objc_msgSend)((id)avSessionCls,
-                                                    @selector(sharedInstance));
-        if (session) {
-            typedef BOOL (*SetCat_t)(id, SEL, NSString *, NSError **);
-            typedef BOOL (*SetActive_t)(id, SEL, BOOL, NSUInteger, NSError **);
-            ((SetCat_t)(void *)objc_msgSend)(session,
-                NSSelectorFromString(@"setCategory:error:"),
-                @"AVAudioSessionCategoryPlayback", NULL);
-            // AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation = 1
-            ((SetActive_t)(void *)objc_msgSend)(session,
-                NSSelectorFromString(@"setActive:withOptions:error:"), YES, 1, NULL);
-        }
-    }
-
-    Class playerCls = NSClassFromString(@"AVAudioPlayer");
-    if (!playerCls) { return; }
-
-    NSString *path = [[NSBundle mainBundle] pathForResource:@"Happy Dreams" ofType:@"mp3"];
-    id player = nil;
-    if (path) {
-        NSURL *u = [NSURL fileURLWithPath:path];
-        id alloced = ((id (*)(id, SEL))objc_msgSend)((id)playerCls, @selector(alloc));
-        player = ((id (*)(id, SEL, id, NSError **))objc_msgSend)(
-            alloced, @selector(initWithContentsOfURL:error:), u, NULL);
-    }
-    if (player) {
-        // numberOfLoops = -1 无限循环；volume = 0 静音
-        ((void (*)(id, SEL, NSInteger))objc_msgSend)(player, @selector(setNumberOfLoops:), -1);
-        ((void (*)(id, SEL, float))objc_msgSend)(player, @selector(setVolume:), 0.0f);
-        BOOL ok = ((BOOL (*)(id, SEL))objc_msgSend)(player, @selector(play));
-        gKeepAlivePlayer = (__bridge_retained void *)player;
-        gKeepAliveOn = ok;
-    }
-}
-
-static void StopBackgroundKeepAlive(void) {
-    if (gKeepAlivePlayer) {
-        id p = (__bridge id)gKeepAlivePlayer;
-        ((void (*)(id, SEL))objc_msgSend)(p, @selector(stop));
-        // ★ 与 (__bridge_retained void *) 成对的释放必须用 CFBridgingRelease / CFRelease。
-        //   这里原来写 CFRelease(gKeepAlivePlayer)，参数是 void*：
-        //   ARC 下 CFRelease 签名是 void CFRelease(CFTypeRef)，CFTypeRef 为 const void*，
-        //   显式传 void* 会被判 "incompatible pointer types" 直接报错。
-        //   CFBridgingRelease 接收 void* 并转成 CFTypeRef 再 release，
-        //   语义就是「把 +1 的引用交还给 ARC」，正好对应 __bridge_retained。
-        CFRelease((CFTypeRef)gKeepAlivePlayer);
-        gKeepAlivePlayer = NULL;
-    }
-    gKeepAliveOn = NO;
-}
 
 // ===========================================================================
 //  一、功能 2b：热点 IP 修正
@@ -850,6 +804,8 @@ static void ForceStartButtonVisible(id page) {
 // 实现在文件后部的「UI 层地址修正」段；本文件的几个 hook 都在它之前，
 // 所以前置声明必须放在最靠前的那个调用点（my_reachabilityChanged）之前。
 static void RewriteAddressIfNeeded(id page);
+// v1.6.0：密码设置入口，实现在文件后部（设置界面段）。
+static void OkaAttachWebAuthEntry(id page);
 
 // hook: reachabilityChangedWithNote:
 static void (*orig_reachabilityChanged)(id, SEL, id);
@@ -876,6 +832,12 @@ static void (*orig_viewDidLoad)(id, SEL);
 static void my_viewDidLoad(id self, SEL _cmd) {
     if (orig_viewDidLoad) orig_viewDidLoad(self, _cmd);
     gLastPage = self;                       // 供后台探测成功后刷新地址
+
+    // ★ v1.6.0：密码设置入口。刻意放在 gEnableCellular 判断之外 ——
+    //   关掉解蜂窝也要能改密码。
+    if (gEnableWebPasswordUI) {
+        OkaAttachWebAuthEntry(self);
+    }
     if (gEnableCellular) {
         ForceStartButtonVisible(self);
         // reachability 通知可能在 viewDidLoad 之后才到，补一个延迟兜底
@@ -1124,6 +1086,178 @@ static void OkaApplyWebAuth(id server, NSMutableDictionary *opts) {
     opts[methodKey] = basicVal;
     opts[realmKey]  = @"Oka Files";
     opts[acctKey]   = @{ user: gWebPassword };
+}
+
+// ===========================================================================
+//  ★ v1.6.0 网页访问密码：App 内设置
+// ===========================================================================
+//  存在 NSUserDefaults（App 沙箱内，必定可写），plist 只作兼容读取。
+//  标记位 OkaWebAuthConfigured 一旦置位，"空密码"就是权威状态，
+//  不会被 plist 里的旧值覆盖 —— 否则"关闭密码"会失效。
+static void OkaSaveWebAuth(NSString *user, NSString *pass) {
+    gWebUser     = user.length ? user : nil;
+    gWebPassword = pass.length ? pass : nil;
+
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    [ud setObject:(user.length ? user : @"") forKey:kOkaWebUserKey];
+    [ud setObject:(pass.length ? pass : @"") forKey:kOkaWebPassKey];
+    [ud setBool:YES forKey:kOkaWebSetKey];
+    [ud synchronize];
+
+    // best-effort：沙箱外路径写不进去不影响功能，失败就是静默。
+    NSMutableDictionary *pl =
+        [NSMutableDictionary dictionaryWithContentsOfFile:kPrefsPath];
+    if (!pl) pl = [NSMutableDictionary dictionary];
+    if (pass.length) pl[@"WebPassword"] = pass;
+    else             [pl removeObjectForKey:@"WebPassword"];
+    if (user.length) pl[@"WebUsername"] = user;
+    else             [pl removeObjectForKey:@"WebUsername"];
+    [pl writeToFile:kPrefsPath atomically:YES];
+}
+
+// 轻提示：2.2 秒自动消失，不要求用户点确认。
+static void OkaToast(NSString *msg) {
+    UIWindow *win = KeyWindow();
+    UIViewController *vc = win.rootViewController;
+    while (vc.presentedViewController) vc = vc.presentedViewController;
+    if (!vc) return;
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:nil
+                                                              message:msg
+                                                       preferredStyle:UIAlertControllerStyleAlert];
+    [vc presentViewController:a animated:YES completion:nil];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.2 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [a dismissViewControllerAnimated:YES completion:nil];
+    });
+}
+
+static void OkaPresentWebAuthSettings(id page) {
+    UIViewController *vc = (UIViewController *)page;
+    if (!vc) return;
+    while (vc.presentedViewController) vc = vc.presentedViewController;
+
+    BOOL on = (gWebPassword.length > 0);
+    NSString *curUser = gWebUser.length ? gWebUser : @"oka";
+    NSString *msg = on
+        ? [NSString stringWithFormat:
+           @"当前已启用，用户名：%@\n\n改完要重新开启 WiFi 传输才生效。", curUser]
+        : @"当前未启用 —— 同一 WiFi 下谁都能直接打开网页。\n\n"
+          @"设置后要重新开启 WiFi 传输才生效。";
+
+    UIAlertController *ac =
+        [UIAlertController alertControllerWithTitle:@"网页访问密码"
+                                            message:msg
+                                     preferredStyle:UIAlertControllerStyleAlert];
+
+    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"用户名（留空 = oka）";
+        tf.text = on ? curUser : @"";
+        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        tf.autocorrectionType = UITextAutocorrectionTypeNo;
+        tf.clearButtonMode = UITextFieldViewModeWhileEditing;
+    }];
+    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"密码";
+        tf.secureTextEntry = YES;
+        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        tf.autocorrectionType = UITextAutocorrectionTypeNo;
+    }];
+
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消"
+                                          style:UIAlertActionStyleCancel
+                                        handler:nil]];
+    if (on) {
+        [ac addAction:[UIAlertAction actionWithTitle:@"关闭密码"
+                                               style:UIAlertActionStyleDestructive
+                                             handler:^(UIAlertAction *a) {
+            OkaSaveWebAuth(nil, nil);
+            OkaToast(@"已关闭密码。重新开启 WiFi 传输后生效。");
+        }]];
+    }
+
+    __weak UIAlertController *weakAC = ac;
+    [ac addAction:[UIAlertAction actionWithTitle:@"保存"
+                                          style:UIAlertActionStyleDefault
+                                        handler:^(UIAlertAction *a) {
+        UIAlertController *s = weakAC;
+        if (!s) return;
+        NSString *u = s.textFields.count > 0 ? s.textFields[0].text : @"";
+        NSString *p = s.textFields.count > 1 ? s.textFields[1].text : @"";
+        if (!p.length) {
+            OkaToast(@"密码不能为空。要取消密码请用「关闭密码」。");
+            return;
+        }
+        OkaSaveWebAuth(u.length ? u : @"oka", p);
+        OkaToast(@"已保存。重新开启 WiFi 传输后生效。");
+    }]];
+
+    [vc presentViewController:ac animated:YES completion:nil];
+}
+
+// 块式 target：页面是 Swift 类，不能靠给它加方法挂 action。
+@interface OkaBlockTarget : NSObject
+@property (nonatomic, copy) void (^handler)(void);
+@end
+
+@implementation OkaBlockTarget
+- (void)okaTap:(id)sender {
+    if (self.handler) self.handler();
+}
+@end
+
+static const void *kOkaAuthTapKey      = &kOkaAuthTapKey;
+static const void *kOkaAuthAttachedKey = &kOkaAuthAttachedKey;
+
+// 挂入口。两种位置，按页面实际结构选：
+//   ① 有导航栏且右上角本来就是空的 → 右上角按钮（零布局冲突，最稳）
+//   ② 否则 → 右下角浮动按钮（不占滚动内容，浮在页面之上）
+// 用关联对象做幂等标记：viewDidLoad 可能被多次调用，重复加会叠出一堆按钮。
+static void OkaAttachWebAuthEntry(id page) {
+    if (!page) return;
+    if (objc_getAssociatedObject(page, kOkaAuthAttachedKey)) return;
+    objc_setAssociatedObject(page, kOkaAuthAttachedKey, @YES,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    OkaBlockTarget *target = [OkaBlockTarget new];
+    __weak id weakPage = page;
+    target.handler = ^{ OkaPresentWebAuthSettings(weakPage); };
+    objc_setAssociatedObject(page, kOkaAuthTapKey, target,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    UIViewController *vc = (UIViewController *)page;
+
+    // ① 右上角：只有原本为空时才占用，避免覆盖 App 自己的按钮
+    if (vc.navigationController && vc.navigationItem.rightBarButtonItem == nil) {
+        UIBarButtonItem *item =
+            [[UIBarButtonItem alloc] initWithTitle:@"🔒"
+                                             style:UIBarButtonItemStylePlain
+                                            target:target
+                                            action:@selector(okaTap:)];
+        vc.navigationItem.rightBarButtonItem = item;
+        return;
+    }
+
+    // ② 浮动按钮
+    UIView *view = vc.view;
+    if (!view) return;
+    UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
+    [btn setTitle:@"🔒 密码" forState:UIControlStateNormal];
+    btn.titleLabel.font = [UIFont systemFontOfSize:12.0];
+    btn.backgroundColor = [UIColor colorWithWhite:0.5 alpha:0.18];
+    btn.layer.cornerRadius = 13.0;
+    btn.contentEdgeInsets = UIEdgeInsetsMake(4.0, 10.0, 4.0, 10.0);
+    btn.translatesAutoresizingMaskIntoConstraints = NO;
+    [btn addTarget:target
+            action:@selector(okaTap:)
+  forControlEvents:UIControlEventTouchUpInside];
+    [view addSubview:btn];
+    [NSLayoutConstraint activateConstraints:@[
+        [btn.trailingAnchor constraintEqualToAnchor:view.safeAreaLayoutGuide.trailingAnchor
+                                          constant:-14.0],
+        [btn.bottomAnchor constraintEqualToAnchor:view.safeAreaLayoutGuide.bottomAnchor
+                                        constant:-14.0],
+        [btn.heightAnchor constraintEqualToConstant:26.0],
+    ]];
 }
 
 static BOOL (*orig_startWithOptions)(id, SEL, NSDictionary *, NSError **);
@@ -1536,8 +1670,6 @@ static void StartWiFiTransfer(BOOL fromShortcut) {
         if (fromShortcut && gCopyURLOnShortcut && ipURL.length)
             UIPasteboard.generalPasteboard.string = ipURL;
         if (fromShortcut) ShowResultAlert(s, ipURL, gCopyURLOnShortcut && ipURL.length);
-        // 即便是"已开启"也要确保保活挂着（上次可能是手动开的）
-        if (fromShortcut) StartBackgroundKeepAlive();
         return;
     }
 
@@ -1547,10 +1679,6 @@ static void StartWiFiTransfer(BOOL fromShortcut) {
         return;
     }
     ((void (*)(id, SEL, id))objc_msgSend)(page, toggle, nil);
-
-    // 如果是快捷方式启动的，用户在浏览器里传文件期间 App 会一直被切到后台，
-    // 必须立刻挂上保活，否则进程被挂起、端口就断了。
-    if (fromShortcut) StartBackgroundKeepAlive();
 
     if (!fromShortcut) return;
 
@@ -2102,7 +2230,17 @@ static void OkaWiFiInit(void) {
                                    (IMP)my_reachabilityChanged,
                                    (void **)&orig_reachabilityChanged,
                                    "-[BNHttpServerPage reachabilityChangedWithNote:]");
-                HookInstanceMethod(pageCls, @selector(viewDidLoad),
+            }
+        }
+
+        // ---- v1.6.0：密码设置入口，与解蜂窝开关解耦 ----
+        // 只在这里挂一次。若跟着 gEnableCellular 块挂，关掉解蜂窝就没有入口；
+        // 若两处都挂，第二次 method_setImplementation 会把 orig_viewDidLoad
+        // 指向 my_viewDidLoad 自己，形成无限递归。
+        {
+            Class pageClsUI = LookupClass(PAGE_CLASS_MANGLED, PAGE_CLASS_SWIFT);
+            if (pageClsUI) {
+                HookInstanceMethod(pageClsUI, @selector(viewDidLoad),
                                    (IMP)my_viewDidLoad, (void **)&orig_viewDidLoad,
                                    "-[BNHttpServerPage viewDidLoad]");
             }
