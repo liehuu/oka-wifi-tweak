@@ -166,6 +166,20 @@ static NSString *const kOkaWebPassKey = @"OkaWebPassword";
 static NSString *const kOkaWebSetKey  = @"OkaWebAuthConfigured";
 
 static void LoadPrefs(void) {
+    // ★ v1.6.1 关键修复：NSUserDefaults 必须**最先**读，且不能被 plist 缺失打断。
+    //   v1.6.0 把这段放在函数末尾，而函数第 2 行是 `if (!d) return;` ——
+    //   设备上没有 /var/mobile/Library/Preferences/com.oka.wifitweak.plist
+    //   （那个文件要手动建，绝大多数用户都没有）时，整个函数在此处就返回了，
+    //   App 内保存的密码永远读不回来。表现：点保存当次能用，重启 App 后失效。
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    BOOL udConfigured = [ud boolForKey:kOkaWebSetKey];
+    if (udConfigured) {
+        NSString *u = [ud stringForKey:kOkaWebUserKey];
+        NSString *p = [ud stringForKey:kOkaWebPassKey];
+        gWebUser     = u.length ? u : nil;
+        gWebPassword = p.length ? p : nil;
+    }
+
     NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
     if (!d) return;
     if (d[@"EnableShortcut"])    gEnableShortcut    = [d[@"EnableShortcut"] boolValue];
@@ -182,22 +196,16 @@ static void LoadPrefs(void) {
     if ([d[@"FixedHost"] isKindOfClass:[NSString class]] && [d[@"FixedHost"] length]) {
         gFixedHost = d[@"FixedHost"];
     }
-    if ([d[@"WebUsername"] isKindOfClass:[NSString class]] && [d[@"WebUsername"] length]) {
-        gWebUser = d[@"WebUsername"];
-    }
-    if ([d[@"WebPassword"] isKindOfClass:[NSString class]] && [d[@"WebPassword"] length]) {
-        gWebPassword = d[@"WebPassword"];
-    }
-
-    // ★ v1.6.0：App 内设置存在 NSUserDefaults。
-    //   只有存在 OkaWebAuthConfigured 标记时才认它 —— 否则用户点了"关闭密码"、
-    //   把值写成空串之后，上面从 plist 读到的旧密码会把它复活。
-    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    if ([ud boolForKey:kOkaWebSetKey]) {
-        NSString *u = [ud stringForKey:kOkaWebUserKey];
-        NSString *p = [ud stringForKey:kOkaWebPassKey];
-        gWebUser     = u.length ? u : nil;
-        gWebPassword = p.length ? p : nil;
+    // ★ v1.6.1：plist 只是兼容旧配置的退路，**不能**覆盖 App 内设置过的值。
+    //   若 NSUserDefaults 已配置（标记位置位），它的状态就是权威 —— 包括
+    //   「用户主动关闭密码、值写成空串」这种合法状态。
+    if (!udConfigured) {
+        if ([d[@"WebUsername"] isKindOfClass:[NSString class]] && [d[@"WebUsername"] length]) {
+            gWebUser = d[@"WebUsername"];
+        }
+        if ([d[@"WebPassword"] isKindOfClass:[NSString class]] && [d[@"WebPassword"] length]) {
+            gWebPassword = d[@"WebPassword"];
+        }
     }
 }
 
@@ -1089,7 +1097,7 @@ static void OkaApplyWebAuth(id server, NSMutableDictionary *opts) {
 }
 
 // ===========================================================================
-//  ★ v1.6.0 网页访问密码：App 内设置
+//  ★ v1.6.0 网页访问密码：App 内设置（v1.6.1 修持久化）
 // ===========================================================================
 //  存在 NSUserDefaults（App 沙箱内，必定可写），plist 只作兼容读取。
 //  标记位 OkaWebAuthConfigured 一旦置位，"空密码"就是权威状态，
