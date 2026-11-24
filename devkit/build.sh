@@ -167,11 +167,25 @@ for sym in _GCDWebServerGetPrimaryIPAddress getifaddrs inet_ntop bridge pdp_ip; 
     || { echo "✗ dylib 缺 ${sym}（热点地址修正会失效）"; exit 1; }
 done
 
-# 后台保活
-for sym in AVAudioPlayer AVAudioSession setNumberOfLoops: setVolume:; do
-  grep -aq "$sym" "$BUILD/$NAME.dylib" \
-    || { echo "✗ dylib 缺 ${sym}（后台保活会失效）"; exit 1; }
+# 后台保活：v1.6.0 起必须是**负向**闸门（曾经是正向，要求必须存在 AVAudioPlayer）。
+#
+# 为什么反过来：
+#   v1.4.1 曾用「后台循环播 0 音量 mp3」把进程钉在活跃态。v1.4.2 决定撤掉它
+#   （Immortalizer 已解决进程常驻，保活只剩副作用），但只删了开关变量，
+#   函数体与两处调用点残留，StopBackgroundKeepAlive 更是零调用点 ——
+#   只要走桌面快捷方式开启就永远关不掉，会抢占音频会话、持续解码耗电。
+#   发布说明写了"已撤掉"，代码里没撤，属于我自己的缺陷。
+#
+#   所以闸门必须反过来守：AVAudio* 一旦重新出现在 dylib 里，就说明这段死代码
+#   又回来了。这条比正向闸门更有价值 —— 它守的是"不要"而不是"要有"。
+for sym in AVAudioPlayer AVAudioSession setNumberOfLoops:; do
+  if grep -aq "$sym" "$BUILD/$NAME.dylib"; then
+    echo "✗ dylib 含 ${sym}：静音音频保活已被移除（v1.6.0），它不该再出现"
+    echo "  排查：Tweak.xm 里是否又加回了 background keep-alive（v1.4.2 的残留缺陷）"
+    exit 1
+  fi
 done
+echo "✓ 已确认无静音音频保活残留"
 
 # Swift weak 读取（outlet 全靠它，缺了就是 outlet 全 nil）
 # ★ 这个串只在 dlsym 的实参里出现一次。若哪天改成 RTLD_NEXT 或换成符号常量，
