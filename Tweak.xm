@@ -132,17 +132,6 @@ static BOOL gEnableIPFix       = YES;   // 功能 2b：热点 IP 修正
 static BOOL gEnableWebEnhance  = YES;   // 功能 3：电脑网页端拖放上传 / 批量移动
 static BOOL gCopyURLOnShortcut = YES;   // 长按开启后把地址复制到剪贴板
 
-// ★ v1.4.1 传输期间「钉住进程」
-//   根因：GCDWebServer 的 AutomaticallySuspendInBackground 默认 YES，App 一进
-//   后台（锁屏/切走）它就自己 stop；已由 my_startWithOptions 强制关掉。
-//   但关掉之后 iOS 仍会在后台约 30 秒挂起进程，端口照样断。下面两项是配套手段，
-//   只在 WiFi 传输开启期间生效，关闭传输即还原：
-//   · KeepAliveInBackground：后台循环播静音音频，把 App 保持在活跃态；
-//   · PreventAutoLock：传输期间 idleTimerDisabled = YES，不做自动锁屏。
-//   两者默认开，但都可从偏好 plist 关掉（会占音频会话/妨碍熄屏）。
-static BOOL gEnableKeepAlive = YES;     // 后台静音音频保活
-static BOOL gEnableNoSleep   = YES;     // 传输期间禁止自动锁屏
-
 // ★ v1.3.0 固定访问地址（只加不改）
 //   原版端口本来就是固定的 5426，http://<IP>:5426 的访问方式**原样保留**。
 //   这里额外多给一条 http://<设备名>.local:5426 —— IP 随「个人热点 /
@@ -162,8 +151,6 @@ static void LoadPrefs(void) {
     if (d[@"EnableIPFix"])       gEnableIPFix       = [d[@"EnableIPFix"] boolValue];
     if (d[@"EnableWebEnhance"])  gEnableWebEnhance  = [d[@"EnableWebEnhance"] boolValue];
     if (d[@"CopyURLOnShortcut"]) gCopyURLOnShortcut = [d[@"CopyURLOnShortcut"] boolValue];
-    if (d[@"KeepAliveInBackground"]) gEnableKeepAlive = [d[@"KeepAliveInBackground"] boolValue];
-    if (d[@"PreventAutoLock"])       gEnableNoSleep   = [d[@"PreventAutoLock"] boolValue];
     if (d[@"EnableFixedAddr"])   gEnableFixedAddr   = [d[@"EnableFixedAddr"] boolValue];
     if (d[@"EnableFixedPort"])   gEnableFixedPort   = [d[@"EnableFixedPort"] boolValue];
     if (d[@"FixedPort"]) {
@@ -202,7 +189,6 @@ static void *gKeepAlivePlayer = NULL;   // AVAudioPlayer*
 static BOOL gKeepAliveOn = NO;
 
 static void StartBackgroundKeepAlive(void) {
-    if (!gEnableKeepAlive) return;
     if (gKeepAliveOn) return;
 
     Class avSessionCls = NSClassFromString(@"AVAudioSession");
@@ -256,38 +242,6 @@ static void StopBackgroundKeepAlive(void) {
         gKeepAlivePlayer = NULL;
     }
     gKeepAliveOn = NO;
-}
-
-// ★ v1.4.1：传输期间禁止自动锁屏。
-//   锁屏是「WiFi 传输自己关掉」最直接的触发器：一旦息屏，App 进后台，
-//   进程随后被系统挂起，5426 不再 LISTEN。禁锁屏能把这一整条链路切断。
-//   setIdleTimerDisabled: 是 UI 属性，统一回主队列设置；
-//   startWithOptions: 有可能是从全局队列调进来的。
-static BOOL gNoSleepOn = NO;
-
-static void OkaSetIdleTimerDisabled(BOOL disabled) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        Class appCls = NSClassFromString(@"UIApplication");
-        if (!appCls) return;
-        id app = ((id (*)(id, SEL))objc_msgSend)((id)appCls, @selector(sharedApplication));
-        if (!app) return;
-        SEL s = @selector(setIdleTimerDisabled:);
-        if (![app respondsToSelector:s]) return;
-        ((void (*)(id, SEL, BOOL))objc_msgSend)(app, s, disabled);
-    });
-}
-
-static void StartNoSleep(void) {
-    if (!gEnableNoSleep) return;
-    if (gNoSleepOn) return;
-    gNoSleepOn = YES;
-    OkaSetIdleTimerDisabled(YES);
-}
-
-static void StopNoSleep(void) {
-    if (!gNoSleepOn) return;
-    gNoSleepOn = NO;
-    OkaSetIdleTimerDisabled(NO);
 }
 
 // ===========================================================================
@@ -1139,15 +1093,7 @@ static BOOL my_startWithOptions(id self, SEL _cmd, NSDictionary *options, NSErro
 
     NSUInteger real = ((NSUInteger (*)(id, SEL))objc_msgSend)(self, @selector(port));
     if (real) gServerPort = real;
-    if (ok) {
-        gServerRunning = YES;
-        // ★ v1.4.1：服务真正起来之后才挂保活 / 禁锁屏。
-        //   放在这里而不是 StartWiFiTransfer 的 fromShortcut 分支，
-        //   是因为「App 内点开启」根本不走那条分支，之前等于没有保活。
-        //   两个函数都自带幂等判断，重复调用无副作用。
-        StartBackgroundKeepAlive();
-        StartNoSleep();
-    }
+    if (ok) gServerRunning = YES;
     return ok;
 }
 
@@ -1160,11 +1106,24 @@ static void my_stop(id self, SEL _cmd) {
     if (orig_stop) orig_stop(self, _cmd);
     gServerPort = 0;
     gServerRunning = NO;
-    // ★ v1.4.1：服务停了，保活和禁锁屏必须一起撤。
-    //   不撤的后果很具体：传输早就关了，静音音频还在播（占着音频会话、
-    //   会挡住用户自己放音乐），屏幕还一直不熄。
-    StopBackgroundKeepAlive();
-    StopNoSleep();
+}
+
+// ★ v1.4.2：第二层保险 —— 接管 GCDWebServer 的「进后台就停服」处理器。
+//   第一层是 my_startWithOptions 把 AutomaticallySuspendInBackground 注入成 NO；
+//   但那依赖「符号能解析到、选项键没被改」，落空时是静默失效。
+//   这里直接 hook 私有方法 -[GCDWebServer _didEnterBackground:]：
+//   原实现只有一句「if (_suspendInBackground) [self stop]」。
+//   把 _suspendInBackground 就地改成 NO 再交给原实现 —— 它看到 NO 就不停服，
+//   其它逻辑照常执行。ivar 取不到时直接返回：这里的目标就是别停服，
+//   所以不能"保守放行"去调原实现。
+static void (*orig_didEnterBackground)(id, SEL, id);
+static void my_didEnterBackground(id self, SEL _cmd, id note) {
+    Class gwsCls = NSClassFromString(@"GCDWebServer");
+    Ivar iv = gwsCls ? class_getInstanceVariable(gwsCls, "_suspendInBackground") : NULL;
+    if (!iv) return;
+    BOOL *flag = (BOOL *)((char *)(__bridge void *)self + ivar_getOffset(iv));
+    *flag = NO;
+    if (orig_didEnterBackground) orig_didEnterBackground(self, _cmd, note);
 }
 
 // 兜底算地址：自己的 IP + 记录到的端口
@@ -2039,6 +1998,11 @@ static void OkaWiFiInit(void) {
                 HookInstanceMethod(gws, @selector(stop),
                                    (IMP)my_stop, (void **)&orig_stop,
                                    "-[GCDWebServer stop]");
+                // ★ v1.4.2：进后台不自动停服（第二层，见 my_didEnterBackground）。
+                HookInstanceMethod(gws, NSSelectorFromString(@"_didEnterBackground:"),
+                                   (IMP)my_didEnterBackground,
+                                   (void **)&orig_didEnterBackground,
+                                   "-[GCDWebServer _didEnterBackground:]");
             }
 
             // ---- 2b 兜底：UI 层地址写回 ----
