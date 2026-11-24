@@ -143,6 +143,17 @@ static BOOL gEnableFixedPort = NO;      // 是否强制覆盖监听端口（默�
 static NSUInteger gFixedPort  = 5426;   // 原版端口；仅在 EnableFixedPort 开启时生效
 static NSString  *gFixedHost  = nil;    // 自定义主机名前缀（留空 = 取设备名）
 
+// ★ v1.5.0 网页访问密码（HTTP Basic，服务端校验）
+//   默认关闭：留空即完全不启用认证，与原版行为一致。
+//   开启方式（偏好 plist：/var/mobile/Library/Preferences/com.oka.wifitweak.plist）：
+//       WebPassword  = "你的密码"     <- 只要非空就启用
+//       WebUsername  = "oka"          <- 可选，默认 oka
+//   为什么用 Basic 而不是自写登录页：自写页面的密码在 JS 里明文可读，只是心理安慰；
+//   Basic 由服务端在路由之前校验，所有路径（含 /oka-raw、下载）统一被拦。
+//   局域网内是明文传输（Basic 固有特性），但足以挡住"同一 WiFi 下随手打开"。
+static NSString  *gWebUser     = nil;   // 认证用户名（默认 oka）
+static NSString  *gWebPassword = nil;   // 认证密码（空 = 不启用）
+
 static void LoadPrefs(void) {
     NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
     if (!d) return;
@@ -159,6 +170,12 @@ static void LoadPrefs(void) {
     }
     if ([d[@"FixedHost"] isKindOfClass:[NSString class]] && [d[@"FixedHost"] length]) {
         gFixedHost = d[@"FixedHost"];
+    }
+    if ([d[@"WebUsername"] isKindOfClass:[NSString class]] && [d[@"WebUsername"] length]) {
+        gWebUser = d[@"WebUsername"];
+    }
+    if ([d[@"WebPassword"] isKindOfClass:[NSString class]] && [d[@"WebPassword"] length]) {
+        gWebPassword = d[@"WebPassword"];
     }
 }
 
@@ -1055,6 +1072,60 @@ static NSString *OkaGWSKey(const char *bare, NSString *fallback) {
     return v.length ? v : fallback;
 }
 
+
+// 取 GCDWebServer 某个 NSString* const 常量的**值**（不是符号名）。
+//   与 OkaGWSKey 相同机制，只是名字不加 Option_ 前缀。
+//   取不到返回 fallback，保证不崩。
+static NSString *OkaGWSConst(const char *symbolName, NSString *fallback) {
+    void *h = dlsym(RTLD_DEFAULT, symbolName);
+    if (!h) {
+        dlopen("@rpath/GCDWebServer.framework/GCDWebServer", RTLD_LAZY);
+        dlopen("Frameworks/GCDWebServer.framework/GCDWebServer", RTLD_LAZY);
+        h = dlsym(RTLD_DEFAULT, symbolName);
+    }
+    if (!h) return fallback;
+    NSString *v = *(NSString * const *)h;
+    return v.length ? v : fallback;
+}
+
+// ★ v1.5.0：给上传器注入 HTTP Basic 认证。
+//   位置必须在 startWithOptions: 之前 —— 认证是**启动选项**，服务起来之后再改无效。
+//   isKindOfClass 判定用 GCDWebUploader 这个具体类：
+//     GCDWebDAVServer 是它的兄弟类（不是子类），账号密码由 App 自己生成并传入，
+//     一旦被我们覆盖，WebDAV 客户端就会登录失败。这里显式排除，只认上传器。
+static BOOL OkaIsUploader(id server) {
+    Class upCls = NSClassFromString(@"GCDWebUploader");
+    if (!upCls || !server) return NO;
+    return [server isKindOfClass:upCls];
+}
+
+// 把认证三项塞进 options。密码为空时不改动任何东西（保持原版行为）。
+// 键名走 OkaGWSKey：符号缺失退回裸字面量，与 Port / SuspendInBackground 同口径。
+// 账号表格式是 GCDWebServer 规定的 username -> password 字典（明文，由服务端比对）。
+static void OkaApplyWebAuth(id server, NSMutableDictionary *opts) {
+    if (!opts) return;
+    if (!gWebPassword.length) return;
+    if (!OkaIsUploader(server)) return;
+
+    static NSString *methodKey = nil;
+    static NSString *realmKey  = nil;
+    static NSString *acctKey   = nil;
+    static NSString *basicVal  = nil;
+    if (!methodKey) {
+        methodKey = OkaGWSKey("AuthenticationMethod",   @"AuthenticationMethod");
+        realmKey  = OkaGWSKey("AuthenticationRealm",    @"AuthenticationRealm");
+        acctKey   = OkaGWSKey("AuthenticationAccounts", @"AuthenticationAccounts");
+        // 认证方法常量的真实值（不是 "Basic" 字面量，必须 dlsym 读）。
+        basicVal  = OkaGWSConst("GCDWebServerAuthenticationMethod_Basic", @"Basic");
+    }
+    if (!basicVal.length) return;
+
+    NSString *user = gWebUser.length ? gWebUser : @"oka";
+    opts[methodKey] = basicVal;
+    opts[realmKey]  = @"Oka Files";
+    opts[acctKey]   = @{ user: gWebPassword };
+}
+
 static BOOL (*orig_startWithOptions)(id, SEL, NSDictionary *, NSError **);
 static BOOL my_startWithOptions(id self, SEL _cmd, NSDictionary *options, NSError **error) {
     if (!orig_startWithOptions) return NO;
@@ -1071,6 +1142,7 @@ static BOOL my_startWithOptions(id self, SEL _cmd, NSDictionary *options, NSErro
     if (!suspendKey) suspendKey = OkaGWSKey("AutomaticallySuspendInBackground",
                                             @"AutomaticallySuspendInBackground");
     base[suspendKey] = @NO;
+    OkaApplyWebAuth(self, base);
 
     NSDictionary *use = base;
     // ★ 只有显式开启 gEnableFixedPort 才覆盖端口。
