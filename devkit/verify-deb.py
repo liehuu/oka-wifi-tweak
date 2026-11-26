@@ -37,7 +37,7 @@ C7  dylib 的 Mach-O cputype/cpusubtype 与预期架构精确相等（不做子�
 C8  dylib 带 LC_CODE_SIGNATURE
 C9  权限：.dylib / 脚本 755，plist 644
 C10 不出现重复成员名（tar 里同名会覆盖，dpkg 行为不定）
-C11 v1.6.2 行悬停的 CSS 真的被内联进 dylib 的 __const 段
+C11 v1.6.3 行悬停的 CSS 真的被内联进 dylib 的 __const 段，且色差够看得出
     （kOkaWebCSS 是 const 数组，落在 __TEXT,__const；不能在 __debug_str 里
     —— 那说明它只被调试信息引用，运行时拿不到这段 CSS，悬停等于没做）
 
@@ -57,6 +57,7 @@ C11 v1.6.2 行悬停的 CSS 真的被内联进 dylib 的 __const 段
 
 import io
 import os
+import re
 import struct
 import sys
 import tarfile
@@ -350,13 +351,67 @@ def sections_by_name(blob):
     return out
 
 
-def describe_macho(info):
-    if info.get('is_fat'):
-        return 'FAT (universal) 0x%08X' % info['magic']
-    name = CPU_NAMES.get((info['cputype'], info['cpusubtype']),
-                         'cputype=0x%X subtype=0x%X'
-                         % (info['cputype'], info['cpusubtype']))
-    return '%s (subtype_raw=0x%08X)' % (name, info['subtype_raw'])
+# ---------------------------------------------------------------------------
+# CSS 色值：只判性质，不判具体用哪个蓝
+# ---------------------------------------------------------------------------
+#
+# ★ 为什么不硬编码色值：v1.6.2 的 C11 写死 b'#f0f6fd'，用户一说"高亮太浅、
+#   加大色差"，CSS 改完这里就必红。那不是产物坏了，是判据过期 ——
+#   而它长得跟真 FAIL 一模一样，会把人带去查产物。
+#   色值是设计决定，判据只该管「有没有真的上色、能不能区分、够不够深」。
+
+def css_first_concrete(css_text, pattern):
+    """返回 (原始值, rgb) —— 取**第一条能解析成具体颜色**的匹配。
+
+    ★ 为什么不是取第一条匹配就完事：
+      同一个选择器会出现两次 —— 主规则给 #cfe0f5，`@media (hover: none)`
+      里给 transparent（触屏撤掉悬停）。取第一条只是碰巧对：一旦有人把
+      media 块挪到前面，判据就会拿着 transparent 去算对比度，报一个假 FAIL。
+      跳过解析不出的值，既能容忍顺序变化，又不放松「必须真上色」这一条
+      —— 全都解析不出来的话返回 (None, None)，判据照样红。
+    """
+    for m in re.finditer(pattern, css_text, re.S):
+        val = m.group(1).strip()
+        val = val.replace('!important', '').strip().rstrip(';').strip()
+        rgb = css_hex_rgb(val)
+        if rgb:
+            return val, rgb
+    return None, None
+
+
+def css_hex_rgb(val):
+    """把 #rgb / #rrggbb / rgb(r,g,b) 解析成 (r,g,b)；其它（transparent 等）返回 None。
+
+    ★ 不做「宽松猜测」：解析不出来就返回 None 让上层 fail ——
+    猜一个默认色会让「色值写错」被当成「色值正确」。
+    """
+    if not val:
+        return None
+    s = val.strip().lower()
+    m = re.fullmatch(r'#([0-9a-f]{3})', s)
+    if m:
+        return tuple(int(c * 2, 16) for c in m.group(1))
+    m = re.fullmatch(r'#([0-9a-f]{6})', s)
+    if m:
+        h = m.group(1)
+        return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+    m = re.fullmatch(r'rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,[^)]*)?\)', s)
+    if m:
+        return tuple(int(m.group(i)) for i in (1, 2, 3))
+    return None
+
+
+def _wcag_lum(rgb):
+    def f(c):
+        c = c / 255.0
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = (f(v) for v in rgb)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def contrast_vs_white(rgb):
+    """对白底 #fff 的 WCAG 对比度。1.0 = 完全看不出，越大越明显。"""
+    return (1.0 + 0.05) / (_wcag_lum(rgb) + 0.05)
 
 
 # ---------------------------------------------------------------------------
@@ -597,11 +652,21 @@ def main(argv):
             print('  Mach-O: %s' % describe_macho(info))
             ck.check(not info['is_fat'], 'C7',
                      '单切片（非 fat）', '是 fat 二进制，期望单切片')
-            got = CPU_NAMES.get((info['cputype'], info['cpusubtype']))
-            ck.check(got == expect_cpu, 'C7',
-                     '架构精确 == %s' % expect_cpu,
-                     '架构是 %r，期望 %r（cpusubtype 不匹配时 dylib 会被静默跳过）'
-                     % (got, expect_cpu))
+            # ★ fat 时 parse_macho 只返回 {is_fat, magic}，没有 cputype/subtype。
+            #   第一版直接 info['cputype'] → KeyError → 整个脚本 traceback 退出，
+            #   finish() 不执行、::error:: 不打印，CI 上只看得到崩溃栈。
+            #   那就等于 C7 的「fat 拦截」形同虚设：包确实被拦了（rc≠0），
+            #   但拦它的是一个异常，不是一条判据，日志里说不出为什么。
+            if info['is_fat']:
+                ck.fail('C7', 'fat 二进制没有单一 cputype，无法做架构精确比较 —— '
+                              '被拦下是对的，但原因是「架构不唯一」，'
+                              '不是「架构写错」')
+            else:
+                got = CPU_NAMES.get((info['cputype'], info['cpusubtype']))
+                ck.check(got == expect_cpu, 'C7',
+                         '架构精确 == %s' % expect_cpu,
+                         '架构是 %r，期望 %r（cpusubtype 不匹配时 dylib 会被静默跳过）'
+                         % (got, expect_cpu))
         except ValueError as exc:
             ck.fail('C7', 'Mach-O 解析失败: %s' % exc)
             info = None
@@ -635,7 +700,7 @@ def main(argv):
             ck.check(m == 0o644, 'C9',
                      '%s 权限 644' % n, '%s 权限是 %o，期望 644' % (n, m))
 
-    # ---------------- C11: 行悬停 CSS 真的进了运行时 ----------
+    # ---------------- C11: 行悬停 CSS 真的进了运行时，且色差够看得见 ----------
     # ★ 判据盯的是「这段 CSS 在不在运行时能取到的段里」，不是「源码里写没写」。
     #   gen-webassets.py 把它编成 kOkaWebCSS，Tweak.xm 在 epilogue 里追加到页面
     #   —— 少任何一环，真机上就是没效果。
@@ -649,7 +714,19 @@ def main(argv):
     #
     # ★ 为什么不能在全文件搜字节：__DWARF/__debug_str 里也有源文件的字符串，
     #   搜到了只说明「调试信息里有」，运行时拿不到。必须按段取。
-    print('\n[C11] v1.6.2 行悬停 CSS 已内联进运行时')
+    #
+    # ★★ 具体色值不再硬编码（v1.6.3 起）。
+    #   原来这里写死 b'#f0f6fd'：用户一句「高亮太浅，加大色差」，CSS 改了颜色，
+    #   这里就必红 —— 26 项照常通过、C11 三项全红，看着像产物坏了，实际是
+    #   判据过期。判据跟着色值走，等于每次调色都要改测试，这种判据迟早会被
+    #   顺手删掉。现在只校验**性质**，色值本身交给设计决定：
+    #     (a) :hover > td 那条规则存在，且色值不是透明系（真上色了）
+    #     (b) 悬停色与选中色不同（同时出现时能区分「路过」和「已选中」）
+    #     (c) 悬停色对白底的对比度 >= 1.20（`能看出色差` 的量化下限）
+    #     (d) 选中色比悬停色更深（层次不能反）
+    #   (c) 是可失败的关键一条：#f0f6fd 对白底只有 1.09，会被它直接拦下 ——
+    #   也就是用户这次反馈的那句「区别不明显」，现在有判据守着了。
+    print('\n[C11] 行悬停 CSS 已内联进运行时，色差达标')
     if blob:
         try:
             secs = sections_by_name(blob)
@@ -661,18 +738,57 @@ def main(argv):
                  '__const 段存在（%d 字节）' % len(cst),
                  '__const 段缺失或为空，取不到内联 CSS 常量（kOkaWebCSS 是 const 数组）')
         if cst:
-            # 三条缺一不可：悬停色、:hover>td 选择器、transition 声明。
-            # 只查一条的话，CSS 被截断/改坏仍然 PASS。
+            css_text = cst.decode('utf-8', 'replace')
+
+            # 结构两条：选择器与过渡。缺 `> td` 则条纹行根本不变色；
+            # 缺 transition 则切换硬跳（不报错，但手感明显不对）。
             for needle, why in (
-                (b'#f0f6fd', '悬停色 #f0f6fd'),
-                (b'tr.row-file:hover > td', ':hover > td 选择器（条纹行靠它上色）'),
-                (b'transition: background-color 120ms ease-out',
+                ('#listing tr.row-file:hover > td', ':hover > td 选择器（条纹行靠它上色）'),
+                ('transition: background-color 120ms ease-out',
                  '过渡声明（缺了切换会硬跳）'),
             ):
-                ck.check(needle in cst, 'C11',
+                ck.check(needle in css_text, 'C11',
                          '运行时 CSS 含 %s' % why,
                          '运行时 CSS 缺 %s（%r）—— 页面拿不到这段，真机上悬停无效'
-                         % (why, needle.decode()))
+                         % (why, needle))
+
+            # 从产物里解析色值，而不是从源码/常量里取。
+            hover, hrgb = css_first_concrete(
+                css_text,
+                r'tr\.row-file:hover\s*>\s*td\s*\{[^}]*?background-color\s*:\s*([^;}]+)')
+            sel, srgb = css_first_concrete(
+                css_text,
+                r'oka-selected[^{}]*\{[^}]*?background-color\s*:\s*([^;}]+)')
+
+            ck.check(hover is not None, 'C11',
+                     '悬停色解析到 %s' % (hover or ''),
+                     '产物 CSS 里没解析出 tr.row-file:hover > td 的具体 background-color '
+                     '—— 要么规则被删了，要么色值写成 transparent/inherit，'
+                     '要么写法变了导致取不到（写法变了判据要跟着改）')
+            ck.check(sel is not None, 'C11',
+                     '选中色解析到 %s' % (sel or ''),
+                     '产物 CSS 里没解析出 .oka-selected 的具体 background-color —— '
+                     '选中态丢了，悬停和选中会糊成一样')
+
+            if hover is not None and sel is not None:
+                hc = contrast_vs_white(hrgb)
+                sc = contrast_vs_white(srgb)
+                ck.check(hc >= 1.20, 'C11',
+                         '悬停色 %s 对白底对比度 %.3f:1 ≥ 1.20（看得出色差）'
+                         % (hover, hc),
+                         '悬停色 %s 对白底对比度只有 %.3f:1 < 1.20 —— '
+                         '色差太小，在低亮度屏/护眼模式下几乎看不出，'
+                         '等于这个功能没做（v1.6.2 的 #f0f6fd 就是 1.09）'
+                         % (hover, hc))
+                ck.check(hover.lower() != sel.lower(), 'C11',
+                         '悬停色与选中色不同（%s / %s）' % (hover, sel),
+                         '悬停色与选中色相同（都是 %s）—— 悬停和选中无法区分，'
+                         '用户会以为悬停就已经选中了' % hover)
+                ck.check(sc > hc, 'C11',
+                         '选中色 %s 比悬停色深（%.3f > %.3f）' % (sel, sc, hc),
+                         '选中色 %s 的对比度 %.3f 不高于悬停色 %.3f —— '
+                         '层次反了，选中看起来比路过还浅' % (sel, sc, hc))
+
             # ★ 负向：选择器不该只活在调试信息里。
             #   若 __const 里没有、__debug_str 里有，说明这份 CSS 没被当成
             #   运行时常量编进去（只被日志/断言引用），线上拿不到。

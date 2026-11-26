@@ -448,7 +448,7 @@ if grep -qF "ta.style.display = 'none';" "$ROOT/web/oka-wifi.js"; then
 fi
 echo "✓ 复制下载链接：走原版 /download / 绝对地址 / execCommand 复制"
 
-# ---------- 4a-5) v1.6.2 行悬停高亮闸门 ----------
+# ---------- 4a-5) v1.6.3 行悬停高亮闸门 ----------
 # 这五条都是「写错了也不报错、但效果明显不对」的性质，必须在构建时卡住：
 #
 # ① 必须有 `:hover > td` 的生效规则。原表格是 table-striped，Bootstrap 的条纹

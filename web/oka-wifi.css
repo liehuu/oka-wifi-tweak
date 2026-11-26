@@ -70,10 +70,10 @@
 #listing tr.row-file.oka-selected:hover,
 #listing tr.row-file.oka-selected > td,
 #listing tr.row-file.oka-selected:hover > td {
-  background-color: #e8f3ff !important;
+  background-color: #bdd4f0 !important;
 }
 #listing tr.row-file.oka-selected > td {
-  border-top-color: #b9d9f5;
+  border-top-color: #93bde8;
 }
 
 /* 图标列 + 复选框列：整格点击即切换选中。
@@ -84,7 +84,7 @@
 #listing .oka-select-zone { cursor: pointer; }
 /* ★ v1.6.2：热区不再自己涂一层浅蓝。
  *   原来这里是 `background: #f2f8ff`，鼠标停在复选框格/图标格时只有这两格变蓝，
- *   和整行悬停色（#f0f6fd）是两个不同的色 —— 整行看起来被切成了三块。
+ *   和整行悬停色是两个不同的色 —— 整行看起来被切成了三块。
  *   现在交给整行悬停统一处理，热区只保留 cursor 语义。 */
 #listing .column-icon > .btn { pointer-events: none; }
 
@@ -133,7 +133,7 @@
 #listing tr.row-file .oka-download-cell .btn:hover,
 #listing tr.row-file .oka-download-cell .btn:focus {
   border-color: #2f7fbf;
-  background-color: #eef5fc;
+  background-color: #a3c3e4;
 }
 #listing .oka-name { margin: 0; }
 #listing .oka-rename-input {
@@ -243,11 +243,20 @@ body.oka-compact .container > p.footer { margin-top: 6px; }
  *   所以 tr 那一条只是给「没有 td 背景」的结构兜底（div 列表、无条纹表格），
  *   真正生效的是 > td 那一条。
  *
- * 色值 #f0f6fd：
- *   与已有的选中色 #e8f3ff 同一色系，但要更淡 —— 悬停是「临时路过」，
+ * 色值 #cfe0f5：
+ *   与选中色 #bdd4f0 同一色系，但要更淡 —— 悬停是「临时路过」，
  *   选中是「我要对它做操作」，两者同时出现时必须能分出来。
- *   #f0f6fd 与白底 #fff 的对比约 1.06:1，看得见但不抢眼；
- *   叠在条纹灰 #f9f9f9 上也一样能分辨。
+ *
+ *   ★ v1.6.3 加深了。第一版用的是 #f0f6fd，与白底 #fff 的对比只有 1.06:1 ——
+ *     实测下来用户反馈「高亮太浅，和背景区别不明显」。只靠 1.06:1 的色差，
+ *     在低亮度屏或护眼模式下几乎看不出，等于这个功能没做。
+ *     现在 #cfe0f5 对白底 1.34:1、对条纹灰 #f9f9f9 1.28:1，肉眼一眼能看出，
+ *     但仍低于选中态的 1.52:1，不会抢走「已选中」的视觉权重。
+ *
+ *   三个蓝色必须保持「按钮 < 悬停行 < 选中行」的层次（越深越"重"）：
+ *     按钮 hover #a3c3e4 (1.36:1 vs 悬停行) < 悬停行 #cfe0f5 < 选中行 #bdd4f0
+ *   加深悬停色时如果不同步加深按钮色，按钮 hover 会反而比整行浅，
+ *   形成「手指压着按钮却不如整行显眼」的反向层级 —— 这版一并调了。
  *
  * 过渡 120ms ease-out：
  *   快了（<80ms）像硬切；慢了（>200ms）快速扫过时会有明显拖影。
@@ -281,16 +290,16 @@ body.oka-compact .container > p.footer { margin-top: 6px; }
 #listing tr.row-file:hover,
 #listing li.row-file:hover,
 #listing div.row-file:hover {
-  background-color: #f0f6fd;
+  background-color: #cfe0f5;
 }
 #listing tr.row-file:hover > td {
-  background-color: #f0f6fd;
+  background-color: #cfe0f5;
 }
 /* 选中态不在这里重复定义 —— 见文件前部「行选择」那一段的合并规则。
  * ★ 重复定义是实打实的坑：反证时会发现「删掉其中一处，效果不变」，
  *   于是那条判据看着能失败、实际抓不到东西。整个文件里
  *   选中色的定义只能有一处。 */
-/* 行内按钮自己也有 hover 底色（#eef5fc），它比整行的高亮色略深，
+/* 行内按钮自己也有 hover 底色（#a3c3e4），它比整行的高亮色更深，
  * 鼠标停在按钮上时会看到一个更深的方块 —— 这是想要的效果：
  * 既说明「整行是你的操作对象」，也说明「手指现在压在这个按钮上」。
  * 不再压制它，也不让它盖掉整行的其余部分。 */

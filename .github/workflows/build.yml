@@ -25,7 +25,7 @@ on:
 
 env:
   # 版本号单一来源，禁止在别处硬编码（否则会出现「包名 v1.0、内容 v1.1」）。
-  VERSION: ${{ github.event.inputs.version || '1.6.2' }}
+  VERSION: ${{ github.event.inputs.version || '1.6.3' }}
   HOMEBREW_NO_AUTO_UPDATE: 1
 
 jobs:
@@ -98,15 +98,23 @@ jobs:
           python3 devkit/selftest-webassets.py
           python3 devkit/gen-webassets.py web .build/OkaWebAssets.h
 
-      # v1.6.2 行悬停高亮闸门：
+      # v1.6.3 行悬停高亮闸门：
       #  check-hover-css.py 是 build.sh 构建时真正调用的那一份（不是另抄的镜像）；
       #  selftest-hover-gate.py 对它做 9 个破坏注入，证明这些判据**会失败**。
       #  两个都要跑：只跑正向等于「永远不会红的检查」，只跑反向证明不了生产闸门就是它。
+      #
+      #  ★ selftest-verify.py 也在这里跑（v1.6.3 新增）。理由：
+      #    v1.6.3 把 verify-deb.py 的 C11 从「硬编码色值」改成「解析产物 + 判性质」，
+      #    还顺手修了 fat 二进制触发 KeyError 崩溃的缺陷。那些改动如果只在本地跑过，
+      #    CI 上没人守 —— 下次谁改回来都不会有人发现。这份自测有 22 个用例
+      #    （18 个反向），正好覆盖「判据会不会失败」。
+      #    它在 Windows/macOS 都能跑（自己拼 Mach-O 字节，不需要真 dylib）。
       - name: Hover highlight gate
         run: |
           set -eu
           python3 devkit/check-hover-css.py web/oka-wifi.css
           python3 devkit/selftest-hover-gate.py
+          python3 devkit/selftest-verify.py
 
       - name: Build ${{ matrix.scheme }}
         run: |

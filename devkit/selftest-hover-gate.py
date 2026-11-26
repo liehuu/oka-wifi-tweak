@@ -38,6 +38,44 @@ PY = sys.executable
 REAL = open(CSS, encoding="utf-8").read()
 
 
+# ---------------- 从真实 CSS 里读出当前色值，反证跟着设计走 ----------------
+#
+# ★★ 为什么不写死色值：第一版这里全是 '#f0f6fd' / '#e8f3ff'。用户一句
+#   「高亮太浅、加大色差」，CSS 换了个蓝，这些破坏样本的 `s.replace(...)`
+#   就全部落空 → 注入是空操作 → 每个样本都被判成「SETUP FAIL」。
+#   反证脚本自己坏了，报出来的却是「闸门不可信」，最容易被误读成产物有问题。
+#   色值是设计决定，反证只该跟着它变，而不是把它变成测试常量。
+def _grab(pattern, what):
+    m = re.search(pattern, REAL, re.S)
+    if not m:
+        print("[SETUP FAIL] 从 oka-wifi.css 里取不到 %s —— 写法变了，本脚本要跟着改" % what)
+        sys.exit(1)
+    return m.group(1).strip().replace("!important", "").strip().rstrip(";").strip()
+
+
+HOVER = _grab(r"#listing tr\.row-file:hover > td \{\s*background-color:\s*([^;]+);",
+              "悬停色")
+SEL = _grab(r"#listing tr\.row-file\.oka-selected,[^{]*\{[^}]*?background-color:\s*([^;}]+)",
+            "选中色")
+
+if HOVER == SEL:
+    print("[SETUP FAIL] 悬停色与选中色相同（%s），②-a 样本无从构造" % HOVER)
+    sys.exit(1)
+
+# 一条「和悬停色不同、也不是选中色」的第三个蓝，用来做「tr/td 不一致」样本
+OTHER = next(c for c in ("#dde9f8", "#c8d8ee", "#b9cde4", "#aac4de")
+             if c.lower() not in (HOVER.lower(), SEL.lower()))
+
+# 完整规则文本（含换行与缩进），破坏样本据此精确定位
+HOVER_RULE = "#listing tr.row-file:hover > td {\n  background-color: %s;\n}\n" % HOVER
+HOVER_DECL = "background-color: %s;" % HOVER
+
+print("从 CSS 读出：悬停 %s / 选中 %s / 第三个蓝 %s" % (HOVER, SEL, OTHER))
+if HOVER_RULE not in REAL:
+    print("[SETUP FAIL] 规则文本与预期格式不符，破坏样本会落空（写法变了要改脚本）")
+    sys.exit(1)
+
+
 def run_gate(path):
     r = subprocess.run([PY, GATE, path], capture_output=True)
     return r.returncode, r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace")
@@ -94,30 +132,29 @@ cases = []
 
 cases.append((
     "①-a 删掉顶层 `:hover > td` 整条规则（只留 @media 里那条 transparent）",
-    lambda s: s.replace(
-        "#listing tr.row-file:hover > td {\n  background-color: #f0f6fd;\n}\n", ""),
+    lambda s: s.replace(HOVER_RULE, ""),
     "①",
 ))
 
 cases.append((
     "①-b 把 `:hover > td` 的色值改成 transparent（等于没上色）",
     lambda s: s.replace(
-        "#listing tr.row-file:hover > td {\n  background-color: #f0f6fd;\n}",
+        HOVER_RULE.rstrip("\n"),
         "#listing tr.row-file:hover > td {\n  background-color: transparent;\n}"),
     "①",
 ))
 
 cases.append((
-    "②-a 悬停色改成和选中色一样（#e8f3ff）",
-    lambda s: s.replace("background-color: #f0f6fd;", "background-color: #e8f3ff;"),
+    "②-a 悬停色改成和选中色一样（%s）" % SEL,
+    lambda s: s.replace(HOVER_DECL, "background-color: %s;" % SEL),
     "②",
 ))
 
 cases.append((
     "②-b tr 悬停色与 td 悬停色不一致（整行会被切成两段）",
     lambda s: s.replace(
-        "#listing tr.row-file:hover > td {\n  background-color: #f0f6fd;\n}",
-        "#listing tr.row-file:hover > td {\n  background-color: #dde9f8;\n}"),
+        HOVER_RULE.rstrip("\n"),
+        "#listing tr.row-file:hover > td {\n  background-color: %s;\n}" % OTHER),
     "②",
 ))
 
@@ -139,13 +176,13 @@ cases.append((
     "④-b @media(hover:none) 里改成 opaque 色（触屏降级实际没生效）",
     lambda s: s.replace(
         "  #listing tr.row-file:hover > td {\n    background-color: transparent;\n  }",
-        "  #listing tr.row-file:hover > td {\n    background-color: #f0f6fd;\n  }"),
+        "  #listing tr.row-file:hover > td {\n    background-color: %s;\n  }" % HOVER),
     "④",
 ))
 
 cases.append((
     "⑤ 选中色重复定义第二个来源（反证会失效）",
-    lambda s: s + "\n#listing tr.row-file.oka-selected > td { background-color: #e8f3ff; }\n",
+    lambda s: s + "\n#listing tr.row-file.oka-selected > td { background-color: %s; }\n" % OTHER,
     "⑤",
 ))
 

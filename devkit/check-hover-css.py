@@ -180,33 +180,38 @@ def main(path):
 
     # ---------- ⑤ 每个状态的色值只定义一处 ----------
     # 重复定义会让反证失效：删掉其中一处效果不变，判据看着能失败、实际抓不到东西。
-    def count_color(val, pat):
+    #
+    # ★★ 数的是「声明处数」，不是「同一颜色出现的处数」（v1.6.3 改）。
+    #   原来写 count_color(sel_color, ...)，只统计与选中色**相同**的值 ——
+    #   于是往文件末尾追加一条
+    #     #listing tr.row-file.oka-selected > td { background-color: #dde9f8; }
+    #   能安然通过：颜色不同，计数仍是 1。而它实际更糟 —— 同优先级、位置更靠后，
+    #   直接覆盖掉选中色，选中行的 tr 还是 #bdd4f0、td 变成 #dde9f8，一行两个色。
+    #   反证脚本 ⑤ 的样本当场 MISSED 抓到了这个漏网（MISSED 比漏报更值得追）。
+    def count_bg(pat):
+        """符合条件的规则块里，真正声明了 background-color 的个数。"""
         n = 0
         for sel, body in rules(top):
             if not re.search(pat, sel):
                 continue
-            bg = re.search(r"background-color:\s*([^;}]+)", body)
-            if bg and norm_color(bg.group(1)) == val:
+            if re.search(r"background-color:\s*[^;}]+", body):
                 n += 1
         return n
 
     if sel_color:
-        n = count_color(sel_color, r"\.row-file\.oka-selected")
+        n = count_bg(r"\.row-file\.oka-selected")
         if n != 1:
-            fails.append("⑤ 选中色 %s 在顶层定义了 %d 处（必须恰好 1 处，"
-                         "否则反证时删掉一处效果不变）" % (sel_color, n))
+            fails.append("⑤ `.row-file.oka-selected` 上 background-color 声明了 %d 处"
+                         "（必须恰好 1 处，否则后写的会覆盖先写的，"
+                         "且反证时删掉一处效果不变）" % n)
     if hover_td:
-        n_hov = 0
-        for sel, body in rules(top):
-            if not re.search(r"\.row-file:hover", sel):
-                continue
-            bg = re.search(r"background-color:\s*([^;}]+)", body)
-            if bg and norm_color(bg.group(1)) == hover_td:
-                n_hov += 1
-        # 允许 2 处：tr/li/div 合并那条 + `> td` 那条。两者作用对象不同，不是重复。
+        # 允许 2 处：tr/li/div 合并那条 + `> td` 那条。两者作用对象不同，不是重复
+        # （div/li 没有 td 子元素，只留 `> td` 会让列表项悬停完全失效）。
+        # 两处必须同色，由 ② 保证。
+        n_hov = count_bg(r"\.row-file:hover")
         if n_hov not in (1, 2):
-            fails.append("⑤ 悬停色 %s 在顶层定义了 %d 处（应为 1 或 2 处：行规则 + td 规则）"
-                         % (hover_td, n_hov))
+            fails.append("⑤ `.row-file:hover` 上 background-color 声明了 %d 处"
+                         "（应为 1 或 2 处：行规则 + td 规则）" % n_hov)
 
     if fails:
         for f in fails:

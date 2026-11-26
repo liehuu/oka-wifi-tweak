@@ -26,6 +26,7 @@ verify-deb.py 的核心是 C7（架构精确比较）与 C8（LC_CODE_SIGNATURE�
 
 import io
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -110,9 +111,29 @@ def make_macho(cputype=CPU_TYPE_ARM64, cpusubtype=0, with_sig=True, fat=False,
     return blob
 
 
-# C11 要能在真实产物里找到的三条串，自测样本用同一套，避免两边漂移。
-HOVER_CSS = (b'#listing tr.row-file:hover > td { background-color: #f0f6fd; }\n'
-             b'transition: background-color 120ms ease-out;\n')
+# C11 只在产物里校验**性质**（有 :hover>td 规则 / 色值具体 / 对白底对比度
+# ≥1.20 / 与选中色不同 / 选中更深），不校验具体用哪个蓝。所以这些自测样本
+# 也不该写死某一个版本的颜色 —— 下面每个变体只表达一种设计状态。
+def hover_css(hover='#cfe0f5', sel='#bdd4f0',
+              selector='#listing tr.row-file:hover > td',
+              transition='transition: background-color 120ms ease-out;\n',
+              media_first=False):
+    """拼一段结构等价于 oka-wifi.css 的悬停/选中 CSS 片段。"""
+    main = '%s { background-color: %s; }\n' % (selector, hover)
+    selrule = ('#listing tr.row-file.oka-selected,\n'
+               '#listing tr.row-file.oka-selected > td {\n'
+               '  background-color: %s !important;\n}\n'
+               '#listing tr.row-file.oka-selected > td { border-top-color: #93bde8; }\n'
+               % sel)
+    media = ('@media (hover: none) {\n'
+             '  #listing tr.row-file:hover > td { background-color: transparent; }\n'
+             '}\n')
+    body = main + transition + selrule
+    return (media + body) if media_first else (body + media)
+
+
+# 正向样本：与 oka-wifi.css 当前设计一致的三层蓝色
+HOVER_CSS = hover_css().encode()
 
 
 def make_control_tar(arch='iphoneos-arm', postinst_mode=0o755, with_postinst=True):
@@ -253,6 +274,15 @@ CASES = []
 
 
 def case(name, should_pass, deb_bytes, scheme, arch, cpu, want_in_output=None):
+    """注册一个用例。
+
+    ★ want_in_output 支持 str 或 tuple（全部都要出现）。
+    ★★ 传 '[Cxx]' 时会被归一化成 '::error::[Cxx]' —— 这一条很关键：
+      verify-deb.py 每段开头都会 print('\n[C11] ...')，所以 `'[C11]' in out`
+      永远成立。第一版就是这么写的，于是「反向用例是否真的被这条判据拦住」
+      完全没验到：任何一处失败都能让 want 满足，用例看着很严格其实恒真。
+      改成匹配 `::error::` 前缀（只有 ck.fail 才会打）才是真判据。
+    """
     CASES.append((name, should_pass, deb_bytes, scheme, arch, cpu, want_in_output))
 
 
@@ -269,7 +299,18 @@ def build_cases():
     # C11 反向样本
     no_cstr = make_macho(CPU_TYPE_ARM64, 0, with_sig=True)          # 完全没有 __const
     cstr_truncated = make_macho(CPU_TYPE_ARM64, 0, with_sig=True,
-                                cstring=b'#f0f6fd only\n')          # 有色值缺选择器/过渡
+                                cstring=b'#cfe0f5 only\n')          # 有色值缺选择器/过渡
+    # ★ 这几条才是 v1.6.3 改写 C11 的真正目的：
+    #   「颜色改了」不该让判据红，「颜色浅到看不出」必须让判据红。
+    faint = make_macho(CPU_TYPE_ARM64, 0, with_sig=True,
+                       cstring=hover_css(hover='#f0f6fd').encode())   # v1.6.2 的色
+    same_as_sel = make_macho(CPU_TYPE_ARM64, 0, with_sig=True,
+                             cstring=hover_css(sel='#cfe0f5').encode())
+    sel_lighter = make_macho(CPU_TYPE_ARM64, 0, with_sig=True,
+                             cstring=hover_css(hover='#bdd4f0',
+                                               sel='#cfe0f5').encode())
+    only_transparent = make_macho(CPU_TYPE_ARM64, 0, with_sig=True,
+                                  cstring=hover_css(hover='transparent').encode())
 
     # ---- 正向：三个 scheme 各自的合法包 ----
     case('rootful 合法包', True,
@@ -351,6 +392,34 @@ def build_cases():
          build_deb(cstr_truncated, 'iphoneos-arm', ''),
          'rootful', 'iphoneos-arm', 'arm64', '[C11]')
 
+    # ★ v1.6.3：色值不再是判据常量，所以必须证明「判据真的会跟着设计变红」。
+    #   下面四条都是**结构完全正确**、只有颜色不对 —— 如果判据还写死某个色值，
+    #   第一条会红（假红：颜色只是换了个蓝），后三条会绿（假绿：色差根本不够）。
+    case('悬停色太浅（v1.6.2 的 #f0f6fd，对比 1.09）', False,
+         build_deb(faint, 'iphoneos-arm', ''),
+         'rootful', 'iphoneos-arm', 'arm64', '[C11]')
+
+    case('悬停色 == 选中色（分不出路过和选中）', False,
+         build_deb(same_as_sel, 'iphoneos-arm', ''),
+         'rootful', 'iphoneos-arm', 'arm64', '[C11]')
+
+    case('选中色比悬停色浅（层次反了）', False,
+         build_deb(sel_lighter, 'iphoneos-arm', ''),
+         'rootful', 'iphoneos-arm', 'arm64', '[C11]')
+
+    case('悬停色只有 transparent（没真上色）', False,
+         build_deb(only_transparent, 'iphoneos-arm', ''),
+         'rootful', 'iphoneos-arm', 'arm64', '[C11]')
+
+    # ★ 正向反向验证：把同一份 CSS 里的 @media 块挪到最前面，
+    #   判据必须仍然通过 —— 否则说明它取的是「第一条匹配」而不是
+    #   「第一条能解析成颜色的匹配」，那样任何人调整书写顺序都会假红。
+    media_first = make_macho(CPU_TYPE_ARM64, 0, with_sig=True,
+                             cstring=hover_css(media_first=True).encode())
+    case('@media (hover:none) 写在主规则前面（顺序无关）', True,
+         build_deb(media_first, 'iphoneos-arm', ''),
+         'rootful', 'iphoneos-arm', 'arm64')
+
 
 def main():
     build_cases()
@@ -363,10 +432,23 @@ def main():
         rc, out = run_verify(deb, scheme, arch, cpu)
         got_pass = (rc == 0)
         ok = (got_pass == should_pass)
-        if ok and want and (not should_pass) and want not in out:
-            # 失败方向还要确认是**这一条**判据拦住的，不是别处先失败
-            ok = False
-            reason = '期望输出含 %s，但没有（可能被别的检查先拦住）' % want
+        if ok and want and (not should_pass):
+            # 失败方向还要确认是**这一条**判据拦住的，不是别处先失败。
+            # want 归一化成 ::error::[Cxx] —— 段标题 'Cxx' 每次都打，用它判恒真。
+            wants = want if isinstance(want, (list, tuple)) else [want]
+            errs = [ln for ln in out.splitlines() if '::error::' in ln]
+            missing = []
+            for w in wants:
+                key = '::error::' + w if re.fullmatch(r'\[C\d+\]', w) else w
+                if not any(key in ln for ln in errs):
+                    missing.append(w)
+            if missing:
+                ok = False
+                reason = ('期望 ::error:: 含 %s，实际 %d 条错误：%s'
+                          % ('/'.join(missing), len(errs),
+                             ' | '.join(e.strip() for e in errs) or '(无)'))
+            else:
+                reason = ''
         else:
             reason = '' if ok else 'rc=%d 期望%s' % (
                 rc, '通过' if should_pass else '失败')
