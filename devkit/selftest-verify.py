@@ -42,17 +42,49 @@ LC_CODE_SIGNATURE = 0x1D
 LC_SEGMENT_64 = 0x19
 
 
-def make_macho(cputype=CPU_TYPE_ARM64, cpusubtype=0, with_sig=True, fat=False):
+def make_macho(cputype=CPU_TYPE_ARM64, cpusubtype=0, with_sig=True, fat=False,
+               cstring=None):
     """构造最小 Mach-O 64 位可执行体（只有头 + 1~2 个 load command）。
 
     cpusubtype 可以带 capability 高位（arm64e 实测 0x80000002），
     这里原样写入，用于验证 verify-deb.py 是否正确地做 & 0x00FFFFFF 掩码。
+
+    cstring 不为 None 时，会追加一个真实的 __TEXT,__cstring 段（带 1 个 section），
+    里面放这段字节 —— C11 要按段取内容，没有段就判不出来（这正是它的职责）。
     """
     cmds = []
-    # 一个 LC_SEGMENT_64 占位（真实 dylib 必有，解析器要能正确跳过它）
-    seg = struct.pack('<II16sQQQQiiII', LC_SEGMENT_64, 72, b'__TEXT',
-                      0, 0x1000, 0, 0x1000, 5, 5, 0, 0)
-    cmds.append(seg)
+    payload_off = 0x1000
+    if cstring is None:
+        # 一个 LC_SEGMENT_64 占位（真实 dylib 必有，解析器要能正确跳过它）
+        seg = struct.pack('<II16sQQQQiiII', LC_SEGMENT_64, 72, b'__TEXT',
+                          0, 0x1000, 0, 0x1000, 5, 5, 0, 0)
+        cmds.append(seg)
+        data = b''
+    else:
+        # 真段：segment_command_64(72) + section_64(80)，nsects=1
+        # ★ sectname 必须是 __const 而不是 __cstring：真实的 kOkaWebCSS 是
+        #   `static const char kOkaWebCSS[]`，clang 把它放进 __TEXT,__const
+        #   （v1.6.1 实测：__const 130251 字节里含 CSS，__cstring 1913 字节不含）。
+        #   自测样本若用 __cstring，就与生产判据不同段 → 自测证明不了生产。
+        filesize = payload_off + len(cstring)
+        seg = struct.pack('<II16sQQQQiiII', LC_SEGMENT_64, 72 + 80, b'__TEXT',
+                          0, filesize, 0, filesize, 5, 5, 1, 0)
+        # section_64 = sectname(16) segname(16) addr(8) size(8) offset(4)
+        #              align(4) reloff(4) nreloc(4) flags(4) r1(4) r2(4) r3(4) = 80
+        sect = struct.pack('<16s16sQQIIIIIIII',
+                           b'__const', b'__TEXT',
+                           0,                 # addr
+                           len(cstring),      # size
+                           payload_off,       # offset
+                           2,                 # align
+                           0,                 # reloff
+                           0,                 # nreloc
+                           0,                 # flags
+                           0,                 # reserved1
+                           0,                 # reserved2
+                           0)                 # reserved3
+        cmds.append(seg + sect)
+        data = cstring
     if with_sig:
         # LC_CODE_SIGNATURE: cmd, cmdsize, dataoff, datasize
         cmds.append(struct.pack('<IIII', LC_CODE_SIGNATURE, 16, 0x1000, 0x40))
@@ -66,6 +98,9 @@ def make_macho(cputype=CPU_TYPE_ARM64, cpusubtype=0, with_sig=True, fat=False):
                       0x00100085,   # flags（随便一个含 DYLD_LINK 的组合）
                       0)
     blob = hdr + body
+    if data:
+        # 把 __cstring 内容垫到 payload_off（段里声明的 offset）
+        blob = blob + b'\x00' * (payload_off - len(blob)) + data
     if fat:
         # 简单包一层 fat 头：magic + nfat_arch + 一个 arch 描述
         nfat = 1
@@ -73,6 +108,11 @@ def make_macho(cputype=CPU_TYPE_ARM64, cpusubtype=0, with_sig=True, fat=False):
         arch = struct.pack('>iiIII', CPU_TYPE_ARM64, 0, 4096, len(blob), 12)
         blob = fat_hdr + arch + blob
     return blob
+
+
+# C11 要能在真实产物里找到的三条串，自测样本用同一套，避免两边漂移。
+HOVER_CSS = (b'#listing tr.row-file:hover > td { background-color: #f0f6fd; }\n'
+             b'transition: background-color 120ms ease-out;\n')
 
 
 def make_control_tar(arch='iphoneos-arm', postinst_mode=0o755, with_postinst=True):
@@ -217,11 +257,19 @@ def case(name, should_pass, deb_bytes, scheme, arch, cpu, want_in_output=None):
 
 
 def build_cases():
-    ok_arm64 = make_macho(CPU_TYPE_ARM64, 0, with_sig=True)
+    # ★ 正向样本必须带真实的 __cstring 段并塞入悬停 CSS ——
+    #   C11 判的是「这段 CSS 在不在运行时能取到的段里」，没有段就判失败。
+    #   第一版这些样本只有空的 LC_SEGMENT_64 占位，加 C11 后三个合法包全红，
+    #   那是自测样本不完整，不是判据错。样本补齐才是正确修法。
+    ok_arm64 = make_macho(CPU_TYPE_ARM64, 0, with_sig=True, cstring=HOVER_CSS)
     # arm64e 的 cpusubtype 真实值带 capability 高位
-    ok_arm64e = make_macho(CPU_TYPE_ARM64, 0x80000002, with_sig=True)
-    no_sig = make_macho(CPU_TYPE_ARM64, 0, with_sig=False)
-    fat = make_macho(CPU_TYPE_ARM64, 0, with_sig=True, fat=True)
+    ok_arm64e = make_macho(CPU_TYPE_ARM64, 0x80000002, with_sig=True, cstring=HOVER_CSS)
+    no_sig = make_macho(CPU_TYPE_ARM64, 0, with_sig=False, cstring=HOVER_CSS)
+    fat = make_macho(CPU_TYPE_ARM64, 0, with_sig=True, fat=True, cstring=HOVER_CSS)
+    # C11 反向样本
+    no_cstr = make_macho(CPU_TYPE_ARM64, 0, with_sig=True)          # 完全没有 __const
+    cstr_truncated = make_macho(CPU_TYPE_ARM64, 0, with_sig=True,
+                                cstring=b'#f0f6fd only\n')          # 有色值缺选择器/过渡
 
     # ---- 正向：三个 scheme 各自的合法包 ----
     case('rootful 合法包', True,
@@ -293,6 +341,15 @@ def build_cases():
     case('plist 权限 755', False,
          build_deb(ok_arm64, 'iphoneos-arm', '', plist_mode=0o755),
          'rootful', 'iphoneos-arm', 'arm64', '[C9]')
+
+    # ---- C11：行悬停 CSS 必须真的在 __cstring（运行时常量）里 ----
+    case('无 __const 段（CSS 没进运行时）', False,
+         build_deb(no_cstr, 'iphoneos-arm', ''),
+         'rootful', 'iphoneos-arm', 'arm64', '[C11]')
+
+    case('__const 里 CSS 被截断（只剩色值）', False,
+         build_deb(cstr_truncated, 'iphoneos-arm', ''),
+         'rootful', 'iphoneos-arm', 'arm64', '[C11]')
 
 
 def main():

@@ -37,6 +37,9 @@ C7  dylib 的 Mach-O cputype/cpusubtype 与预期架构精确相等（不做子�
 C8  dylib 带 LC_CODE_SIGNATURE
 C9  权限：.dylib / 脚本 755，plist 644
 C10 不出现重复成员名（tar 里同名会覆盖，dpkg 行为不定）
+C11 v1.6.2 行悬停的 CSS 真的被内联进 dylib 的 __const 段
+    （kOkaWebCSS 是 const 数组，落在 __TEXT,__const；不能在 __debug_str 里
+    —— 那说明它只被调试信息引用，运行时拿不到这段 CSS，悬停等于没做）
 
 用法
 ====
@@ -282,6 +285,69 @@ def parse_macho(blob):
         'subtype_raw': cpu_subtype,
         'has_sig': has_sig,
     }
+
+
+def describe_macho(info):
+    if info.get('is_fat'):
+        return 'FAT (universal) 0x%08X' % info['magic']
+    name = CPU_NAMES.get((info['cputype'], info['cpusubtype']),
+                         'cputype=0x%X subtype=0x%X'
+                         % (info['cputype'], info['cpusubtype']))
+    return '%s (subtype_raw=0x%08X)' % (name, info['subtype_raw'])
+
+
+LC_SEGMENT_64 = 0x19
+
+
+def sections_by_name(blob):
+    """按段名取出各 __TEXT/__DATA 段的**内容字节**，返回 {sectname: bytes}。
+
+    ★ 为什么必须按段取，不能在全文件搜字节：
+      编译器会把源文件里的字符串常量同时写进 __cstring（运行时常量）
+      和调试信息（__DWARF 的 .debug_str）。全文件搜到的可能是后者 ——
+      那说明字符串只存在于调试信息里，运行时拿不到，功能等于没做。
+      这个坑在 v1.6.1 的产物核验里踩过一次（按 UTF-8 全文件搜中文命中 0，
+      实际那些中文在 __ustring 里是 UTF-16LE）。
+
+    只处理 64 位、非 fat 的单切片（本工程三种变体都是这样）。
+    """
+    if len(blob) < 32:
+        return {}
+    magic = struct.unpack('>I', blob[0:4])[0]
+    if magic == 0xCFFAEDFE:
+        e = '<'
+    elif magic == 0xFEEDFACF:
+        e = '>'
+    else:
+        return {}
+    ncmds, sizeofcmds = struct.unpack(e + 'II', blob[16:24])
+
+    out = {}
+    off, left = 32, ncmds
+    end = 32 + sizeofcmds
+    while left > 0 and off + 8 <= end:
+        cmd, cmdsize = struct.unpack(e + 'II', blob[off:off + 8])
+        if cmdsize < 8 or off + cmdsize > len(blob):
+            break
+        if cmd == LC_SEGMENT_64:
+            # segment_command_64: cmd(4) cmdsize(4) segname(16) vmaddr(8) vmsize(8)
+            #   fileoff(8) filesize(8) maxprot(4) initprot(4) nsects(4) flags(4) = 72
+            nsects = struct.unpack(e + 'I', blob[off + 64:off + 68])[0]
+            so = off + 72
+            for _ in range(nsects):
+                # section_64: sectname(16) segname(16) addr(8) size(8) offset(4) ...
+                if so + 72 > len(blob):
+                    break
+                sectname = blob[so:so + 16].rstrip(b'\x00').decode('ascii', 'replace')
+                size = struct.unpack(e + 'Q', blob[so + 40:so + 48])[0]
+                foff = struct.unpack(e + 'I', blob[so + 48:so + 52])[0]
+                if foff and size and foff + size <= len(blob):
+                    out.setdefault(sectname, b'')
+                    out[sectname] += blob[foff:foff + size]
+                so += 80   # sizeof(section_64)
+        off += cmdsize
+        left -= 1
+    return out
 
 
 def describe_macho(info):
@@ -568,6 +634,58 @@ def main(argv):
             m = mode_of(data_by_name[n])
             ck.check(m == 0o644, 'C9',
                      '%s 权限 644' % n, '%s 权限是 %o，期望 644' % (n, m))
+
+    # ---------------- C11: 行悬停 CSS 真的进了运行时 ----------
+    # ★ 判据盯的是「这段 CSS 在不在运行时能取到的段里」，不是「源码里写没写」。
+    #   gen-webassets.py 把它编成 kOkaWebCSS，Tweak.xm 在 epilogue 里追加到页面
+    #   —— 少任何一环，真机上就是没效果。
+    #
+    # ★★ 段名必须查 __const，不是 __cstring。
+    #   kOkaWebCSS 是 `static const char kOkaWebCSS[]`，clang 把常量数组放进
+    #   __TEXT,__const。实测 v1.6.1 产物：__const 130251 字节里含 #e8f3ff 与
+    #   tr.row-file.oka-selected，而 __cstring 只有 1913 字节、不含任何 CSS。
+    #   第一版写成查 __cstring，会在每个包上假 FAIL —— 判据找错地方比不查更糟，
+    #   它会让人去怀疑产物，而真正的错在判据。
+    #
+    # ★ 为什么不能在全文件搜字节：__DWARF/__debug_str 里也有源文件的字符串，
+    #   搜到了只说明「调试信息里有」，运行时拿不到。必须按段取。
+    print('\n[C11] v1.6.2 行悬停 CSS 已内联进运行时')
+    if blob:
+        try:
+            secs = sections_by_name(blob)
+        except Exception as exc:                       # noqa: BLE001
+            secs = {}
+            ck.fail('C11', '段解析异常: %s' % exc)
+        cst = secs.get('__const', b'')
+        ck.check(bool(cst), 'C11',
+                 '__const 段存在（%d 字节）' % len(cst),
+                 '__const 段缺失或为空，取不到内联 CSS 常量（kOkaWebCSS 是 const 数组）')
+        if cst:
+            # 三条缺一不可：悬停色、:hover>td 选择器、transition 声明。
+            # 只查一条的话，CSS 被截断/改坏仍然 PASS。
+            for needle, why in (
+                (b'#f0f6fd', '悬停色 #f0f6fd'),
+                (b'tr.row-file:hover > td', ':hover > td 选择器（条纹行靠它上色）'),
+                (b'transition: background-color 120ms ease-out',
+                 '过渡声明（缺了切换会硬跳）'),
+            ):
+                ck.check(needle in cst, 'C11',
+                         '运行时 CSS 含 %s' % why,
+                         '运行时 CSS 缺 %s（%r）—— 页面拿不到这段，真机上悬停无效'
+                         % (why, needle.decode()))
+            # ★ 负向：选择器不该只活在调试信息里。
+            #   若 __const 里没有、__debug_str 里有，说明这份 CSS 没被当成
+            #   运行时常量编进去（只被日志/断言引用），线上拿不到。
+            dbg = secs.get('__debug_str', b'')
+            ck.check(
+                not (dbg and b'tr.row-file:hover > td' in dbg
+                     and b'tr.row-file:hover > td' not in cst),
+                'C11',
+                '悬停 CSS 在运行时段内，不只在调试信息里',
+                '悬停选择器只出现在 __debug_str（调试信息），没进 __const —— '
+                '运行时拿不到这段 CSS，真机上悬停不会生效')
+    else:
+        ck.fail('C11', '没取到 dylib，无法核验内联 CSS')
 
     return finish(ck)
 

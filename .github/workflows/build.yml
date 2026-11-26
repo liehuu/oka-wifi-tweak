@@ -25,7 +25,7 @@ on:
 
 env:
   # 版本号单一来源，禁止在别处硬编码（否则会出现「包名 v1.0、内容 v1.1」）。
-  VERSION: ${{ github.event.inputs.version || '1.6.1' }}
+  VERSION: ${{ github.event.inputs.version || '1.6.2' }}
   HOMEBREW_NO_AUTO_UPDATE: 1
 
 jobs:
@@ -97,6 +97,16 @@ jobs:
           node --check web/oka-wifi.js
           python3 devkit/selftest-webassets.py
           python3 devkit/gen-webassets.py web .build/OkaWebAssets.h
+
+      # v1.6.2 行悬停高亮闸门：
+      #  check-hover-css.py 是 build.sh 构建时真正调用的那一份（不是另抄的镜像）；
+      #  selftest-hover-gate.py 对它做 9 个破坏注入，证明这些判据**会失败**。
+      #  两个都要跑：只跑正向等于「永远不会红的检查」，只跑反向证明不了生产闸门就是它。
+      - name: Hover highlight gate
+        run: |
+          set -eu
+          python3 devkit/check-hover-css.py web/oka-wifi.css
+          python3 devkit/selftest-hover-gate.py
 
       - name: Build ${{ matrix.scheme }}
         run: |

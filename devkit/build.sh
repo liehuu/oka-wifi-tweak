@@ -448,6 +448,35 @@ if grep -qF "ta.style.display = 'none';" "$ROOT/web/oka-wifi.js"; then
 fi
 echo "✓ 复制下载链接：走原版 /download / 绝对地址 / execCommand 复制"
 
+# ---------- 4a-5) v1.6.2 行悬停高亮闸门 ----------
+# 这五条都是「写错了也不报错、但效果明显不对」的性质，必须在构建时卡住：
+#
+# ① 必须有 `:hover > td` 的生效规则。原表格是 table-striped，Bootstrap 的条纹
+#    背景画在 **td** 上（.table-striped > tbody > tr:nth-child(odd) > td），
+#    td 不透明就盖住了 tr 的背景色。只写 `tr:hover` 的结果是奇数行完全不变色、
+#    偶数行才变色 —— 实测确认过（截图像素：奇数行仍是 #f9f9f9）。
+# ② 悬停色和选中色必须是两个不同的值。若写成一样，用户分不出
+#    「鼠标路过」和「已勾选准备操作」。
+# ③ 过渡只能写 background-color，不能写 all。写 all 会让每个格子上的
+#    border / box-shadow / 文字色一起过渡，几十行同时重绘，手机上明显掉帧。
+# ④ 必须保留 @media (hover: none)。手机点一下之后 :hover 会黏住，
+#    高亮停在那一行不消失，比没有高亮更糟。
+# ⑤ 每个状态的色值只能定义一处。重复定义会让反证失效
+#    （删掉其中一处效果不变），判据看着能失败、实际抓不到东西。
+#
+# ★★ 判据抽成独立脚本 devkit/check-hover-css.py，不写在这里的 heredoc 里。
+#   原因：写在 heredoc 里就只能靠「另写一份等价实现」来验证它对不对，
+#   而那证明不了真实闸门有效（照抄逻辑的镜像对真实实现零约束力）。
+#   抽成脚本后，反证脚本跑的就是构建时跑的那一份，结论直接对生产生效。
+#   另：第一版这里写的是 `grep -qF '#listing tr.row-file:hover > td {'`，
+#   反证时发现它是摆设 —— @media (hover: none) 块里有同名选择器
+#   （色值设成 transparent），主规则被整段删掉后 grep 照样命中。
+if ! python3 "$ROOT/devkit/check-hover-css.py" "$ROOT/web/oka-wifi.css"; then
+  echo "✗ 行悬停高亮闸门未通过（见上方 ✗ 逐条原因）"
+  exit 1
+fi
+echo "✓ 行悬停：:hover>td 生效 / 悬停色≠选中色 / 只过渡 background-color / 触屏降级 / 色值单点定义"
+
 # 负向：v1.1.5 的「点行即下载」入口必须彻底消失。用户明确要求取消；
 # 旧实现一旦回流，点名称又会触发下载，左侧热区也会被行级 handler 干扰。
 if grep -aqF "openRow" "$BUILD/$NAME.dylib"; then
