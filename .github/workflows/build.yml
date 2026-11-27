@@ -25,7 +25,7 @@ on:
 
 env:
   # 版本号单一来源，禁止在别处硬编码（否则会出现「包名 v1.0、内容 v1.1」）。
-  VERSION: ${{ github.event.inputs.version || '1.6.9' }}
+  VERSION: ${{ github.event.inputs.version || '1.6.9.1' }}
   HOMEBREW_NO_AUTO_UPDATE: 1
 
 jobs:
@@ -131,11 +131,12 @@ jobs:
 
       # v1.6.6 桌面动态图标闸门：
       #  check-icon-switch.py 是 build.sh 构建时真正调用的那一份；
-      #  selftest-icon-gate.py 对它做 28 个破坏注入 + 8 个 devkit 侧样本
+      #  selftest-icon-gate.py 对它做 29 个破坏注入 + 8 个 devkit 侧样本
       #  （含 3 个良性注释变更），证明这些判据**会失败**、且不误伤。
       #  v1.6.9 起面板三条源码不变量（动作栈 ≤4 行 / 只读信息走 message /
-      #  present 前收键盘）各配了专属破坏样本（M33/M34/M35）——
-      #  真机实测动作行超过末 4 行会从栈顶整行消失，正是这三条要守的。
+      #  present 前收键盘）各配了专属破坏样本（M33/M34/M35）；v1.6.9.1 再补
+      #  M36（present completion 必须收掉 alert 自动获焦——装机实测键盘重起
+      #  又把底部动作行挤掉）。
       #  反向测试实测抓到过闸门自身的缺陷（裸子串 in 判断被「加后缀改名」
       #  放过），修的是闸门不是测试 —— 这就是为什么两个都要跑。
       - name: Icon switch gate

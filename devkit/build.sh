@@ -217,13 +217,13 @@ if ! python3 "$ROOT/devkit/check-icon-switch.py" "$ROOT/Tweak.xm"; then
   echo "✗ 动态图标闸门未通过（开/关图标不会自动切换，或入口位置/文案退化）"
   exit 1
 fi
-echo "✓ v1.6.6 起动态图标：切换链路/四个同步点/becomeActive 兜底/注入标记门齐备；v1.6.8：偏移≥56/图标三态；v1.6.9：动作栈≤4行/只读信息走message/present前收键盘"
+echo "✓ v1.6.6 起动态图标：切换链路/四个同步点/becomeActive 兜底/注入标记门齐备；v1.6.8：偏移≥56/图标三态；v1.6.9：动作栈≤4行/只读信息走message/present前收键盘；v1.6.9.1：completion 再收 alert 自动获焦"
 
 # v1.6.6 dylib 侧指纹（切换链路与门控的标识，丢了不会报错、只会不切换）
 for sym in "setAlternateIconName:completionHandler:" \
            "OkaIconGreen" "OkaIconInjected" \
            "applicationDidBecomeActive:" \
-           "endEditing"; do
+           "endEditing" "resignFirstResponder"; do
   grep -aq "$sym" "$BUILD/$NAME.dylib" \
     || { echo "✗ dylib 缺 ${sym}（桌面动态图标会静默失效 / v1.6.9 面板不收键盘，动作行会被键盘高度 budget 挤掉）"; exit 1; }
 done

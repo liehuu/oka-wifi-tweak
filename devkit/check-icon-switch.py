@@ -513,6 +513,18 @@ def main(path):
                 fails.append(("keyboardDismiss",
                               "present 延时 %ss < 0.3s：等不到键盘退场（约 0.25s）做完"
                               % _d.group(1)))
+        # v1.6.9.1：present 的 completion 必须收掉 alert 自己 text field 的
+        #   焦点。装机实测：0.35s 延时只等掉了宿主键盘，UIAlertController
+        #   present 完成后自动让其密码 field 成为 first responder，密码键盘
+        #   重起、高度预算再被压爆，底部「关闭密码/保存/取消」只露一半。
+        i_comp = pnl.find("completion:")
+        i_res = pnl.find("resignFirstResponder")
+        if i_res < 0 or i_comp < 0 or i_res < i_comp:
+            fails.append(("keyboardDismiss",
+                          "present 的 completion 里没有 resignFirstResponder（或排在 "
+                          "completion 之前）：UIAlertController 呈现后会自动让 text field "
+                          "成为 first responder，键盘重起又把面板高度预算压爆 —— "
+                          "v1.6.9.1 装机实测底部「关闭密码/保存/取消」被挤得只露一半"))
 
         # v1.6.8：图标状态行三态文案。真机实测（卸载重装 deb 仍显示未启用）：
         #   宿主是自签/侧载装态时 helper 按安全门控跳过，「重装本插件可恢复」
@@ -609,7 +621,8 @@ def main(path):
           "（v1.6.6/v1.6.7 CI 编译红的同型教训）")
     print("  ✓ 面板 v1.6.9 渲染层修复：动作栈 ≤ 4 行交互行（菜单/关闭密码/保存/取消），"
           "只读信息（图标三态 + 构建版本）走 message 不进行动栈；present 前 "
-          "endEditing 收键盘 + 延时 ≥ 0.3s 等键盘退场（v1.6.7/v1.6.8 实测只末 4 行可见）")
+          "endEditing 收键盘 + 延时 ≥ 0.3s 等键盘退场、completion 里再收一次 "
+          "alert 自动获焦（v1.6.9/v1.6.9.1 两轮装机实测）")
     print("  ✓ 面板只读状态：图标三态按宿主装态分支（已启用 / App Store 丢失可重装恢复 / "
           "非 App Store 门控跳过讲清放行路径，重装承诺只属于 App Store 分支）；"
           "「长按快捷菜单」开关行是第一个 action、取消垫尾；构建版本引 OKA_BUILD_TAG 且在 message 内；"

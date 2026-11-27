@@ -99,7 +99,7 @@
 //   装错方案都会让新代码不生效，而面板外观看不出来）。改版本号必须同步这里。
 //   v1.6.9 起只读信息（图标三态 + 版本）全部走 message、不再占 action 行，
 //   原因见 OkaPresentWebAuthSettings 里的 v1.6.9 注释。
-#define OKA_BUILD_TAG @"v1.6.9"
+#define OKA_BUILD_TAG @"v1.6.9.1"
 
 static NSString *const kPrefsPath = @"/var/mobile/Library/Preferences/com.oka.wifitweak.plist";
 
@@ -1314,10 +1314,18 @@ OkaSaveWebAuth(u.length ? u : @"oka", p);
     //   实测只末 4 行可见）。收键盘 + 动作栈收敛到 4 行双管齐下。
     //   present 延迟 0.35s：等键盘退场动画做完（约 0.25s）再弹，避免
     //   alert 在键盘仍占位的窗口期里定型。
+    // ★ v1.6.9.1：present 的 completion 里收掉 alert 自己 text field 的
+    //   焦点。v1.6.9 装机实测（用户 2026-11-28 截图）：0.35s 延时只等掉了
+    //   **宿主**密码框的键盘，UIAlertController present 完成后又会自动让
+    //   它自己的密码 field 成为 first responder，密码键盘重起、面板高度
+    //   预算再次被压爆 —— 底部「关闭密码 / 保存 / 取消」被挤得只露一半。
+    //   呈现完成的同一帧主动 resign：键盘不占位，四行动作全可见。
     [vc.view endEditing:YES];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        [vc presentViewController:ac animated:YES completion:nil];
+        [vc presentViewController:ac animated:YES completion:^{
+            for (UITextField *tf in ac.textFields) [tf resignFirstResponder];
+        }];
     });
 }
 

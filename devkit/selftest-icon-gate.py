@@ -381,6 +381,17 @@ def build_cases():
          "        }]];\n",
          "",
          {"panelOrder"}),
+        # M36 删 present completion 里的收焦点：v1.6.9.1 装机实测的复发形态
+        #   —— UIAlertController present 后自动让自己的密码 field 获焦，
+        #   键盘重起压爆高度预算，底部「关闭密码/保存/取消」只露一半。
+        #   只删 resign 那行（completion 块留空），keyboardDismiss 必须炸。
+        ("M36 删 completion 收焦点",
+         "        [vc presentViewController:ac animated:YES completion:^{\n"
+         "            for (UITextField *tf in ac.textFields) [tf resignFirstResponder];\n"
+         "        }];\n",
+         "        [vc presentViewController:ac animated:YES completion:^{\n"
+         "        }];\n",
+         {"keyboardDismiss"}),
     ]
     for name, old, _new, _exp in cases:
         if isinstance(old, tuple):   # 两步变异：分别验锚点

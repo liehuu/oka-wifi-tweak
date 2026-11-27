@@ -317,6 +317,8 @@ _GCDWebServerGetPrimaryIPAddress 硬编码 strcmp(ifa_name,"en0")
 
 - **面板动作行整行消失的根因与修法**：v1.6.6 → v1.6.7 → v1.6.8 三代实测收敛出一条不变式——**动作行总数一旦超过末 4 行，超出的行从栈顶开始整行消失**（v1.6.7 丢第 1 行「长按快捷菜单」、v1.6.8 再丢「桌面动态图标」，两代可见行恒为最末 4 行；两张反馈截图密码框均获焦、键盘均弹起，键盘占掉约 290pt 高度预算）。版本行在 v1.6.8 里能露面恰因为它排在第 3 位、仍在末 4 行之内——这同时反证了「设备跑的不是新构建」的旧假设不成立。修法三管齐下：① **只读信息（图标三态 + 构建版本）全部搬进 alert message**（message 是纯文本、可控高、实测从不丢，「不能误导」三态文案一字未改）；② **动作栈收敛为 4 行交互行**（长按快捷菜单 / 关闭密码 / 保存 / 取消）；③ **present 前 `endEditing:` 收键盘 + 延时 0.35s 等键盘退场**（约 0.25s 动画做完）再弹面板，避免 alert 在键盘仍占位的窗口期里定型。源码不变量（动作栈 ≤ 4 行 / 只读行走 message / 收键盘在位）在 `check-icon-switch.py` 里各有可失败判据，反证样本 M33/M34/M35 专门守这三条。
 
+**v1.6.9.1 的装机复测补丁**（v1.6.9 装机后用户截图：message 里的版本行与「长按快捷菜单：开（点我切换）」行都已正常显示——从栈顶丢行的修复生效；但面板弹出后**键盘又起来了**，底部「关闭密码/保存/取消」被挤得只露一半）：根因是 `UIAlertController` present 完成后会**自动让它自己的密码 field 成为 first responder**，密码键盘重起、高度预算再次被压爆——v1.6.9 的 0.35s 延时只等掉了宿主密码框的键盘，没防住 alert 自己的自动获焦。修法：present 的 completion 同一帧里 `resignFirstResponder` 收掉 alert 全部 text field 的焦点，键盘不占位、四行动作全可见。已知限制：用户之后**主动点面板里的密码框**输入时键盘仍会遮住底部动作行（`UIAlertController` 固有限度），收起键盘或点面板外区域即恢复完整面板。
+
 ### 功能 5 —— 服务假死自愈（v1.6.7）
 
 **用户实测症状**：开着 WiFi 传输过一会儿电脑网页打不开；App 没被杀；WiFi 传输页连接状态从「已连接」变「等待中」；**关掉再打开开关，电脑立刻能访问、状态回「已连接」**。即服务层假死，而 App 的 ON/OFF 开关与宿主 UI 都不体现死态。
@@ -677,8 +679,8 @@ sh devkit/build.sh arm64  iphoneos-arm    1.2.0   # 传统 rootful
 | `devkit/selftest-shortcut-gate.py` | 上面那个闸门的反证：7 个破坏注入 + 1 个良性样本 | CI 的 Shortcut clear gate；本地可跑 |
 | `devkit/check-hover-css.py` | v1.6.3 行悬停 CSS 的性质判据（真上色 / 色差 ≥1.20 / 悬停≠选中 / 选中更深） | `build.sh` 内；CI 的 Hover highlight gate 同代码 |
 | `devkit/selftest-hover-gate.py` | 上面那个闸门的反证：9 个破坏注入 | CI 的 Hover highlight gate；本地可跑 |
-| `devkit/check-icon-switch.py` | v1.6.6 桌面动态图标：切换只走公开 API 两参调用、on=绿/off=primary、四同步点（启动/停服/冷启动/回前台）与顺序、becomeActive 注册不被开关 gate、共源常量头、图标三态只读信息、按钮改名换位、负向拦截角标 API。v1.6.7 起还钉：按钮 topAnchor 偏移 ≥ 40、「长按快捷菜单」行必须是第一个 action。v1.6.8 起再钉：偏移下限 40 → 56（真机复测 40 仍压提示文字）、`OkaIconSwitchReady` 必须读 plist 文件（不许回退 `infoDictionary` 启动快照）、图标状态行三态文案（按宿主装态分支，「重装本插件 deb 可恢复」只许出现在 App Store 分支）。v1.6.9 起钉面板渲染层三条不变量：动作栈 `addAction` ≤ 4 行（actionCap）、只读信息必须走 message 不进行动栈（msgInfo）、present 前 `endEditing:` 收键盘 + 延时 ≥ 0.3s（keyboardDismiss） | `build.sh` 内；CI 的 Icon switch gate 同代码 |
-| `devkit/selftest-icon-gate.py` | 上面那个闸门的反证：28 个 dylib 侧 + 8 个 devkit 侧样本（含 3 个良性注释变更）——反向测试实测抓到过闸门自身缺陷（裸子串被「加后缀改名」放过、prototype 令 fn_body 抓错函数体），修的是闸门不是测试；M26/M27 分别锁「声明先于使用」与「SDK 常量↔框架头」（v1.6.6 run 42/43 两个编译盲区）；M28/M29/M30 分别锁「常量退回 8.0」「回退 infoDictionary」「取消挪回第一行」（v1.6.7 三个实测回归）；M31/M32 分别锁「图标三态退回无条件文案」「删 message 构建版本」（v1.6.8 两个实测回归）；M33/M34/M35 分别锁「只读行搬回动作栈」「删 present 前收键盘」「删保存行」（v1.6.9 渲染层修复的三条源码不变量——真机实测动作行超过末 4 行会从栈顶整行消失） | CI 的 Icon switch gate；本地可跑 |
+| `devkit/check-icon-switch.py` | v1.6.6 桌面动态图标：切换只走公开 API 两参调用、on=绿/off=primary、四同步点（启动/停服/冷启动/回前台）与顺序、becomeActive 注册不被开关 gate、共源常量头、图标三态只读信息、按钮改名换位、负向拦截角标 API。v1.6.7 起还钉：按钮 topAnchor 偏移 ≥ 40、「长按快捷菜单」行必须是第一个 action。v1.6.8 起再钉：偏移下限 40 → 56（真机复测 40 仍压提示文字）、`OkaIconSwitchReady` 必须读 plist 文件（不许回退 `infoDictionary` 启动快照）、图标状态行三态文案（按宿主装态分支，「重装本插件 deb 可恢复」只许出现在 App Store 分支）。v1.6.9 起钉面板渲染层三条不变量：动作栈 `addAction` ≤ 4 行（actionCap）、只读信息必须走 message 不进行动栈（msgInfo）、present 前 `endEditing:` 收键盘 + 延时 ≥ 0.3s（keyboardDismiss）；v1.6.9.1 再钉：present 的 completion 里必须 `resignFirstResponder` 收掉 alert 自动获焦（装机实测键盘重起挤掉底部动作行） | `build.sh` 内；CI 的 Icon switch gate 同代码 |
+| `devkit/selftest-icon-gate.py` | 上面那个闸门的反证：29 个 dylib 侧 + 8 个 devkit 侧样本（含 3 个良性注释变更）——反向测试实测抓到过闸门自身缺陷（裸子串被「加后缀改名」放过、prototype 令 fn_body 抓错函数体），修的是闸门不是测试；M26/M27 分别锁「声明先于使用」与「SDK 常量↔框架头」（v1.6.6 run 42/43 两个编译盲区）；M28/M29/M30 分别锁「常量退回 8.0」「回退 infoDictionary」「取消挪回第一行」（v1.6.7 三个实测回归）；M31/M32 分别锁「图标三态退回无条件文案」「删 message 构建版本」（v1.6.8 两个实测回归）；M33/M34/M35 分别锁「只读行搬回动作栈」「删 present 前收键盘」「删保存行」（v1.6.9 渲染层修复的三条源码不变量——真机实测动作行超过末 4 行会从栈顶整行消失）；M36 锁「删 completion 收焦点」（v1.6.9.1 装机实测：alert 自动获焦重起键盘，底部动作行只露一半） | CI 的 Icon switch gate；本地可跑 |
 | `devkit/check-service-heal.py` | v1.6.7 服务假死自愈：探活必须本地回环 connect 且**不许读 `isRunning`**（恒 YES，探了等于没探）；自愈必须重放 `startWithOptions:error:` 原路（不许只改状态位）；防抖 90s；三个触发面齐备（回前台 / 45s 定时器含 `dispatch_resume` / 启动即挂）；实例与 options 在 `my_startWithOptions` 落袋；`ServiceHeal` 偏好可读；自愈段无 NSLog；声明先于使用 | `build.sh` 内；CI 的 Service heal gate 同代码 |
 | `devkit/selftest-service-heal.py` | 上面那个闸门的反证：10 个破坏样本（每个精确触发一个判据键）+ 1 个良性注释变更 | CI 的 Service heal gate；本地可跑 |
 | `devkit/selftest-iconinject.c` | 红→绿像素映射 host 单测（10 个 expect_tint + 4 条 is_red 断言）：视觉规格的判定边界（什么算红）改坏了只有这里会红 | `build.sh` 内先跑再编 helper |
@@ -837,7 +839,7 @@ v1.1.3 起插件**不输出任何系统日志**，所以判据一律看功能表
 | 卸载插件后桌面图标残留绿色版本 / 长按菜单出现「开启WiFi传输」的空壳 | 卸载时 prerm 的 restore 没跑成功 | 手动 `dpkg -i` 重装一次本插件再走正常卸载（prerm 会重跑 restore）；极端情况下用 Filza 删 `<App>.app/OkaIconGreen*.png` 与 Info.plist 里的 `OkaIconInjected` 键（备份还原失败的兜底路径） |
 | 设置面板的浮动按钮又压住底部 WebDAV 页签了 | 按钮约束回退到了 bottomAnchor | 确认装的是 v1.6.9；按钮应锚在页面右上角 `btn.topAnchor`。有导航栏的页面走导航栏右侧 ⚙️，本就不占内容区 |
 | 设置面板的浮动按钮压住页面顶部提示标签的文字了 | 偏移常量退回 < 56 | v1.6.8 起钉死 `constant ≥ 56`（真机复测 40 仍稍微压字）；确认装的是 v1.6.9 |
-| 设置面板里「长按快捷菜单」开关不见了 | ① 设备实跑的不是新构建（旧 dylib 残留 / App 装完没杀）；② 装过别的方案（rootful+rootless 双装）导致加载的是旧副本；③ v1.6.7/v1.6.8 的渲染层缺陷：动作行超过末 4 行时超出行从栈顶整行消失（键盘弹起时高发） | 第一现场看面板 message 里的「插件版本」行：不是 v1.6.9 就先 `dpkg -l | grep com.oka.wifitweak` 核对已安装包，只保留一个；然后确认 `<App>.app` 上级的 dylib 路径只剩一份（rootful `/Library/MobileSubstrate/DynamicLibraries/`、rootless/roothide `/var/jb/Library/MobileSubstrate/DynamicLibraries/`），respring 后**从多任务划掉 App 重开**。版本行显示 v1.6.9 仍缺行才是代码问题，带版本号反馈；v1.6.9 起只读信息（图标三态 + 版本）已改走 message、动作栈只剩 4 行，该形态已修 |
+| 设置面板里「长按快捷菜单」开关不见了 | ① 设备实跑的不是新构建（旧 dylib 残留 / App 装完没杀）；② 装过别的方案（rootful+rootless 双装）导致加载的是旧副本；③ v1.6.7/v1.6.8 的渲染层缺陷：动作行超过末 4 行时超出行从栈顶整行消失（键盘弹起时高发） | 第一现场看面板 message 里的「插件版本」行：不是 v1.6.9 就先 `dpkg -l | grep com.oka.wifitweak` 核对已安装包，只保留一个；然后确认 `<App>.app` 上级的 dylib 路径只剩一份（rootful `/Library/MobileSubstrate/DynamicLibraries/`、rootless/roothide `/var/jb/Library/MobileSubstrate/DynamicLibraries/`），respring 后**从多任务划掉 App 重开**。版本行显示 v1.6.9.1 仍缺行才是代码问题，带版本号反馈；v1.6.9 起只读信息（图标三态 + 版本）已改走 message、动作栈只剩 4 行，该形态已修；v1.6.9.1 修掉「面板弹出后 alert 自动获焦重起键盘挤掉底部动作行」，若**手动点密码框**时底部行被键盘遮住，收键盘即恢复（`UIAlertController` 固有限度） |
 | 桌面动态图标装完 deb 仍显示「未启用（宿主非 App Store 原版装态…）」 | 宿主是自签 / 侧载 / 企业签形态（helper 装期检测到 `embedded.mobileprovision` 或无 `iTunesMetadata.plist`），按「不导致 App 打不开」红线默认不注入 | 文案已按 v1.6.8 三态分家：这类形态下**重装无效**，别反复卸装。要强行注入：设备上执行 postinst 提示里的 `__HELPER__ inject --force`（或 plist 写 `IconInjectForce=true` 后再装 deb），签名风险自担 |
 | 桌面动态图标装完 deb 仍显示「未启用（App 更新或重装会丢失…）」 | App Store 原版装态但注入没成功（App 刚升级覆盖过 / 安装期 helper 退出码非 0） | 重装本插件 deb 即可恢复；postinst 会打印 helper 退出码，非 0 时连原因一起给 |
 | 开着 WiFi 传输过一会儿网页打不开，连接状态变「等待中」，关开开关就恢复 | 服务端假死：监听 socket 被系统回收 / Wi-Fi 漫游后僵住，`isRunning` 仍报 YES | v1.6.7 起 45s 周期 + 回前台自动探活自愈（本地回环实测，90s 防抖）。可 `plist` 写 `ServiceHeal=false` 关闭自愈观察旧行为 |
@@ -880,7 +882,7 @@ wifitweak/
 │   ├── selftest-shortcut-gate.py # 上面这个闸门的反证：7 破坏注入 + 1 良性样本
 │   ├── check-hover-css.py      # v1.6.3 行悬停 CSS 闸门
 │   ├── selftest-hover-gate.py  # 上面这个闸门的反证
-│   ├── check-icon-switch.py    # v1.6.6 桌面动态图标闸门（切换链路 / 四同步点 / 共源常量 / UI 改名换位；v1.6.7：偏移≥40 / 读文件 / 行序；v1.6.8：偏移≥56 / 图标三态；v1.6.9：动作栈≤4行 / 只读信息走message / present前收键盘）
+│   ├── check-icon-switch.py    # v1.6.6 桌面动态图标闸门（切换链路 / 四同步点 / 共源常量 / UI 改名换位；v1.6.7：偏移≥40 / 读文件 / 行序；v1.6.8：偏移≥56 / 图标三态；v1.6.9：动作栈≤4行 / 只读信息走message / present前收键盘；v1.6.9.1：completion 收 alert 自动获焦）
 │   ├── selftest-icon-gate.py   # 上面这个闸门的反证：23 个 dylib 侧 + 8 个 devkit 侧样本
 │   ├── check-service-heal.py   # v1.6.7 服务假死自愈闸门（回环探活不读 isRunning / 原路重放 / 防抖 / 三触发面）
 │   ├── selftest-service-heal.py # 上面这个闸门的反证：10 破坏样本 + 1 良性样本
