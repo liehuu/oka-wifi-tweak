@@ -1708,18 +1708,33 @@ static void StartWiFiTransfer(BOOL fromShortcut) {
 static BOOL (*orig_didFinishLaunching)(id, SEL, UIApplication *, NSDictionary *);
 static BOOL my_didFinishLaunching(id self, SEL _cmd, UIApplication *app, NSDictionary *opts) {
     BOOL r = orig_didFinishLaunching ? orig_didFinishLaunching(self, _cmd, app, opts) : YES;
-    if (!gEnableShortcut) return r;
 
-    NSMutableArray *items = [NSMutableArray array];
-    if (app.shortcutItems) [items addObjectsFromArray:app.shortcutItems];
-
-    BOOL exists = NO;
-    for (UIApplicationShortcutItem *it in items) {
-        if ([it.type isEqualToString:SHORTCUT_TYPE]) { exists = YES; break; }
+    // 一次遍历同时得出「有没有自己那条」和「把别人那条留下来」。
+    // 不能只判断 exists 再整体重写：app.shortcutItems 可能含 App 自带项
+    // （当前版本 Info.plist 里没有，但别人改过的包可能有），必须原样保留。
+    NSArray *cur = app.shortcutItems;
+    NSMutableArray *keep = [NSMutableArray array];
+    BOOL hadOurs = NO;
+    for (UIApplicationShortcutItem *it in cur) {
+        if ([it.type isEqualToString:SHORTCUT_TYPE]) hadOurs = YES;
+        else [keep addObject:it];
     }
-    if (!exists) {
-        [items insertObject:MakeShortcutItem() atIndex:0];
-        app.shortcutItems = items;
+
+    if (!gEnableShortcut) {
+        // ★ 修：关掉开关时必须**主动摘掉**自己那条，而不是「什么都不写」。
+        //   动态快捷项由系统按 bundle id 持久化（存在 App 的数据容器里），
+        //   只「不写」不会让它消失 —— 下次长按菜单里照样在。
+        //   而点击回调 application:performActionForShortcutItem: 是插件用
+        //   class_addMethod 补的，插件一卸载就没人处理 → 菜单项变成点了没反应的空壳。
+        //   所以这里写回 keep：有自己那条就摘掉；没有就一个字都不写，
+        //   避免每次冷启动都触发一次无意义的持久化写入。
+        if (hadOurs) app.shortcutItems = keep;
+        return r;
+    }
+
+    if (!hadOurs) {
+        [keep insertObject:MakeShortcutItem() atIndex:0];
+        app.shortcutItems = keep;
     }
     return r;
 }
@@ -2255,7 +2270,12 @@ static void OkaWiFiInit(void) {
         }
 
         // ---- 1: 快捷菜单 ----
-        if (gEnableShortcut) {
+        // ★ didFinishLaunching 必须**无条件** hook：
+        //   清除分支（gEnableShortcut=NO 时摘掉自己那条）就在 my_didFinishLaunching 里。
+        //   若把 hook 也套进 if (gEnableShortcut)，关掉开关后这段代码根本不会被挂上，
+        //   清除分支永远走不到 —— 那是装饰代码，不是修复。
+        //   点击回调仍只在开关打开时补：关掉后菜单项已摘除，不该再接管点击。
+        {
             Class appDel = LookupClass(APPDEL_CLASS_MANGLED, APPDEL_CLASS_SWIFT);
             if (appDel) {
                 HookInstanceMethod(appDel,
@@ -2264,10 +2284,12 @@ static void OkaWiFiInit(void) {
                                    (void **)&orig_didFinishLaunching,
                                    "-[AppDelegate application:didFinishLaunchingWithOptions:]");
 
-                SEL sel = @selector(application:performActionForShortcutItem:completionHandler:);
-                if (!class_addMethod(appDel, sel, (IMP)my_performAction, "v@:@@@?")) {
-                    Method m = class_getInstanceMethod(appDel, sel);
-                    if (m) method_setImplementation(m, (IMP)my_performAction);
+                if (gEnableShortcut) {
+                    SEL sel = @selector(application:performActionForShortcutItem:completionHandler:);
+                    if (!class_addMethod(appDel, sel, (IMP)my_performAction, "v@:@@@?")) {
+                        Method m = class_getInstanceMethod(appDel, sel);
+                        if (m) method_setImplementation(m, (IMP)my_performAction);
+                    }
                 }
             }
         }

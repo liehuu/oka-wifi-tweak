@@ -25,7 +25,7 @@ on:
 
 env:
   # 版本号单一来源，禁止在别处硬编码（否则会出现「包名 v1.0、内容 v1.1」）。
-  VERSION: ${{ github.event.inputs.version || '1.6.3' }}
+  VERSION: ${{ github.event.inputs.version || '1.6.4' }}
   HOMEBREW_NO_AUTO_UPDATE: 1
 
 jobs:
@@ -115,6 +115,18 @@ jobs:
           python3 devkit/check-hover-css.py web/oka-wifi.css
           python3 devkit/selftest-hover-gate.py
           python3 devkit/selftest-verify.py
+
+      # v1.6.4 快捷菜单自清闸门：
+      #  check-shortcut-clear.py 是 build.sh 构建时真正调用的那一份；
+      #  selftest-shortcut-gate.py 对它做 7 个破坏注入 + 1 个良性样本，
+      #  证明这些判据**会失败**、且不误伤（误伤一样是闸门缺陷）。
+      #  两个都要跑：只跑正向等于「永远不会红的检查」，只跑反向证明不了
+      #  生产闸门就是它。
+      - name: Shortcut clear gate
+        run: |
+          set -eu
+          python3 devkit/check-shortcut-clear.py Tweak.xm
+          python3 devkit/selftest-shortcut-gate.py
 
       - name: Build ${{ matrix.scheme }}
         run: |

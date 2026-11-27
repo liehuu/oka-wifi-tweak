@@ -154,6 +154,21 @@ for sym in UIApplicationShortcutItem application:performActionForShortcutItem:co
     || { echo "✗ dylib 缺 ${sym}（长按菜单会失效）"; exit 1; }
 done
 
+# ---------- 4-0) v1.6.4 快捷菜单自清闸门 ----------
+# 用户实测：插件卸载后长按 App 图标仍显示「开启WiFi传输」且点击无效果。
+# 根因：动态快捷项由系统按 bundle id 持久化在 App 数据容器，App 不写回就不消失；
+#   而 v1.6.3 及以前是 `if (!gEnableShortcut) return r;` —— 一个字节都不写，
+#   「关开关再卸载」这条路根本不存在，用户只能删 App 重装。
+# v1.6.4 把清除分支改成主动摘除自己那条（保留他人项），并把注册段的
+#   didFinishLaunching hook 改成无条件挂载（gate 住它，关开关后清除分支不可达）。
+# 判据抽成独立脚本 devkit/check-shortcut-clear.py（不写 heredoc，理由同 4a-5）；
+# 反证见 devkit/selftest-shortcut-gate.py：7 个破坏注入 + 1 个良性样本。
+if ! python3 "$ROOT/devkit/check-shortcut-clear.py" "$ROOT/Tweak.xm"; then
+  echo "✗ 快捷菜单自清闸门未通过（关开关后长按菜单项不会消失 / 会误删他人快捷项）"
+  exit 1
+fi
+echo "✓ v1.6.4 快捷菜单：关开关主动摘除自己那条 / 保留他人项 / hook 无条件挂载"
+
 # 功能 2a：蜂窝解禁
 for sym in SCNetworkReachabilityGetFlags reachabilityChangedWithNote: \
            changeWifiTransferStateAction: setHidden:; do
