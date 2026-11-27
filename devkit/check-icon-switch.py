@@ -110,15 +110,25 @@ def fn_body(src, signature):
 
     返回 None 表示签名不存在（调用方负责报「找不到函数」）。
     不按「签名后第几个字符」猜函数体起点，避免行内注释 / 前导属性干扰。
+
+    前向声明（签名与下一个 '{' 之间先遇到 ';'）一律跳过，从下一个签名
+    匹配继续找 —— v1.6.6 上线 prototype 后的实测教训：声明行写在调用点
+    之前，find 命中声明、再往后找 '{' 抓到的是别处的块，函数体判据
+    （readyFn 等）会拿错文本假红。
     """
-    p = src.find(signature)
-    if p < 0:
-        return None
-    b = src.find("{", p + len(signature))
-    if b < 0:
-        return None
-    body, _ = extract_block(src, b)
-    return body
+    start = 0
+    while True:
+        p = src.find(signature, start)
+        if p < 0:
+            return None
+        t = p + len(signature)
+        m = re.search(r"[;{]", src[t:t + 512])
+        if m is None:
+            return None
+        if m.group() == "{":
+            body, _ = extract_block(src, t + m.start())
+            return body
+        start = p + 1  # 前向声明：跳过这个匹配，继续找定义
 
 
 def main(path):
@@ -237,6 +247,37 @@ def main(path):
         fails.append(("readyFn",
                       "OkaIconSwitchReady 没读共源标记键 OKA_ICON_KEY_INJECTED："
                       "helper 注入成功与否 dylib 无从得知，未启用时也会尝试切换"))
+
+    # ---------- 声明先于使用（C 规则，v1.6.6 CI 实测教训） ----------
+    # v1.6.6 首发 CI 三个 scheme 全挂在同一个编译错：OkaIconSwitchReady 的
+    # 面板状态行调用点(Tweak.xm:1225)早于 static 定义(:1417)，clang 一次报
+    # 两个错 —— call to undeclared function + static declaration follows
+    # non-static declaration。本地只跑文本闸门不跑 clang，这类错只有 CI 能
+    # 抓，所以闸门必须自己看行序：任何调用点早于定义时，必须存在更早的
+    # 前向声明（以分号结尾、无函数体的那行）。
+    for _fname in ("OkaIconSwitchReady", "OkaSetAppIcon"):
+        _def_re = re.compile(r"^\s*static\s+\w+\s+%s\s*\([^;]*\)\s*\{" % _fname)
+        _proto_re = re.compile(r"^\s*static\s+\w+\s+%s\s*\([^;]*\)\s*;" % _fname)
+        _call_re = re.compile(r"\b%s\s*\(" % _fname)
+        _def_line = _proto_line = _first_call = None
+        for _i, _ln in enumerate(src.split("\n"), 1):
+            if _def_re.match(_ln):
+                _def_line = _i
+            elif _proto_re.match(_ln):
+                _proto_line = _i
+            elif _call_re.search(_ln) and _first_call is None:
+                _first_call = _i
+        if _def_line is None:
+            continue  # 定义缺失由 helperFound / readyFn 两条判据负责，不重复报
+        if _first_call is not None and _first_call < _def_line:
+            if _proto_line is None or _proto_line > _first_call:
+                fails.append(("declBeforeUse",
+                              "%s 的调用点(行 %d)早于定义(行 %d) 且没有更早的前向声明："
+                              "C 规则声明先于使用，缺了 CI clang 直接报 "
+                              "call to undeclared function + "
+                              "static declaration follows non-static declaration "
+                              "两个错（v1.6.6 首发三个 scheme 正是死在这里）"
+                              % (_fname, _first_call, _def_line)))
 
     # ---------- 同步点①：启动成功才亮绿 ----------
     st = fn_body(src, "static BOOL my_startWithOptions(id self, SEL _cmd, NSDictionary *options, NSError **error)")

@@ -274,6 +274,12 @@ def build_cases():
          "    if (d[@\"IconSwitch\"])        gEnableSwitchIcon  = [d[@\"IconSwitch\"] boolValue];\n",
          "",
          {"prefsRead"}),
+        # M26 删前置声明：回到 v1.6.6 首发 CI 挂掉的形态 —— 调用点(panel row)
+        #   早于定义，clang 报 implicit declaration + static follows
+        #   non-static，三个 scheme 一起死。本地不跑 clang，只能靠这条判据。
+        ("M26 删 OkaIconSwitchReady 前置声明",
+         "static BOOL OkaIconSwitchReady(void);\n", "",
+         {"declBeforeUse"}),
     ]
     for name, old, _new, _exp in cases:
         if isinstance(old, tuple):   # 两步变异：分别验锚点

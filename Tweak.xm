@@ -843,6 +843,11 @@ static void OkaAttachWebAuthEntry(id page);
 //   必须前置声明：调用点（OkaPresentWebAuthSettings 的面板 action）在文件中部，
 //   定义在设置区后部 —— C 规则声明先于使用，缺了这条 CI 编译直接报错。
 static void OkaToggleShortcutMenu(void);
+// ★ v1.6.6：桌面动态图标就绪状态（面板只读状态行调用），实现在设置区后部。
+//   同一教训第二次：缺前置声明时 clang 一次报两个错 —— 先
+//   call to undeclared function（implicit declaration），再
+//   static declaration follows non-static declaration。
+static BOOL OkaIconSwitchReady(void);
 
 // hook: reachabilityChangedWithNote:
 static void (*orig_reachabilityChanged)(id, SEL, id);
