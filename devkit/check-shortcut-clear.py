@@ -177,6 +177,31 @@ def main(path):
     if "MakeShortcutItem()" not in src:
         fails.append(("maker", "缺 MakeShortcutItem()：快捷项构造函数没被调用"))
 
+    # ---------- v1.6.5 判据：重装自动清 + App 内开关 ----------
+    # 用户诉求：装回插件后零操作清掉残留菜单项，且永远不用手动编辑 plist。
+    # 自动化依赖三个部件，每个部件都是「缺了就静默失效」的，必须逐条钉住。
+    AUTO_CLEAR = "if (hadOurs && OkaShortcutChoiceUndecided())"
+    if AUTO_CLEAR not in src:
+        fails.append(("autoClearPresent",
+                      "缺重装自动清分支 `if (hadOurs && OkaShortcutChoiceUndecided())`："
+                      "插件装回后残留的快捷项不会自动摘除，用户还得手动清"))
+    if "OkaShortcutChoiceUndecided(void)" not in src:
+        fails.append(("choiceGuard",
+                      "缺 OkaShortcutChoiceUndecided(void) 定义：自动清没有「未表达过选择」"
+                      "判据，会误伤手动配过 plist 的用户"))
+    if "OkaToggleShortcutMenu(void)" not in src:
+        fails.append(("toggleEntry", "缺 OkaToggleShortcutMenu(void) 定义：App 内没有开关入口"))
+    if "OkaToggleShortcutMenu();" not in src:
+        fails.append(("toggleEntry",
+                      "设置面板没调用 OkaToggleShortcutMenu()：开关入口是装饰，用户还是一键都用不上"))
+    if "setBool:on forKey:kOkaShortcutKey" not in src:
+        fails.append(("udPersist",
+                      "OkaSetShortcutEnabled 没写 NSUserDefaults 的开关值：设置不跨重启生效"))
+    if "setBool:YES forKey:kOkaShortcutChoiceKey" not in src:
+        fails.append(("udPersist",
+                      "缺「表达过选择」标记位写入：plist 旧值与 App 内设置会互相覆盖"
+                      "（与 v1.6.1 密码持久化同源的缺陷）"))
+
     # ---------- 注册段判据（hook 必须无条件挂载） ----------
     a = raw.find(REG_A)
     b = raw.find(REG_B)

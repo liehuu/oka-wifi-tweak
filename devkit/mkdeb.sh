@@ -97,7 +97,7 @@ printf '    CopyURLOnShortcut BOOL  开启后复制地址\n'
 printf '\n'
 printf '关于卸载：长按菜单项由 iOS 按 App 的 bundle id 持久化，只卸载插件不会让它消失。\n'
 printf '要移除它：先把 EnableShortcut 设为 false 并重启一次 App（v1.6.4 起会自动摘除），\n'
-printf '然后再卸载本插件；v1.6.3 及以前的版本关开关不写回，只能删掉 App 重装。\n'
+printf '然后再卸载本插件；v1.6.5 起重装本插件后首次启动 App 会自动清掉残留。\n'
 printf '\n'
 exit 0
 EOF

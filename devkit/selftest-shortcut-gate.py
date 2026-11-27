@@ -134,11 +134,31 @@ def build_cases():
         ("M7 整个退回 v1.6.3 基线",
          old_block, indent + "if (!gEnableShortcut) return r;",
          {"oldGuardGone", "clearBlockFound"}),
+        # ---- v1.6.5 ----
+        # M8 自动清分支退化成恒真（判据被短路）→ 重装场景不再自动清
+        ("M8 自动清条件短路成恒真",
+         "if (hadOurs && OkaShortcutChoiceUndecided()) {", "if (hadOurs && 1) {",
+         {"autoClearPresent"}),
+        # M9 改名判据函数定义（调用还在、定义没了）
+        ("M9 删判据函数定义",
+         "static BOOL OkaShortcutChoiceUndecided(void) {",
+         "static BOOL OkaShortcutChoiceUndecidedOld(void) {",
+         {"choiceGuard"}),
+        # M10 删掉设置面板里的调用 → 入口变装饰
+        ("M10 删 App 内开关调用",
+         grab(r"[ \t]*OkaToggleShortcutMenu\(\);\n", "OkaToggleShortcutMenu(); 调用行"), "",
+         {"toggleEntry"}),
+        # M11 删「表达过选择」标记位写入 → v1.6.1 同款覆盖 bug 回归
+        ("M11 删标记位写入",
+         grab(r"[ \t]*\[ud setBool:YES forKey:kOkaShortcutChoiceKey\];\n", "标记位写入行"), "",
+         {"udPersist"}),
     ]
+    # SETUP FAIL 判据：锚点至少出现一次（>=1 就够，允许全文替换 ——
+    # v1.6.5 起 `[keep insertObject:...]` 有两处：启用分支 + App 内开关开启分支，
+    # 变异把它们一起换掉才是「整体重写 items」复活的完整形态）。
     for name, old, _new, _exp in cases:
-        if REAL.count(old) != 1:
-            print("[SETUP FAIL] %s：注入锚点在 Tweak.xm 里出现 %d 次（必须恰好 1 次）"
-                  % (name, REAL.count(old)))
+        if REAL.count(old) < 1:
+            print("[SETUP FAIL] %s：注入锚点在 Tweak.xm 里一次都没出现" % name)
             sys.exit(1)
     return cases
 
@@ -167,7 +187,7 @@ def main():
 
     # 2) 破坏样本：必须 rc=1 且实际触发键集合 == 预期集合
     for name, old, new, expect in cases:
-        mutated = REAL.replace(old, new, 1)
+        mutated = REAL.replace(old, new)   # 全文替换：同一形态多处出现要一起变异
         if mutated == REAL:
             print("  ✗ %s：注入是空操作（替换前后一致）——假测试" % name)
             bad += 1
@@ -191,7 +211,7 @@ def main():
     for name, old, _new in BENIGN:
         indent = old[:len(old) - len(old.lstrip())]
         new = indent + "// 良性变更测试：重写这句注释不影响任何判据。"
-        mutated = REAL.replace(old, new, 1)
+        mutated = REAL.replace(old, new)   # 全文替换：同一形态多处出现要一起变异
         if mutated == REAL:
             print("  ✗ %s：注入是空操作" % name)
             bad += 1

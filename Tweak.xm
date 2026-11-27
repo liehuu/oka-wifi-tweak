@@ -164,6 +164,13 @@ static BOOL gEnableWebPasswordUI = YES;
 static NSString *const kOkaWebUserKey = @"OkaWebUsername";
 static NSString *const kOkaWebPassKey = @"OkaWebPassword";
 static NSString *const kOkaWebSetKey  = @"OkaWebAuthConfigured";
+// ★ v1.6.5：长按快捷菜单开关的 App 内设置（与密码同口径：NSUserDefaults 优先，
+//   plist 只作兼容读取）。
+//   kOkaShortcutChoiceKey 是「用户表达过选择」的标记位：只要置位，plist 里的
+//   EnableShortcut 就不再让步、重装自动清也不再触发（用户显式管理过）。
+//   v1.6.1 的教训正是「必须有个标记位区分空密码（=关闭）和没设置过」。
+static NSString *const kOkaShortcutKey       = @"EnableShortcut";
+static NSString *const kOkaShortcutChoiceKey = @"OkaShortcutChoiceSet";
 
 static void LoadPrefs(void) {
     // ★ v1.6.1 关键修复：NSUserDefaults 必须**最先**读，且不能被 plist 缺失打断。
@@ -180,9 +187,21 @@ static void LoadPrefs(void) {
         gWebPassword = p.length ? p : nil;
     }
 
+    // ★ v1.6.5：快捷菜单开关同样 NSUserDefaults 优先。
+    //   写入方有两个：App 内设置面板的切换、重装自动清（都走 NSUserDefaults）。
+    //   这里必须先读、且要单独记「表达过选择」的标记 —— 否则 plist 里的旧值
+    //   会把 App 内刚关掉的开关又掀回开启（与 v1.6.1 密码的 bug 同源）。
+    BOOL scChosen = ([ud objectForKey:kOkaShortcutChoiceKey] != nil);
+    if (scChosen) {
+        gEnableShortcut = [ud boolForKey:kOkaShortcutKey];
+    }
+
     NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
     if (!d) return;
-    if (d[@"EnableShortcut"])    gEnableShortcut    = [d[@"EnableShortcut"] boolValue];
+    // 用户表达过选择时 plist 不让步；没表达过才读 plist 的显式配置。
+    if (d[@"EnableShortcut"]) {
+        if (!scChosen) gEnableShortcut = [d[@"EnableShortcut"] boolValue];
+    }
     if (d[@"EnableCellular"])    gEnableCellular    = [d[@"EnableCellular"] boolValue];
     if (d[@"EnableIPFix"])       gEnableIPFix       = [d[@"EnableIPFix"] boolValue];
     if (d[@"EnableWebEnhance"])  gEnableWebEnhance  = [d[@"EnableWebEnhance"] boolValue];
@@ -814,6 +833,10 @@ static void ForceStartButtonVisible(id page) {
 static void RewriteAddressIfNeeded(id page);
 // v1.6.0：密码设置入口，实现在文件后部（设置界面段）。
 static void OkaAttachWebAuthEntry(id page);
+// ★ v1.6.5：长按快捷菜单开关（App 设置面板调用），实现在设置区后部。
+//   必须前置声明：调用点（OkaPresentWebAuthSettings 的面板 action）在文件中部，
+//   定义在设置区后部 —— C 规则声明先于使用，缺了这条 CI 编译直接报错。
+static void OkaToggleShortcutMenu(void);
 
 // hook: reachabilityChangedWithNote:
 static void (*orig_reachabilityChanged)(id, SEL, id);
@@ -1174,6 +1197,19 @@ static void OkaPresentWebAuthSettings(id page) {
     [ac addAction:[UIAlertAction actionWithTitle:@"取消"
                                           style:UIAlertActionStyleCancel
                                         handler:nil]];
+
+    // ★ v1.6.5：长按快捷菜单开关。放在这里而不是再加按钮 ——
+    //   OkaAttachWebAuthEntry 的挂载逻辑是「右上角空则占右上角，否则浮动」，
+    //   第二个入口会和密码入口抢同一个位子。面板里多一行零冲突。
+    //   文案里带当前状态，用户不用点进去看：一眼就知道开关是开是关。
+    BOOL menuOn = gEnableShortcut;
+    [ac addAction:[UIAlertAction actionWithTitle:
+                   [NSString stringWithFormat:@"长按快捷菜单：%@（点我切换）",
+                       menuOn ? @"开" : @"关"]
+                                          style:UIAlertActionStyleDefault
+                                        handler:^(UIAlertAction *a) {
+        OkaToggleShortcutMenu();
+    }]];
     if (on) {
         [ac addAction:[UIAlertAction actionWithTitle:@"关闭密码"
                                                style:UIAlertActionStyleDestructive
@@ -1266,6 +1302,68 @@ static void OkaAttachWebAuthEntry(id page) {
                                         constant:-14.0],
         [btn.heightAnchor constraintEqualToConstant:26.0],
     ]];
+}
+
+// ===========================================================================
+//  v1.6.5：长按快捷菜单 —— App 内开关 + 重装自动清
+// ===========================================================================
+//  背景（用户实测）：插件装过又卸载后，长按 App 图标仍显示「开启WiFi传输」，
+//  点击无效果。系统按 bundle id 把动态快捷项持久化在 App 数据容器里，插件不在
+//  就没人再写回。v1.6.4 已能「关开关后重启 App 即摘除」，但关开关要手动编辑
+//  /var/mobile/Library/Preferences 下的 plist —— 用户反馈找不到、不会设。
+//  所以这一版把最后这一步也自动化：
+//    ① 重装自动清：本插件从未表达过开关选择（NSUserDefaults 无标记、plist 无键），
+//       而系统里已有自己那条 = 只能是残留 → 直接摘除，并把开关写关；
+//    ② App 内开关：WiFi 传输页的设置面板里一键开/关，即时生效，永不写 plist 路径。
+//  两件事都只写 NSUserDefaults（沙箱内必可写），plist 同步是 best-effort。
+
+// 写开关。同时置「表达过选择」标记 —— 这个标记让 plist 让步、让自动清不再触发。
+static void OkaSetShortcutEnabled(BOOL on) {
+    gEnableShortcut = on;
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    [ud setBool:on forKey:kOkaShortcutKey];
+    [ud setBool:YES forKey:kOkaShortcutChoiceKey];
+    [ud synchronize];
+
+    // best-effort 同步 plist（与 OkaSaveWebAuth 同口径，沙箱外写不进去就静默失败）。
+    NSMutableDictionary *pl = [NSMutableDictionary dictionaryWithContentsOfFile:kPrefsPath];
+    if (!pl) pl = [NSMutableDictionary dictionary];
+    pl[@"EnableShortcut"] = @(on);
+    [pl writeToFile:kPrefsPath atomically:YES];
+}
+
+// 「用户从没表达过长按菜单开关」？
+//   两个来源都没表过态才算：NSUserDefaults 无标记、plist 里没有 EnableShortcut 键。
+//   手动建过 plist（哪怕写的是 true）的人不受自动清影响 —— 那是显式管理。
+static BOOL OkaShortcutChoiceUndecided(void) {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    if ([ud objectForKey:kOkaShortcutChoiceKey] != nil) return NO;
+    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
+    if (d[@"EnableShortcut"]) return NO;
+    return YES;
+}
+
+// 一键切换（App 设置面板调用）：
+//   持久化 + 立即改当前 App 的 shortcutItems —— 不用重启 App，不用等下次冷启动。
+static void OkaToggleShortcutMenu(void) {
+    BOOL on = !gEnableShortcut;
+    OkaSetShortcutEnabled(on);
+
+    UIApplication *app = [UIApplication sharedApplication];
+    NSMutableArray *keep = [NSMutableArray array];
+    BOOL had = NO;
+    for (UIApplicationShortcutItem *it in app.shortcutItems) {
+        if ([it.type isEqualToString:SHORTCUT_TYPE]) had = YES;
+        else [keep addObject:it];
+    }
+    if (on && !had) {
+        [keep insertObject:MakeShortcutItem() atIndex:0];
+        app.shortcutItems = keep;
+    } else if (!on && had) {
+        app.shortcutItems = keep;
+    }
+    OkaToast(on ? @"长按菜单已开启，立即可用。" :
+                  @"长按菜单已关闭。重启 App 后卸载也不会残留。");
 }
 
 static BOOL (*orig_startWithOptions)(id, SEL, NSDictionary *, NSError **);
@@ -1715,12 +1813,30 @@ static BOOL my_didFinishLaunching(id self, SEL _cmd, UIApplication *app, NSDicti
     NSArray *cur = app.shortcutItems;
     NSMutableArray *keep = [NSMutableArray array];
     BOOL hadOurs = NO;
-    for (UIApplicationShortcutItem *it in cur) {
+for (UIApplicationShortcutItem *it in cur) {
         if ([it.type isEqualToString:SHORTCUT_TYPE]) hadOurs = YES;
         else [keep addObject:it];
     }
 
-    if (!gEnableShortcut) {
+        // ★ v1.6.5：重装自动清。
+        //   场景：插件装过 → 卸载 → 系统里残留自己那条（按 bundle id 持久化，
+        //   插件不在没人写回）。用户装回想清掉它，但手动编辑 plist 太麻烦
+        //   （原话：「找不到、不会设」）—— 那就插件自己动。
+        //   判据两条同时满足才执行：
+        //     ① 系统快捷项里已经有自己那条（hadOurs）；
+        //     ② 用户从未表达过开关选择（NSUserDefaults 无标记、plist 无键）。
+        //   第二条是防误伤：手动写过 plist 的人（哪怕写的是 true）是显式管理，
+        //   不归自动清管。
+        //   动作：摘除残留 + 把开关写关（NSUserDefaults，沙箱内必可写）+ return。
+        //   写关而不只是本次摘除：用户接下来大概率是要卸载，开关保持关闭
+        //   下次启动才不会又把菜单项注入回来；想恢复用 App 设置面板一键开。
+        if (hadOurs && OkaShortcutChoiceUndecided()) {
+            app.shortcutItems = keep;
+            OkaSetShortcutEnabled(NO);
+            return r;
+        }
+
+        if (!gEnableShortcut) {
         // ★ 修：关掉开关时必须**主动摘掉**自己那条，而不是「什么都不写」。
         //   动态快捷项由系统按 bundle id 持久化（存在 App 的数据容器里），
         //   只「不写」不会让它消失 —— 下次长按菜单里照样在。
