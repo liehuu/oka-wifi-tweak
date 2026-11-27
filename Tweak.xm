@@ -1624,7 +1624,7 @@ static BOOL OkaPortAlive(NSUInteger port) {
 }
 
 // 自愈。所有前置条件都不满足时安静返回 —— 这是运行期路径，
-// 不允许弹窗、不允许 NSLog（dpkg/设备日志纪律），只做事不说话。
+// 不允许弹窗、不允许写设备日志（dpkg/设备日志纪律），只做事不说话。
 static void OkaSelfHealService(void) {
     if (!gEnableServiceHeal) return;          // 偏好开关（默认 YES，LoadPrefs）
     if (!gServerRunning || !gServerPort) return;
