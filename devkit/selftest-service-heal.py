@@ -108,6 +108,13 @@ def build_cases():
         # S8 实例不落袋：自愈重放无处可发
         ("S8 my_startWithOptions 不落实例",
          instance, "", {"healInstance"}),
+        # S10 删 callout 参数：v1.6.7 首版 CI run 45... 的编译错原样
+        #   （too few arguments, expected 7, have 6）。本地没有 iOS SDK
+        #   编不了，只能靠这条判据钉参数个数。
+        ("S10 CFSocketCreate 删 callout 参数",
+         "                                      kCFSocketNoCallBack, NULL, &ctx);\n",
+         "                                      kCFSocketNoCallBack, &ctx);\n",
+         {"healSocketCtor"}),
         # S9 删前置声明：回到 v1.6.6 首发 CI 挂掉的形态第三次
         ("S9 删 OkaSelfHealService 前置声明",
          proto, "", {"declBeforeUse"}),
@@ -183,7 +190,7 @@ def main():
     if bad:
         print("selftest-service-heal: FAIL（%d 处不符）" % bad)
         return 1
-    print("selftest-service-heal: PASS（9 个破坏样本精确触发 + 良性样本放过）")
+    print("selftest-service-heal: PASS（10 个破坏样本精确触发 + 良性样本放过）")
     return 0
 
 

@@ -233,7 +233,7 @@ echo "✓ v1.6.6 dylib 切换链路指纹齐全（alternate 名/标记键/become
 #   「已连接」变「等待中」；关开开关即恢复 = 服务端假死而 isRunning 恒 YES。
 # 判据盯四件事：探活走本地回环（不读 isRunning）/ 自愈重放原 hook
 #   （不另起私路只改状态位）/ 防抖与三个触发面齐备 / 实例与 options 落袋。
-# 反证见 selftest-service-heal.py：9 个破坏样本 + 1 个良性样本。
+# 反证见 selftest-service-heal.py：10 个破坏样本 + 1 个良性样本。
 if ! python3 "$ROOT/devkit/check-service-heal.py" "$ROOT/Tweak.xm"; then
   echo "✗ 服务自愈闸门未通过（假死后网页打不开，用户只能手动关开）"
   exit 1

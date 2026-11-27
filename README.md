@@ -317,7 +317,7 @@ _GCDWebServerGetPrimaryIPAddress 硬编码 strcmp(ifa_name,"en0")
 
 **三个触发面**：`applicationDidBecomeActive:` 回前台顺手探一次（用户回来第一件事就是刷新网页）；启动时挂 45s 周期定时器（兜「没人切前后台、一直挂着」）；防抖 90s（连续假死通常是路由器踢客户端 / 系统限制，无限重拉只会耗电刷日志还掩盖真问题）。自愈结果照常同步桌面图标（成功=绿 / 失败=回原图）。
 
-**反例判据全部可失败**（`devkit/check-service-heal.py` + `selftest-service-heal.py` 9 个破坏样本 + 1 个良性）：探活改用 `isRunning` / 自愈只改状态位不重放 / 删防抖 / 删任一触发面 / 删 `dispatch_resume`（timer 创建了永不触发）/ 实例或 options 不落袋（重放丢密码头，网页端 401）/ `ServiceHeal` 偏好读不到，每一条都必须让闸门红。
+**反例判据全部可失败**（`devkit/check-service-heal.py` + `selftest-service-heal.py` 10 个破坏样本 + 1 个良性）：探活改用 `isRunning` / 自愈只改状态位不重放 / 删防抖 / 删任一触发面 / 删 `dispatch_resume`（timer 创建了永不触发）/ 实例或 options 不落袋（重放丢密码头，网页端 401）/ `CFSocketCreate` 删 callout 参数 / `ServiceHeal` 偏好读不到，每一条都必须让闸门红。
 
 ### 功能 3 —— 电脑网页端增强（v1.1.1 定型，v1.1.2 ~ v1.2.0 持续增强）
 
@@ -670,7 +670,7 @@ sh devkit/build.sh arm64  iphoneos-arm    1.2.0   # 传统 rootful
 | `devkit/check-icon-switch.py` | v1.6.6 桌面动态图标：切换只走公开 API 两参调用、on=绿/off=primary、四同步点（启动/停服/冷启动/回前台）与顺序、becomeActive 注册不被开关 gate、共源常量头、面板只读状态行、按钮改名换位、负向拦截角标 API。v1.6.7 起还钉：按钮 topAnchor 偏移 ≥ 40（8.0 会压住顶部提示标签）、`OkaIconSwitchReady` 必须读 plist 文件（不许回退 `infoDictionary` 启动快照）、「长按快捷菜单」行必须是第一个 action | `build.sh` 内；CI 的 Icon switch gate 同代码 |
 | `devkit/selftest-icon-gate.py` | 上面那个闸门的反证：23 个 dylib 侧 + 8 个 devkit 侧样本（含 2 个良性注释变更）——反向测试实测抓到过闸门自身缺陷（裸子串被「加后缀改名」放过、prototype 令 fn_body 抓错函数体），修的是闸门不是测试；M26/M27 分别锁「声明先于使用」与「SDK 常量↔框架头」（v1.6.6 run 42/43 两个编译盲区）；M28/M29/M30 分别锁「常量退回 8.0」「回退 infoDictionary」「取消挪回第一行」（v1.6.7 三个实测回归） | CI 的 Icon switch gate；本地可跑 |
 | `devkit/check-service-heal.py` | v1.6.7 服务假死自愈：探活必须本地回环 connect 且**不许读 `isRunning`**（恒 YES，探了等于没探）；自愈必须重放 `startWithOptions:error:` 原路（不许只改状态位）；防抖 90s；三个触发面齐备（回前台 / 45s 定时器含 `dispatch_resume` / 启动即挂）；实例与 options 在 `my_startWithOptions` 落袋；`ServiceHeal` 偏好可读；自愈段无 NSLog；声明先于使用 | `build.sh` 内；CI 的 Service heal gate 同代码 |
-| `devkit/selftest-service-heal.py` | 上面那个闸门的反证：9 个破坏样本（每个精确触发一个判据键）+ 1 个良性注释变更 | CI 的 Service heal gate；本地可跑 |
+| `devkit/selftest-service-heal.py` | 上面那个闸门的反证：10 个破坏样本（每个精确触发一个判据键）+ 1 个良性注释变更 | CI 的 Service heal gate；本地可跑 |
 | `devkit/selftest-iconinject.c` | 红→绿像素映射 host 单测（10 个 expect_tint + 4 条 is_red 断言）：视觉规格的判定边界（什么算红）改坏了只有这里会红 | `build.sh` 内先跑再编 helper |
 | `node --check web/oka-wifi.js` | 用真实 JS 解析器验语法（不是正则数括号）；runner 缺 node 时**明确报错**，不静默跳过 | CI 的 Web assets gate |
 
@@ -871,7 +871,7 @@ wifitweak/
 │   ├── check-icon-switch.py    # v1.6.6 桌面动态图标闸门（切换链路 / 四同步点 / 共源常量 / UI 改名换位；v1.6.7：偏移≥40 / 读文件 / 行序）
 │   ├── selftest-icon-gate.py   # 上面这个闸门的反证：23 个 dylib 侧 + 8 个 devkit 侧样本
 │   ├── check-service-heal.py   # v1.6.7 服务假死自愈闸门（回环探活不读 isRunning / 原路重放 / 防抖 / 三触发面）
-│   ├── selftest-service-heal.py # 上面这个闸门的反证：9 破坏样本 + 1 良性样本
+│   ├── selftest-service-heal.py # 上面这个闸门的反证：10 破坏样本 + 1 良性样本
 │   ├── iconinject.m            # v1.6.6 注入 helper CLI（inject/restore，安装期以 root 跑，只用 printf）
 │   ├── iconinject-core.h       # 红→绿像素映射纯函数（无 SDK 依赖，可 host 单测）
 │   ├── selftest-iconinject.c   # 红→绿映射 host 单测（10 个 expect_tint + 4 条 is_red 断言）

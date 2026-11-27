@@ -178,6 +178,18 @@ def main(path):
             fails.append(("healNoIsRunning",
                           "探活读了 isRunning：假死时实例 isRunning 恒 YES（用户实测"
                           "App 没杀、状态显示已连接正是它），拿它当判据等于没探"))
+        # CFSocketCreate 签名七个参数（allocator, family, type, proto,
+        # callBackTypes, **callout**, context）—— callout 位必须显式 NULL。
+        # v1.6.7 首版就漏了这个参数：本地没有 iOS SDK 编不了，CI clang
+        # 一次报 too few arguments（expected 7, have 6）。参数个数这种
+        # 编译期事实只能靠闸门在文本侧钉死。
+        if not re.search(r"kCFSocketNoCallBack\s*,\s*NULL\s*,", alive):
+            fails.append(("healSocketCtor",
+                          "CFSocketCreate 少了 callout 参数：签名是 (allocator, "
+                          "protocolFamily, socketType, protocol, callBackTypes, "
+                          "callout, context) 七个参数，无回调场景 callout 位必须"
+                          "显式写 NULL（v1.6.7 首版正是漏它，CI clang 报 "
+                          "too few arguments, expected 7, have 6）"))
 
     # ---------- 自愈：重放原路 + 防抖 ----------
     if heal is not None:
@@ -279,7 +291,8 @@ def main(path):
             sys.stderr.write("  ✗ [%s] %s\n" % (k, msg))
         sys.stderr.write("  共 %d 条判据未通过\n" % len(fails))
         return 1
-    print("  ✓ 探活走本地回环 CFSocketConnectToAddress（127.0.0.1，不碰 isRunning）")
+    print("  ✓ 探活走本地回环 CFSocketConnectToAddress（127.0.0.1，不碰 isRunning）；"
+          "CFSocketCreate 七参齐全（callout=NULL）")
     print("  ✓ 自愈重放 startWithOptions:error: 原路（suspend=NO/密码头/端口 fallback 自动补齐）")
     print("  ✓ 防抖 90s；实例与最近 options 在 my_startWithOptions 落袋")
     print("  ✓ 三个触发面：回前台 / 45s 定时器（含 resume）/ 启动即挂")

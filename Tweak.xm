@@ -1602,7 +1602,7 @@ static BOOL OkaPortAlive(NSUInteger port) {
     CFSocketContext ctx = { 0, NULL, NULL, NULL, NULL };
     CFSocketRef sock = CFSocketCreate(kCFAllocatorDefault,
                                       PF_INET, SOCK_STREAM, IPPROTO_TCP,
-                                      kCFSocketNoCallBack, &ctx);
+                                      kCFSocketNoCallBack, NULL, &ctx);
     if (!sock) return NO;
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
