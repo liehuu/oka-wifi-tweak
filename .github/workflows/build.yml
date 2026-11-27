@@ -25,7 +25,7 @@ on:
 
 env:
   # 版本号单一来源，禁止在别处硬编码（否则会出现「包名 v1.0、内容 v1.1」）。
-  VERSION: ${{ github.event.inputs.version || '1.6.5' }}
+  VERSION: ${{ github.event.inputs.version || '1.6.6' }}
   HOMEBREW_NO_AUTO_UPDATE: 1
 
 jobs:
@@ -75,8 +75,10 @@ jobs:
 
       # 校验器自身的自测：证明 verify-deb.py 的判定**会失败**。
       # 一个从不失败的检查等于没有检查 —— 这条就是为了防这个。
-      # 15 个用例（正向 3 / 反向 12）全部用代码里拼出来的 Mach-O 与 deb，
+      # 30 个用例（正向 5 / 反向 25）全部用代码里拼出来的 Mach-O 与 deb，
       # 不依赖 lipo/otool，因此在 macOS 与本地 Windows 上结果一致。
+      # v1.6.6 起新增 C12：动态图标 helper 的路径/权限/架构/签名/指纹四项
+      # 与 postinst/prerm 存在性（C9 只查 mode，文件整个缺失时静默通过）。
       - name: Verify-deb selftest
         run: |
           set -eu
@@ -102,19 +104,13 @@ jobs:
       #  check-hover-css.py 是 build.sh 构建时真正调用的那一份（不是另抄的镜像）；
       #  selftest-hover-gate.py 对它做 9 个破坏注入，证明这些判据**会失败**。
       #  两个都要跑：只跑正向等于「永远不会红的检查」，只跑反向证明不了生产闸门就是它。
-      #
-      #  ★ selftest-verify.py 也在这里跑（v1.6.3 新增）。理由：
-      #    v1.6.3 把 verify-deb.py 的 C11 从「硬编码色值」改成「解析产物 + 判性质」，
-      #    还顺手修了 fat 二进制触发 KeyError 崩溃的缺陷。那些改动如果只在本地跑过，
-      #    CI 上没人守 —— 下次谁改回来都不会有人发现。这份自测有 22 个用例
-      #    （18 个反向），正好覆盖「判据会不会失败」。
-      #    它在 Windows/macOS 都能跑（自己拼 Mach-O 字节，不需要真 dylib）。
+      #  （selftest-verify.py 不在这里重复跑 —— 它在上面的 Verify-deb selftest 步骤，
+      #   同一 job 里跑两份相同自测只会让人以为有两套判据。）
       - name: Hover highlight gate
         run: |
           set -eu
           python3 devkit/check-hover-css.py web/oka-wifi.css
           python3 devkit/selftest-hover-gate.py
-          python3 devkit/selftest-verify.py
 
       # v1.6.4 快捷菜单自清闸门：
       #  check-shortcut-clear.py 是 build.sh 构建时真正调用的那一份；
@@ -127,6 +123,18 @@ jobs:
           set -eu
           python3 devkit/check-shortcut-clear.py Tweak.xm
           python3 devkit/selftest-shortcut-gate.py
+
+      # v1.6.6 桌面动态图标闸门：
+      #  check-icon-switch.py 是 build.sh 构建时真正调用的那一份；
+      #  selftest-icon-gate.py 对它做 19 个破坏注入 + 7 个 devkit 侧样本
+      #  （含 2 个良性注释变更），证明这些判据**会失败**、且不误伤。
+      #  反向测试实测抓到过闸门自身的缺陷（裸子串 in 判断被「加后缀改名」
+      #  放过），修的是闸门不是测试 —— 这就是为什么两个都要跑。
+      - name: Icon switch gate
+        run: |
+          set -eu
+          python3 devkit/check-icon-switch.py Tweak.xm
+          python3 devkit/selftest-icon-gate.py
 
       - name: Build ${{ matrix.scheme }}
         run: |

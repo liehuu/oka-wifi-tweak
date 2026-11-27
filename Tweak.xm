@@ -82,6 +82,9 @@
 // v1.1.0 网页增强资源（devkit/gen-webassets.py 在编译前生成到 .build/）。
 // 纯 ASCII C 字符串常量 kOkaWebJS / kOkaWebCSS，构建脚本用 -I .build 顶上来。
 #import "OkaWebAssets.h"
+// v1.6.6 桌面动态图标：与 helper iconinject 共用的常量（icon 名 / 标记键 /
+// 宿主 bundle id）。两边必须同源，防止"注入成功但切换失效"的静默分叉。
+#import "oka-icon-common.h"
 
 #define SHORTCUT_TYPE  @"com.oka.wifi.start"
 // ★ Swift 类在 ObjC 运行时里注册的是 mangled 名（我从 __objc_classlist 的
@@ -126,6 +129,7 @@ static Class LookupClass(NSString *mangled, NSString *swiftName) {
 // ---------------------------------------------------------------------------
 // 运行期配置（读 plist，缺省全开）
 // ---------------------------------------------------------------------------
+static BOOL gEnableSwitchIcon = YES;   // 功能 4（v1.6.6）：桌面动态图标（开=红染绿）
 static BOOL gEnableShortcut    = YES;   // 功能 1：长按菜单
 static BOOL gEnableCellular    = YES;   // 功能 2a：蜂窝/热点可开启
 static BOOL gEnableIPFix       = YES;   // 功能 2b：热点 IP 修正
@@ -204,6 +208,8 @@ static void LoadPrefs(void) {
     }
     if (d[@"EnableCellular"])    gEnableCellular    = [d[@"EnableCellular"] boolValue];
     if (d[@"EnableIPFix"])       gEnableIPFix       = [d[@"EnableIPFix"] boolValue];
+    // v1.6.6：桌面动态图标（红染绿）。默认 YES，写 false 可关。
+    if (d[@"IconSwitch"])        gEnableSwitchIcon  = [d[@"IconSwitch"] boolValue];
     if (d[@"EnableWebEnhance"])  gEnableWebEnhance  = [d[@"EnableWebEnhance"] boolValue];
     if (d[@"CopyURLOnShortcut"]) gCopyURLOnShortcut = [d[@"CopyURLOnShortcut"] boolValue];
     if (d[@"EnableFixedAddr"])   gEnableFixedAddr   = [d[@"EnableFixedAddr"] boolValue];
@@ -1210,6 +1216,21 @@ static void OkaPresentWebAuthSettings(id page) {
                                         handler:^(UIAlertAction *a) {
         OkaToggleShortcutMenu();
     }]];
+
+    // ★ v1.6.6：动态图标是否已实际生效的只读状态行（不可点）。
+    //   用户红线「不能误导」：桌面没切换时，用户必须能在 App 内看到
+    //   「未启用」，而不是猜自己哪里点错了。未启用 = 注入没成功
+    //   （自签环境默认不注入 / App 更新后丢失），重装本插件 deb 可恢复。
+    //   文案语义：开=红染绿图标，关=App 默认原图标。
+    BOOL iconReady = OkaIconSwitchReady();
+    UIAlertAction *iconRow = [UIAlertAction actionWithTitle:
+        [NSString stringWithFormat:@"桌面动态图标：%@",
+            iconReady ? @"已启用（开=绿 / 关=原图标）"
+                      : @"未启用（重装本插件可恢复）"]
+                                          style:UIAlertActionStyleDefault
+                                        handler:nil];
+    iconRow.enabled = NO;
+    [ac addAction:iconRow];
     if (on) {
         [ac addAction:[UIAlertAction actionWithTitle:@"关闭密码"
                                                style:UIAlertActionStyleDestructive
@@ -1254,7 +1275,8 @@ static const void *kOkaAuthAttachedKey = &kOkaAuthAttachedKey;
 
 // 挂入口。两种位置，按页面实际结构选：
 //   ① 有导航栏且右上角本来就是空的 → 右上角按钮（零布局冲突，最稳）
-//   ② 否则 → 右下角浮动按钮（不占滚动内容，浮在页面之上）
+//   ② 否则 → 页面右上浮动按钮（v1.6.6 起：原实现贴在右下角，用户实测
+//      遮挡 WebDAV 传输页签；右上角在无导航栏页面顶通常空白，不占内容）
 // 用关联对象做幂等标记：viewDidLoad 可能被多次调用，重复加会叠出一堆按钮。
 static void OkaAttachWebAuthEntry(id page) {
     if (!page) return;
@@ -1273,7 +1295,7 @@ static void OkaAttachWebAuthEntry(id page) {
     // ① 右上角：只有原本为空时才占用，避免覆盖 App 自己的按钮
     if (vc.navigationController && vc.navigationItem.rightBarButtonItem == nil) {
         UIBarButtonItem *item =
-            [[UIBarButtonItem alloc] initWithTitle:@"🔒"
+            [[UIBarButtonItem alloc] initWithTitle:@"⚙️"
                                              style:UIBarButtonItemStylePlain
                                             target:target
                                             action:@selector(okaTap:)];
@@ -1285,7 +1307,7 @@ static void OkaAttachWebAuthEntry(id page) {
     UIView *view = vc.view;
     if (!view) return;
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
-    [btn setTitle:@"🔒 密码" forState:UIControlStateNormal];
+    [btn setTitle:@"⚙️ 设置" forState:UIControlStateNormal];
     btn.titleLabel.font = [UIFont systemFontOfSize:12.0];
     btn.backgroundColor = [UIColor colorWithWhite:0.5 alpha:0.18];
     btn.layer.cornerRadius = 13.0;
@@ -1298,8 +1320,12 @@ static void OkaAttachWebAuthEntry(id page) {
     [NSLayoutConstraint activateConstraints:@[
         [btn.trailingAnchor constraintEqualToAnchor:view.safeAreaLayoutGuide.trailingAnchor
                                           constant:-14.0],
-        [btn.bottomAnchor constraintEqualToAnchor:view.safeAreaLayoutGuide.bottomAnchor
-                                        constant:-14.0],
+        // ★ v1.6.6：浮动入口从右下角挪到**页面右上**。
+        //   用户实测：右下角悬浮按钮遮挡 WebDAV 传输页签（底部横排页签的
+        //   右下格）。右上角在无导航栏的页面顶通常是空白/标题区，
+        //   不占内容、不碰底部页签。有导航栏时走 ① 分支，此路本就走不到。
+        [btn.topAnchor constraintEqualToAnchor:view.safeAreaLayoutGuide.topAnchor
+                                    constant:8.0],
         [btn.heightAnchor constraintEqualToConstant:26.0],
     ]];
 }
@@ -1366,6 +1392,49 @@ static void OkaToggleShortcutMenu(void) {
                   @"长按菜单已关闭。重启 App 后卸载也不会残留。");
 }
 
+// ===========================================================================
+//  v1.6.6：桌面动态图标 —— 开=红染绿、关=App 默认原图标
+// ===========================================================================
+//  需求（用户原话）：桌面上直接看出 WiFi 传输开/关；拒绝小红点
+//  （"看着小红点我就想给点掉"）；两条红线 —— 不能时灵时不灵误导人、
+//  不能破坏宿主 App 签名导致打不开。
+//
+//  落地形态（唯一同时满足三条约束的路径）：
+//   · 注入一次性、只发生在 deb 安装时：helper（devkit/iconinject.m 编出的
+//     root 工具）把「默认图标红色替换为绿色的版本」写进宿主 .app，并在
+//     Info.plist 声明 CFBundleAlternateIcons。helper 带安装形态门控
+//     （仅 App Store 原版环境自动注入，自签环境默认不动）、plist 写坏
+//     自愈回滚、prerm 完整还原 —— 设计细节见 helper 头部注释。
+//   · 切换零风险：运行时只调公开 API setAlternateIconName:，是系统标准
+//     行为。注入成功即稳定生效，不存在"有时生效"。
+//   · 语义：开 = OkaIconGreen（原图标红色替换为绿色的版本）；
+//     关 = nil（回 App 原默认图标）。原图标恰好也是"未注入时的显示态"，
+//     所以「功能未启用」与「服务已关」在桌面上一模一样 —— 绝不会把
+//     没生效骗成已生效（面板里另有只读状态行，见 OkaPresentWebAuthSettings）。
+
+// 注入是否完成？读宿主 Info.plist 的 OkaIconInjected 标记键
+// （helper 成功时写入；App 更新/重装会丢失，需重装 deb 恢复）。
+static BOOL OkaIconSwitchReady(void) {
+    return [[NSBundle mainBundle].infoDictionary
+            objectForKey:[NSString stringWithUTF8String:OKA_ICON_KEY_INJECTED]] != nil;
+}
+
+// 切图标。所有同步点都在主线程（用户点击 / GCDWebServer 回调 / App 生命周期
+// 回调），UIKit 属性设置不做跨线程处理。失败只静默降级 —— 图标不动、
+// 功能不丢、不弹不崩；此时桌面图标保持原样，而"原样"在语义上是安全的
+// （与关态/未启用同图）。
+static void OkaSetAppIcon(BOOL on) {
+    if (!gEnableSwitchIcon)          return;
+    if (!OkaIconSwitchReady())       return;
+    if (![[UIApplication sharedApplication] respondsToSelector:
+          @selector(setAlternateIconName:completionHandler:)]) return;  // iOS < 10.3
+    NSString *name = on ? [NSString stringWithUTF8String:OKA_ICON_NAME_GREEN] : nil;
+    [[UIApplication sharedApplication] setAlternateIconName:name
+                                          completionHandler:^(NSError *err) {
+        (void)err;   // 切换失败（签名/系统拒绝）：静默保持原图标，语义安全
+    }];
+}
+
 static BOOL (*orig_startWithOptions)(id, SEL, NSDictionary *, NSError **);
 static BOOL my_startWithOptions(id self, SEL _cmd, NSDictionary *options, NSError **error) {
     if (!orig_startWithOptions) return NO;
@@ -1405,7 +1474,12 @@ static BOOL my_startWithOptions(id self, SEL _cmd, NSDictionary *options, NSErro
 
     NSUInteger real = ((NSUInteger (*)(id, SEL))objc_msgSend)(self, @selector(port));
     if (real) gServerPort = real;
-    if (ok) gServerRunning = YES;
+    if (ok) {
+        gServerRunning = YES;
+        // ★ v1.6.6：启动成功 → 桌面图标切「红染绿」版（OkaIconGreen）。
+        //   放在 if (ok) 块内：启动失败时不允许亮绿图标。
+        OkaSetAppIcon(YES);
+    }
     return ok;
 }
 
@@ -1418,6 +1492,9 @@ static void my_stop(id self, SEL _cmd) {
     if (orig_stop) orig_stop(self, _cmd);
     gServerPort = 0;
     gServerRunning = NO;
+    // ★ v1.6.6：停服 → 桌面图标回到 App 默认原图（primary）。
+    //   放在 gServerRunning = NO 之后：先落状态、再同步图标。
+    OkaSetAppIcon(NO);
 }
 
 // ★ v1.4.2：第二层保险 —— 接管 GCDWebServer 的「进后台就停服」处理器。
@@ -1436,6 +1513,21 @@ static void my_didEnterBackground(id self, SEL _cmd, id note) {
     BOOL *flag = (BOOL *)((char *)(__bridge void *)self + ivar_getOffset(iv));
     *flag = NO;
     if (orig_didEnterBackground) orig_didEnterBackground(self, _cmd, note);
+}
+
+// ★ v1.6.6：App 每次回前台按真实服务状态同步一次桌面图标。
+//   didFinishLaunching 只兜冷启动；App 被系统杀掉后重进、或图标被外部因素
+//   改动后，只有这里能纠正。
+//   applicationDidBecomeActive: 是 UIApplicationDelegate 的**可选**方法，
+//   App 可能根本没实现 —— 所以注册（见 OkaWiFiInit）走 class_addMethod
+//   补实现，不能走 HookInstanceMethod：它对未实现的方法会直接 return，
+//   hook 挂不上且没有任何报错（静默失效）。
+static void (*orig_applicationDidBecomeActive)(id, SEL, UIApplication *);
+static void my_applicationDidBecomeActive(id self, SEL _cmd, UIApplication *app) {
+    if (orig_applicationDidBecomeActive) {
+        orig_applicationDidBecomeActive(self, _cmd, app);
+    }
+    OkaSetAppIcon(gServerRunning);
 }
 
 // 兜底算地址：自己的 IP + 记录到的端口
@@ -1806,6 +1898,14 @@ static void StartWiFiTransfer(BOOL fromShortcut) {
 static BOOL (*orig_didFinishLaunching)(id, SEL, UIApplication *, NSDictionary *);
 static BOOL my_didFinishLaunching(id self, SEL _cmd, UIApplication *app, NSDictionary *opts) {
     BOOL r = orig_didFinishLaunching ? orig_didFinishLaunching(self, _cmd, app, opts) : YES;
+
+    // ★ v1.6.6：按真实服务状态同步桌面图标。
+    //   位置刻意放在所有 return 之前：下面三条出口（v1.6.5 重装自动清 /
+    //   关开关摘除 / 正常注入）都会被覆盖，不会漏。
+    //   冷启动时服务必然没起（gServerRunning=NO）→ 图标回到默认原图，
+    //   同时兜住上次 App 被系统杀掉时图标停在"绿"的残留 —— 那会让用户
+    //   以为服务还在跑，正是"图标误导"要防的情况。
+    OkaSetAppIcon(gServerRunning);
 
     // 一次遍历同时得出「有没有自己那条」和「把别人那条留下来」。
     // 不能只判断 exists 再整体重写：app.shortcutItems 可能含 App 自带项
@@ -2399,6 +2499,21 @@ static void OkaWiFiInit(void) {
                                    (IMP)my_didFinishLaunching,
                                    (void **)&orig_didFinishLaunching,
                                    "-[AppDelegate application:didFinishLaunchingWithOptions:]");
+
+                // ★ v1.6.6：回前台同步桌面图标。无条件注册（与 didFinishLaunching
+                //   同理由：同步逻辑自己看 gEnableSwitchIcon / 注入标记，gate 住
+                //   它会漏同步，而漏同步的症状正是用户 bug 报的"没自动切换"）。
+                //   didBecomeActive 是可选 delegate 方法，App 可能没实现：
+                //   先 class_addMethod 补实现；返回 NO 说明已存在，
+                //   再走 HookInstanceMethod 拿原实现并替换。
+                SEL selActive = @selector(applicationDidBecomeActive:);
+                if (!class_addMethod(appDel, selActive,
+                                     (IMP)my_applicationDidBecomeActive, "v@:@")) {
+                    HookInstanceMethod(appDel, selActive,
+                                       (IMP)my_applicationDidBecomeActive,
+                                       (void **)&orig_applicationDidBecomeActive,
+                                       "-[AppDelegate applicationDidBecomeActive:]");
+                }
 
                 if (gEnableShortcut) {
                     SEL sel = @selector(application:performActionForShortcutItem:completionHandler:);

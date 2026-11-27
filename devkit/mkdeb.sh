@@ -45,6 +45,15 @@ mkdir -p "$DEST"
 cp "$ROOT/.build/$NAME.dylib" "$DEST/$NAME.dylib"
 cp "$ROOT/$NAME.plist"        "$DEST/$NAME.plist"
 
+# ---- v1.6.6：图标注入 helper ----
+# 装到 <PREFIX>/usr/bin/（rootless 变体在 /var/jb/usr/bin，PREFIX 已含）。
+# postinst 以 root 调它：把「红染绿」备选图标写进宿主 .app + 声明
+# CFBundleAlternateIcons。dylib 在 App 沙箱里写不了 .app，所以注入
+# 必须由这个安装期工具完成。
+BINDIR="$STAGE${PREFIX:+/$PREFIX}/usr/bin"
+mkdir -p "$BINDIR"
+cp "$ROOT/.build/oka-iconinject" "$BINDIR/oka-iconinject"
+
 # 权限：目录 755，文件 644
 # ★ dylib 必须 755：644 会被 ellekit / RootHide 的加载器拒绝，
 #   表现是「装了完全没反应」，dpkg 却不报任何错。
@@ -99,9 +108,41 @@ printf '关于卸载：长按菜单项由 iOS 按 App 的 bundle id 持久化，
 printf '要移除它：先把 EnableShortcut 设为 false 并重启一次 App（v1.6.4 起会自动摘除），\n'
 printf '然后再卸载本插件；v1.6.5 起重装本插件后首次启动 App 会自动清掉残留。\n'
 printf '\n'
+# ---- v1.6.6：桌面动态图标注入 ----
+# 备选图标（默认图标红色替换为绿色的版本）+ Info.plist 声明，必须由安装期
+# root 完成（dylib 在 App 沙箱里写不了 .app）。
+# ★ helper 的任何失败都**不阻断安装**：|| true 兜住返回码；门控拒绝
+#   （自签环境等）本身就是设计内的安全跳过，只打印说明。
+printf '正在注入桌面动态图标（开=红染绿 / 关=默认原图标）...\n'
+__HELPER__ inject 2>&1 || true
+# uicache：让 SpringBoard 重读 bundle Info.plist（alternate icon 声明
+# 否则它拿缓存里的旧版本，会拒绝切换）。路径按 scheme 拼（rootless 不同）。
+if [ -x __UICACHE__ ]; then __UICACHE__ 2>/dev/null || true; fi
+printf '\n'
 exit 0
 EOF
 chmod 755 "$STAGE/DEBIAN/postinst"
+
+# ---- v1.6.6 prerm：干净卸载 ----
+# 还原宿主 Info.plist 注入键、删备选图标 PNG、清备份残留。
+# 卸载优先：任何失败都不许拦住 dpkg（set +e 不用 set -e）。
+cat > "$STAGE/DEBIAN/prerm" <<'EOF'
+#!/bin/sh
+set +e
+# v1.6.6：桌面动态图标还原（幂等，没注入过也不会做错事）
+__HELPER__ restore 2>&1
+exit 0
+EOF
+chmod 755 "$STAGE/DEBIAN/prerm"
+
+# ---- 把 scheme 相关的路径写进安装脚本 ----
+# postinst/prerm 是设备上跑的 shell，用单引号 heredoc 写死了文本；
+# helper/uicache 路径随 scheme 变（rootless 多一层 /var/jb），
+# 这里用 sed 后处理注入字面量（路径是 ASCII、无 sed 元字符）。
+HELPER="$PREFIX/usr/bin/oka-iconinject"
+UICACHE="$PREFIX/usr/bin/uicache"
+sed -i "s|__HELPER__|$HELPER|g"  "$STAGE/DEBIAN/postinst" "$STAGE/DEBIAN/prerm"
+sed -i "s|__UICACHE__|$UICACHE|g" "$STAGE/DEBIAN/postinst"
 
 # ---- 打包 ----
 DEB="$OUT/${PKG}_${VER}_${ARCH}.deb"
@@ -124,8 +165,15 @@ def _is_exec(rel):
 
     SpringBoard 注入的 dylib 如果丢了 +x，装上去表现是「插件完全没加载」，
     而 dpkg 不报任何错 —— 这类问题排查成本极高，必须精确。
+
+    v1.6.6：oka-iconinject 没有任何扩展名，靠后缀认不出来，必须按完整
+    路径点名。它是 postinst 里 root 调的命令行工具 —— 丢了 +x 时
+    「Permission denied」，表现是注入静默不发生（而 postinst 原文有
+    || true，连错都不报）。
     """
     if rel.endswith('.dylib'):
+        return True
+    if rel == 'usr/bin/oka-iconinject' or rel.endswith('/usr/bin/oka-iconinject'):
         return True
     if rel.startswith('DEBIAN/') and rel.split('/')[-1] in \
             ('postinst', 'postrm', 'preinst', 'prerm'):
@@ -187,7 +235,9 @@ data = lzma.compress(_tar(), format=lzma.FORMAT_XZ)
 
 ctl = io.BytesIO()
 with tarfile.open(fileobj=ctl, mode='w', format=tarfile.GNU_FORMAT) as tf:
-    for name in ('control', 'postinst'):
+    # v1.6.6：prerm 必须进 control.tar，否则 dpkg 根本不认这个卸载钩子
+    # （表现是"卸了插件、App 里注入的图标声明还在"，整洁卸载链断一半）。
+    for name in ('control', 'postinst', 'prerm'):
         p = os.path.join(stage, 'DEBIAN', name)
         if os.path.exists(p):
             ti = tf.gettarinfo(p, arcname='./' + name)

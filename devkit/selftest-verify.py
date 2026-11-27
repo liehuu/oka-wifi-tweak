@@ -42,6 +42,13 @@ CPU_TYPE_ARM64 = 0x0100000C
 LC_CODE_SIGNATURE = 0x1D
 LC_SEGMENT_64 = 0x19
 
+# v1.6.6 helper 的四个链路指纹标识（与 build.sh 的 for sym 循环同集合）。
+# C12 逐个在 helper 二进制里找；少任何一个都是「注入/声明链路不完整」。
+FINGERPRINTS = (b'OkaIconGreen\x00'
+                b'OkaIconInjected\x00'
+                b'CFBundleAlternateIcons\x00'
+                b'com.blinker.documents\x00')
+
 
 def make_macho(cputype=CPU_TYPE_ARM64, cpusubtype=0, with_sig=True, fat=False,
                cstring=None):
@@ -136,7 +143,8 @@ def hover_css(hover='#cfe0f5', sel='#bdd4f0',
 HOVER_CSS = hover_css().encode()
 
 
-def make_control_tar(arch='iphoneos-arm', postinst_mode=0o755, with_postinst=True):
+def make_control_tar(arch='iphoneos-arm', postinst_mode=0o755, with_postinst=True,
+                     with_prerm=True):
     buf = io.BytesIO()
     tf = tarfile.open(fileobj=buf, mode='w', format=tarfile.GNU_FORMAT)
     control = (
@@ -160,13 +168,28 @@ def make_control_tar(arch='iphoneos-arm', postinst_mode=0o755, with_postinst=Tru
         ti.mode = postinst_mode
         ti.mtime = 1700000000
         tf.addfile(ti, io.BytesIO(pi))
+
+    if with_prerm:
+        # v1.6.6：卸载前调 helper restore（还原 Info.plist + 删 PNG）。
+        # 缺了它：卸载后 .app 里永驻 OkaIconGreen 声明与两张 PNG，
+        # 宿主重装后图标声明还在（虽然无法切换，但属于残留垃圾）。
+        pr = b'#!/bin/sh\nexit 0\n'
+        ti = tarfile.TarInfo('./prerm')
+        ti.size = len(pr)
+        ti.mode = 0o755
+        ti.mtime = 1700000000
+        tf.addfile(ti, io.BytesIO(pr))
     tf.close()
     return buf.getvalue()
 
 
 def make_data_tar(dylib_blob, prefix='', plist_mode=0o644, dylib_mode=0o755,
-                  extra_members=(), deiban_member=False, pax=False):
+                  extra_members=(), deiban_member=False, pax=False,
+                  helper_blob=None, helper_mode=0o755):
     """构造 data.tar。
+
+    helper_blob 非 None 时按 mkdeb.sh 的真实布局放入
+    <prefix>usr/bin/oka-iconinject（rootless 是 var/jb 前缀）。
 
     ★ pax=True 时必须让 mtime 带小数或名字超长，否则**不会**产生 'x' 扩展头：
       tarfile 的 PAX_FORMAT 只在「GNU/ustar 表达不了」时才写扩展头
@@ -182,16 +205,27 @@ def make_data_tar(dylib_blob, prefix='', plist_mode=0o644, dylib_mode=0o755,
     # pax 用例用小数 mtime，强制触发扩展头；正常用例用整数，保持 GNU_FORMAT
     mtime = 1700000000.123456 if pax else 1700000000
 
-    parts = ([prefix] if prefix else []) + [
-        'Library', 'MobileSubstrate', 'DynamicLibraries']
-    path = './' + '/'.join(parts)
-    for i in range(1, len(parts) + 1):
-        d = './' + '/'.join(parts[:i])
-        ti = tarfile.TarInfo(d)
+    # 目录项去重：dylib 路径与 helper 路径在 rootless 下有共同祖先
+    # （./var/jb）。真实 mkdeb.sh 从 staged 文件树 tar 出来不会有重复成员，
+    # 这个夹具自己拼，必须显式去重，否则每个 rootless 正向包都会被
+    # C10 拦下 —— 那是夹具缺陷，不是判据缺陷。
+    seen_dirs = set()
+
+    def add_dir(rel):
+        if rel in seen_dirs:
+            return
+        seen_dirs.add(rel)
+        ti = tarfile.TarInfo(rel)
         ti.type = tarfile.DIRTYPE
         ti.mode = 0o755
         ti.mtime = mtime
         tf.addfile(ti)
+
+    parts = ([prefix] if prefix else []) + [
+        'Library', 'MobileSubstrate', 'DynamicLibraries']
+    path = './' + '/'.join(parts)
+    for i in range(1, len(parts) + 1):
+        add_dir('./' + '/'.join(parts[:i]))
 
     ti = tarfile.TarInfo(path + '/OkaWiFi.dylib')
     ti.size = len(dylib_blob)
@@ -205,6 +239,17 @@ def make_data_tar(dylib_blob, prefix='', plist_mode=0o644, dylib_mode=0o755,
     ti.mode = plist_mode
     ti.mtime = mtime
     tf.addfile(ti, io.BytesIO(plist))
+
+    if helper_blob is not None:
+        hparts = ([prefix] if prefix else []) + ['usr', 'bin']
+        hpath = './' + '/'.join(hparts)
+        for i in range(1, len(hparts) + 1):
+            add_dir('./' + '/'.join(hparts[:i]))
+        ti = tarfile.TarInfo(hpath + '/oka-iconinject')
+        ti.size = len(helper_blob)
+        ti.mode = helper_mode
+        ti.mtime = mtime
+        tf.addfile(ti, io.BytesIO(helper_blob))
 
     for name, content, mode in extra_members:
         ti = tarfile.TarInfo(name)
@@ -243,11 +288,44 @@ def ar_member(name, body):
     return out
 
 
+def peek_cpu(blob):
+    """从 Mach-O 头读 (cputype, cpusubtype) —— 只用于让自测样本的 helper
+    「自动跟着 dylib 的架构走」，不依赖 verify-deb.py 的任何代码。"""
+    cputype, sub = struct.unpack('<II', blob[4:12])
+    return cputype, sub
+
+
+def good_helper(cputype=CPU_TYPE_ARM64, cpusubtype=0, with_sig=True):
+    """构造一个「链路完整」的 helper 样本：同架构 + 有签名 + 四指纹标识。"""
+    return make_macho(cputype, cpusubtype, with_sig=with_sig,
+                      cstring=FINGERPRINTS)
+
+
 def build_deb(dylib_blob, arch='iphoneos-arm', prefix='', **kw):
+    """拼一个完整 deb。
+
+    helper_blob 默认 'auto'：按 dylib 自身的 cputype/cpusubtype 造一个
+    架构一致的完整 helper —— 正向样本因此永远带 helper，且不会出现
+    「dylib arm64e、helper arm64」这种自相矛盾的样本。
+    传 False 表示不打包 helper（反向用例用）。
+    """
+    helper = kw.pop('helper_blob', 'auto')
+    if helper == 'auto':
+        if dylib_blob[:4] == b'\xca\xfe\xba\xbe':
+            # fat dylib 的包本来就会被 C7 拦下，helper 给个普通 arm64 即可
+            helper = good_helper()
+        else:
+            cputype, sub = peek_cpu(dylib_blob)
+            helper = good_helper(cputype, sub)
+    elif not helper:
+        # False/None/b'' 一律归一成「不打包 helper」（反向用例用）
+        helper = None
     ctl = make_control_tar(arch=arch,
                            postinst_mode=kw.pop('postinst_mode', 0o755),
-                           with_postinst=kw.pop('with_postinst', True))
-    data = make_data_tar(dylib_blob, prefix=prefix, **kw)
+                           with_postinst=kw.pop('with_postinst', True),
+                           with_prerm=kw.pop('with_prerm', True))
+    data = make_data_tar(dylib_blob, prefix=prefix,
+                         helper_blob=helper, **kw)
 
     import gzip
     import lzma
@@ -419,6 +497,45 @@ def build_cases():
     case('@media (hover:none) 写在主规则前面（顺序无关）', True,
          build_deb(media_first, 'iphoneos-arm', ''),
          'rootful', 'iphoneos-arm', 'arm64')
+
+    # ---- C12：动态图标注入 helper（v1.6.6） ----
+    # helper 少一件，症状都是「装了但桌面图标不切换」且无报错 —— 每件都能失败。
+    helper_arm64e = good_helper(CPU_TYPE_ARM64, 0x80000002)
+    helper_nofp = make_macho(CPU_TYPE_ARM64, 0, with_sig=True)   # 无四指纹
+
+    case('helper 缺失（注入从未执行）', False,
+         build_deb(ok_arm64, 'iphoneos-arm', '', helper_blob=False),
+         'rootful', 'iphoneos-arm', 'arm64', '[C12]')
+
+    case('helper 权限 644（root 执行不了）', False,
+         build_deb(ok_arm64, 'iphoneos-arm', '', helper_mode=0o644),
+         'rootful', 'iphoneos-arm', 'arm64', '[C12]')
+
+    case('helper 架构与 dylib 不一致（arm64e 混进 arm64 包）', False,
+         build_deb(ok_arm64, 'iphoneos-arm', '', helper_blob=helper_arm64e),
+         'rootful', 'iphoneos-arm', 'arm64', '[C12]')
+
+    case('helper 缺 LC_CODE_SIGNATURE', False,
+         build_deb(ok_arm64, 'iphoneos-arm', '',
+                   helper_blob=good_helper(with_sig=False)),
+         'rootful', 'iphoneos-arm', 'arm64', '[C12]')
+
+    case('helper 缺链路指纹标识', False,
+         build_deb(ok_arm64, 'iphoneos-arm', '', helper_blob=helper_nofp),
+         'rootful', 'iphoneos-arm', 'arm64', '[C12]')
+
+    case('缺 prerm（卸载后不还原）', False,
+         build_deb(ok_arm64, 'iphoneos-arm', '', with_prerm=False),
+         'rootful', 'iphoneos-arm', 'arm64', '[C12]')
+
+    case('缺 postinst（注入从未执行）', False,
+         build_deb(ok_arm64, 'iphoneos-arm', '', with_postinst=False),
+         'rootful', 'iphoneos-arm', 'arm64', '[C12]')
+
+    # 正向：rootless 包里 helper 必须落在 var/jb 前缀下（和 dylib 同规则）
+    case('rootless 合法包（helper 在 var/jb/usr/bin）', True,
+         build_deb(ok_arm64, 'iphoneos-arm64', 'var/jb'),
+         'rootless', 'iphoneos-arm64', 'arm64')
 
 
 def main():

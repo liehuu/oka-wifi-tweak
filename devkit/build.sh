@@ -93,6 +93,44 @@ xcrun clang -target "$TRIPLE" -isysroot "$SDK" \
 # 表现是「装了完全没反应」，且系统不报任何错。
 codesign --force --sign - "$BUILD/$NAME.dylib"
 
+# ---------- 2b) v1.6.6 动态图标注入 helper ----------
+# 为什么需要独立工具：setAlternateIconName: 要求备选图标预声明在宿主
+#   Info.plist + 文件在 .app 内。dylib 注入的是 App 沙箱进程，**写不了
+#   .app 目录**；注入必须由 deb 安装期以 root 跑的 helper 完成。
+#   切换本身仍走公开 API（见 Tweak.xm 的 OkaSetAppIcon）。
+#
+# ★ 先跑 host 单测再编 iOS 版：红→绿像素映射的判定边界（什么算红）是
+#   用户指定的视觉规格，改坏了没有任何运行时报错，只有纯函数单测能钉住。
+#   selftest-iconinject.c 不依赖任何 SDK —— CI 的 macOS runner 直接编。
+clang -O2 -Wall -Wextra -I "$ROOT/devkit" \
+  "$ROOT/devkit/selftest-iconinject.c" -o "$BUILD/selftest-iconinject" \
+  || { echo "✗ 红→绿单测编译失败"; exit 1; }
+"$BUILD/selftest-iconinject" \
+  || { echo "✗ 红→绿映射单测未过（视觉规格的判定边界坏了）"; exit 1; }
+echo "✓ 红→绿映射 host 单测通过"
+
+xcrun clang -target "$TRIPLE" -isysroot "$SDK" \
+  -I "$ROOT/devkit" -I "$INC" \
+  -x objective-c \
+  -fobjc-arc -fobjc-exceptions -Os -Wall \
+  -Wno-unused-parameter -Wno-deprecated-declarations \
+  -Wno-nullability-completeness \
+  -framework Foundation -framework CoreGraphics -framework ImageIO \
+  -framework MobileCoreServices \
+  "$ROOT/devkit/iconinject.m" \
+  -o "$BUILD/oka-iconinject" \
+  || { echo "✗ 图标注入 helper 编译失败"; exit 1; }
+codesign --force --sign - "$BUILD/oka-iconinject"
+
+# 指纹闸门：注入/声明链路上四个关键标识，缺任何一个都是"静默功能
+# 缺失"（helper 能装、能跑，但注入的东西 dylib 认不出，或反过来）。
+for sym in OkaIconGreen OkaIconInjected CFBundleAlternateIcons \
+           com.blinker.documents; do
+  grep -aq "$sym" "$BUILD/oka-iconinject" \
+    || { echo "✗ helper 缺 ${sym}（注入/声明链路不完整）"; exit 1; }
+done
+echo "✓ helper 编译 + 指纹闸门通过（oka-iconinject）"
+
 # ---------- 3) 架构硬闸门 ----------
 echo "--- dylib ---"
 # ★ 这两条**只**是诊断输出，不是判据，必须容错：
@@ -168,6 +206,27 @@ if ! python3 "$ROOT/devkit/check-shortcut-clear.py" "$ROOT/Tweak.xm"; then
   exit 1
 fi
 echo "✓ v1.6.4 快捷菜单：关开关主动摘除自己那条 / 保留他人项 / hook 无条件挂载"
+
+# ---------- 4-0b) v1.6.6 动态图标闸门（源码判据） ----------
+# 用户三条红线（不能误导 / 不能打不开 / 关=默认图标、开=红染绿）都要靠
+# 这组判据守住：切换 API 调用形态、四个同步点、becomeActive 兜底注册、
+# 注入标记门、只读状态行、按钮从右下挪右上。缺一条都是"静默不切换"。
+# 判据抽成独立脚本（同 4-0 的理由：写 heredoc 就只能靠另抄一份镜像来
+# 验证，那证明不了真实闸门有效）；反证见 selftest-icon-gate.py。
+if ! python3 "$ROOT/devkit/check-icon-switch.py" "$ROOT/Tweak.xm"; then
+  echo "✗ 动态图标闸门未通过（开/关图标不会自动切换，或入口位置/文案退化）"
+  exit 1
+fi
+echo "✓ v1.6.6 动态图标：切换链路/四个同步点/becomeActive 兜底/注入标记门齐备"
+
+# v1.6.6 dylib 侧指纹（切换链路与门控的标识，丢了不会报错、只会不切换）
+for sym in "setAlternateIconName:completionHandler:" \
+           "OkaIconGreen" "OkaIconInjected" \
+           "applicationDidBecomeActive:"; do
+  grep -aq "$sym" "$BUILD/$NAME.dylib" \
+    || { echo "✗ dylib 缺 ${sym}（桌面动态图标会静默失效）"; exit 1; }
+done
+echo "✓ v1.6.6 dylib 切换链路指纹齐全（alternate 名/标记键/becomeActive）"
 
 # 功能 2a：蜂窝解禁
 for sym in SCNetworkReachabilityGetFlags reachabilityChangedWithNote: \

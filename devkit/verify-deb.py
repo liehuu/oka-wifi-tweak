@@ -40,6 +40,9 @@ C10 不出现重复成员名（tar 里同名会覆盖，dpkg 行为不定）
 C11 v1.6.3 行悬停的 CSS 真的被内联进 dylib 的 __const 段，且色差够看得出
     （kOkaWebCSS 是 const 数组，落在 __TEXT,__const；不能在 __debug_str 里
     —— 那说明它只被调试信息引用，运行时拿不到这段 CSS，悬停等于没做）
+C12 v1.6.6 动态图标注入 helper：路径按 scheme 前缀 / 权限 755 / Mach-O 架构
+    与 dylib 一致 / 带 LC_CODE_SIGNATURE / 含四个链路指纹标识；
+    外加 postinst 与 prerm **存在性**（C9 只查 mode，文件整个缺失时静默通过）
 
 用法
 ====
@@ -802,6 +805,70 @@ def main(argv):
                 '运行时拿不到这段 CSS，真机上悬停不会生效')
     else:
         ck.fail('C11', '没取到 dylib，无法核验内联 CSS')
+
+    # ---------------- C12: v1.6.6 动态图标注入 helper ----------------
+    # dylib 跑在 App 沙箱里**写不了 .app 目录**，alternate icon 的
+    # Info.plist 声明与 PNG 只能由 deb 安装期以 root 跑的 helper 落盘
+    # （postinst 调它）。helper 的任何一件缺失 —— 不在包里 / 权限不对 /
+    # 架构不匹配 / 缺指纹标识 / 没有 prerm 还原钩子 —— 症状都是
+    # 「功能装了但桌面图标不切换」，且系统无任何报错。逐条钉住。
+    print('\n[C12] 动态图标注入 helper（oka-iconinject）')
+    if prefix:
+        want_helper = './%s/usr/bin/oka-iconinject' % prefix
+    else:
+        want_helper = './usr/bin/oka-iconinject'
+
+    helper_name = None
+    for n in data_names:
+        if n == want_helper:
+            helper_name = n
+            break
+    ck.check(helper_name is not None, 'C12',
+             'helper 路径 == %s' % want_helper,
+             'deb 里没有 %s —— 图标注入从未执行，动态图标永远是「未启用」，'
+             '而面板状态行会说「未启用（重装本插件可恢复）」：这正是用户红线'
+             '「不能误导」要防的静默失效' % want_helper)
+
+    hblob = b''
+    if helper_name:
+        ti_h = data_by_name[helper_name]
+        mh = mode_of(ti_h)
+        ck.check(mh == 0o755, 'C12',
+                 'helper 权限 755',
+                 'helper 权限是 %o —— 无扩展名 Mach-O 不被 .dylib 分支的 755 '
+                 '判据覆盖，644 装上去 postinst 里 root 都执行不了' % mh)
+        hblob = data_tf.extractfile(ti_h).read()
+        try:
+            hinfo = parse_macho(hblob)
+            ck.check(not hinfo['is_fat'], 'C12',
+                     'helper 单切片（非 fat）', 'helper 是 fat 二进制，期望单切片')
+            if not hinfo['is_fat']:
+                hcpu = CPU_NAMES.get((hinfo['cputype'], hinfo['cpusubtype']))
+                ck.check(hcpu == expect_cpu, 'C12',
+                         'helper 架构 == %s（与 dylib 同架构）' % expect_cpu,
+                         'helper 架构是 %r 而 dylib 期望 %r —— 安装期 root shell '
+                         'exec 它直接失败，注入静默不发生' % (hcpu, expect_cpu))
+                ck.check(hinfo['has_sig'], 'C12',
+                         'helper 有 LC_CODE_SIGNATURE',
+                         'helper 没有 LC_CODE_SIGNATURE —— codesign 那步对 '
+                         'helper 没生效（工程约定 dylib 与 helper 都签）')
+        except ValueError as exc:
+            ck.fail('C12', 'helper 不是 Mach-O: %s' % exc)
+        for sym in ('OkaIconGreen', 'OkaIconInjected',
+                    'CFBundleAlternateIcons', 'com.blinker.documents'):
+            ck.check(sym.encode() in hblob, 'C12',
+                     'helper 含 %s' % sym,
+                     'helper 缺 %s —— 注入/声明链路不完整：dylib 与 helper 对不上'
+                     '名字，运行时零报错、桌面就是不切换' % sym)
+
+    # 安装/卸载钩子**存在性**：C9 只查 mode，文件整个缺失时静默通过。
+    for hook in ('postinst', 'prerm'):
+        has = any(n.startswith('./' + hook) for n in ctl_names)
+        ck.check(has, 'C12',
+                 'control.tar 有 %s' % hook,
+                 'control.tar 缺 %s —— %s永远不会执行（图标声明与 PNG 要么从未'
+                 '注入，要么卸载后永驻 .app）'
+                 % (hook, '注入' if hook == 'postinst' else '还原'))
 
     return finish(ck)
 
