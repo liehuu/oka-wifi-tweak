@@ -343,6 +343,12 @@ def devkit_cases():
             os.path.join(tmp, "selftest-iconinject.c"),
             "expect_tint", "expect_tint_renamed") else []
 
+    def m_helper_fw(tmp):
+        # 删 MobileCoreServices import：回到 run 43 三个 scheme 挂掉的形态
+        return ["iconinject.m"] if patch_file(
+            os.path.join(tmp, "iconinject.m"),
+            "#import <MobileCoreServices/MobileCoreServices.h>\n", "") else []
+
     def m_xm_import(tmp):
         return ["Tweak.xm"] if patch_file(
             os.path.join(tmp, "Tweak.xm"),
@@ -355,6 +361,7 @@ def devkit_cases():
         ("M17 dylib 删共源 import", m_xm_import, {"sharedHeader"}),
         ("M24 helper 删 tint 函数", m_helper_core, {"helperSrc"}),
         ("M25 删 host 单测入口", m_helper_selftest, {"helperSrc"}),
+        ("M27 helper 删 MobileCoreServices import", m_helper_fw, {"helperFw"}),
     ]
 
 

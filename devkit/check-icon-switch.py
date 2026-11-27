@@ -203,6 +203,21 @@ def main(path):
             fails.append(("helperNoNSLog",
                           "helper 里出现 NSLog：安装期 postinst 调它，输出经 dpkg 日志"
                           "可能乱码；本文件约定只用 printf"))
+        # ---------- SDK 常量 ↔ 框架头映射（run 43 实测教训） ----------
+        # kUTTypePNG 声明在 MobileCoreServices/UTCoreTypes.h，ImageIO.h 不会
+        # 间接带上它：host 单测走 macOS 系统 SDK 编译看得见，helper 走
+        # iPhoneOS sysroot 直接 use of undeclared identifier。本机无 macOS
+        # SDK、本地编译不可见，这类错只有 CI 能抓 —— 闸门必须自己看「常量
+        # 在用时，对应框架头在不在」。
+        for _tok, _fw in (("kUTType", "MobileCoreServices"),):
+            if _tok in hlp and ("#import <" + _fw + "/") not in hlp:
+                fails.append(("helperFw",
+                              "helper 用了 %s* 常量但没 import <%s/...>："
+                              "该常量声明在 %s 框架头里，ImageIO.h 不间接带上；"
+                              "host 单测（macOS 系统 SDK）看得见、helper（iOS "
+                              "sysroot）看不见 —— v1.6.6 run 43 三个 scheme 正是"
+                              "死在 kUTTypePNG use of undeclared identifier"
+                              % (_tok, _fw, _fw)))
 
     # ---------- 切换函数本体 ----------
     setter = fn_body(src, "static void OkaSetAppIcon(BOOL on)")

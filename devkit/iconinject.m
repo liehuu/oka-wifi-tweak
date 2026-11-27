@@ -48,6 +48,10 @@
 #import <Foundation/Foundation.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <ImageIO/ImageIO.h>
+// kUTTypePNG 声明在 MobileCoreServices/UTCoreTypes.h —— ImageIO.h 不会
+// 间接带上它（run 43 实测：host 单测走 macOS 系统 SDK 看得见，helper 走
+// iPhoneOS sysroot 直接 use of undeclared identifier）。
+#import <MobileCoreServices/MobileCoreServices.h>
 #import "oka-icon-common.h"
 #import "iconinject-core.h"
 
