@@ -94,6 +94,11 @@
 #define APPDEL_CLASS_MANGLED @"_TtC7Blinker11AppDelegate"
 #define APPDEL_CLASS_SWIFT   @"Blinker.AppDelegate"
 
+// ★ v1.6.8：构建标识。写进设置面板只读版本行 —— 用户实测「开关不见了」
+//   时第一件事是核对设备上跑的到底是哪个构建（旧实例残留 / 装错方案
+//   都会让新代码不生效，而面板外观看不出来）。改版本号必须同步这里。
+#define OKA_BUILD_TAG @"v1.6.8"
+
 static NSString *const kPrefsPath = @"/var/mobile/Library/Preferences/com.oka.wifitweak.plist";
 
 // 诊断日志已移除（v1.1.3）：插件运行时不输出任何系统日志。
@@ -866,6 +871,10 @@ static void OkaToggleShortcutMenu(void);
 //   call to undeclared function（implicit declaration），再
 //   static declaration follows non-static declaration。
 static BOOL OkaIconSwitchReady(void);
+// ★ v1.6.8：宿主是不是 App Store 原版装态（面板图标状态行三态文案调用）。
+//   第四次同型教训：调用点（OkaPresentWebAuthSettings）在文件中部，定义在
+//   设置区后部 —— 照旧补前置声明，别等 CI clang 来教。
+static BOOL OkaHostIsAppStore(void);
 // ★ v1.6.7：服务假死自愈入口，实现在 becomeActive hook 之后的自愈段。
 //   第三次同型教训：OkaSelfHealService 的调用点（my_applicationDidBecomeActive，
 //   文件中部）早于定义（自愈段，文件后部）——缺前置声明时 clang 先报 call to
@@ -1248,18 +1257,40 @@ static void OkaPresentWebAuthSettings(id page) {
 
     // ★ v1.6.6：动态图标是否已实际生效的只读状态行（不可点）。
     //   用户红线「不能误导」：桌面没切换时，用户必须能在 App 内看到
-    //   「未启用」，而不是猜自己哪里点错了。未启用 = 注入没成功
-    //   （自签环境默认不注入 / App 更新后丢失），重装本插件 deb 可恢复。
-    //   文案语义：开=红染绿图标，关=App 默认原图标。
+    //   「未启用」，而不是猜自己哪里点错了。
+    // ★ v1.6.8：未启用的原因分家。v1.6.6/v1.6.7 一律写「重装本插件可恢复」，
+    //   真机实测证伪：宿主是自签/侧载装态时 helper 按安全门控直接跳过，
+    //   卸载重装 deb 一万次也不会注入。文案按宿主装态分三种：
+    //     已启用 / 未启用（App Store 装态丢失→重装 deb 可恢复）/
+    //     未启用（非 App Store 装态被门控跳过→讲清放行路径）。
+    //   语义不变：开=红染绿图标，关=App 默认原图标。
     BOOL iconReady = OkaIconSwitchReady();
+    NSString *iconState;
+    if (iconReady) {
+        iconState = @"已启用（开=绿 / 关=原图标）";
+    } else if (OkaHostIsAppStore()) {
+        iconState = @"未启用（App 更新或重装会丢失，重装本插件 deb 可恢复）";
+    } else {
+        iconState = @"未启用（宿主非 App Store 原版装态，安装期注入被安全策略跳过；"
+                    @"需 App Store 原版宿主，或按安装期输出执行 inject --force）";
+    }
     UIAlertAction *iconRow = [UIAlertAction actionWithTitle:
-        [NSString stringWithFormat:@"桌面动态图标：%@",
-            iconReady ? @"已启用（开=绿 / 关=原图标）"
-                      : @"未启用（重装本插件可恢复）"]
+        [NSString stringWithFormat:@"桌面动态图标：%@", iconState]
                                           style:UIAlertActionStyleDefault
                                         handler:nil];
     iconRow.enabled = NO;
     [ac addAction:iconRow];
+
+    // ★ v1.6.8：构建版本只读行。「设置里的开关不见了」类反馈的第一现场：
+    //   先看这行确认设备实跑构建 —— 旧 dylib 残留（装过别的方案没卸干净）、
+    //   App 装完没杀都在让新代码不生效，而面板外观看不出差别。不可点。
+    UIAlertAction *verRow = [UIAlertAction actionWithTitle:
+        [NSString stringWithFormat:@"插件版本：%@（这行确认设备实跑构建）",
+            OKA_BUILD_TAG]
+                                          style:UIAlertActionStyleDefault
+                                        handler:nil];
+    verRow.enabled = NO;
+    [ac addAction:verRow];
     if (on) {
         [ac addAction:[UIAlertAction actionWithTitle:@"关闭密码"
                                                style:UIAlertActionStyleDestructive
@@ -1361,8 +1392,11 @@ static void OkaAttachWebAuthEntry(id page) {
         // ★ v1.6.7：用户实测 constant:8 时按钮**叠加在页面顶部提示标签
         //   文字上**（safeArea 顶部与提示文字同一垂直带），按钮和文字互相
         //   糊成一团。下移到 40（约两行文字高度）避开顶部提示区。
+        // ★ v1.6.8：真机复测 40 仍**稍微**压住提示文字（提示区比两行略高），
+        //   再降到 56（约三行文字高度）。用户红线「不能差不多」：压字就是
+        //   压字，差一个像素也是回归，闸门常量下限同步钉到 56。
         [btn.topAnchor constraintEqualToAnchor:view.safeAreaLayoutGuide.topAnchor
-                                    constant:40.0],
+                                    constant:56.0],
         [btn.heightAnchor constraintEqualToConstant:26.0],
     ]];
 }
@@ -1462,6 +1496,21 @@ static BOOL OkaIconSwitchReady(void) {
     if (!plistPath) return NO;
     NSDictionary *plist = [NSDictionary dictionaryWithContentsOfFile:plistPath];
     return plist[[NSString stringWithUTF8String:OKA_ICON_KEY_INJECTED]] != nil;
+}
+
+// 宿主是不是 App Store 原版装态？口径与 devkit/iconinject.m 的
+// IsAppStoreInstall 逐字对齐（helper 靠它决定装 deb 时注不注入）：
+//   iTunesMetadata.plist 存在 且 无 embedded.mobileprovision = App Store。
+// 用途：v1.6.8 面板图标状态行的三态文案 —— 未启用时分得清「App Store
+// 装态丢失（重装 deb 可恢复）」和「非 App Store 装态被门控跳过（重装无用）」，
+//   不再拿一句「重装本插件可恢复」误导自签环境用户（真机实测踩过）。
+static BOOL OkaHostIsAppStore(void) {
+    NSString *meta = [[NSBundle mainBundle] pathForResource:@"iTunesMetadata"
+                                                     ofType:@"plist"];
+    if (!meta) return NO;
+    NSString *prov = [[NSBundle mainBundle] pathForResource:@"embedded"
+                                                     ofType:@"mobileprovision"];
+    return (prov == nil);
 }
 
 // 切图标。所有同步点都在主线程（用户点击 / GCDWebServer 回调 / App 生命周期

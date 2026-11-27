@@ -284,7 +284,8 @@ def main(path):
     # non-static declaration。本地只跑文本闸门不跑 clang，这类错只有 CI 能
     # 抓，所以闸门必须自己看行序：任何调用点早于定义时，必须存在更早的
     # 前向声明（以分号结尾、无函数体的那行）。
-    for _fname in ("OkaIconSwitchReady", "OkaSetAppIcon", "OkaSelfHealService"):
+    for _fname in ("OkaIconSwitchReady", "OkaSetAppIcon", "OkaSelfHealService",
+                   "OkaHostIsAppStore"):
         _def_re = re.compile(r"^\s*static\s+\w+\s+%s\s*\([^;]*\)\s*\{" % _fname)
         _proto_re = re.compile(r"^\s*static\s+\w+\s+%s\s*\([^;]*\)\s*;" % _fname)
         _call_re = re.compile(r"\b%s\s*\(" % _fname)
@@ -440,6 +441,67 @@ def main(path):
                                   "「取消」排在「%s」之前：取消必须是最后一个 action，"
                                   "否则用户第一眼先看到取消，顺手划掉，看不到下面的开关" % _nm))
 
+        # v1.6.8：构建版本只读行。「开关不见了」类反馈的第一现场是核对设备
+        #   实跑构建（旧 dylib 残留 / 装错方案 / App 没杀，外观都看不出差别）。
+        #   行位：跟在菜单行、图标行之后，保存/取消/关闭密码之前。
+        i_ver = pnl.find('@"插件版本：')
+        if i_ver < 0:
+            fails.append(("versionRow",
+                          "面板没有构建版本只读行：用户报「开关不见了」时无法当场"
+                          "核对设备实跑构建，只能 Round-Trip 猜"))
+        else:
+            if "verRow.enabled = NO;" not in pnl:
+                fails.append(("versionRow",
+                              "版本行没置 enabled = NO：可点的动作行点下去没反应，"
+                              "比没有这一行更糟"))
+            if "OKA_BUILD_TAG" not in pnl:
+                fails.append(("versionRow",
+                              "版本行没引用 OKA_BUILD_TAG：写死字符串的话改版本号"
+                              "只会改一半，面板显示的和真实构建对不上"))
+            for _nm, _i in (("保存", i_save), ("取消", i_cancel), ("关闭密码", i_close)):
+                if _i >= 0 and _i < i_ver:
+                    fails.append(("versionRow",
+                                  "版本行排在「%s」之后：版本行属于辅助信息，"
+                                  "必须在主动作之前" % _nm))
+            if i_menu >= 0 and i_ver < i_menu:
+                fails.append(("versionRow",
+                              "版本行排在菜单行之前：菜单开关行必须是第一个 action，"
+                              "第一眼可见（v1.6.7 实测回归）"))
+
+        # v1.6.8：图标状态行三态文案。真机实测（卸载重装 deb 仍显示未启用）：
+        #   宿主是自签/侧载装态时 helper 按安全门控跳过，「重装本插件可恢复」
+        #   对这类用户是假承诺。判据：panel 必须按宿主装态分支，且
+        #   「重装本插件可恢复」只能出现在 App Store 分支里（全文件仅一处）。
+        host_fn = fn_body(src, "static BOOL OkaHostIsAppStore(void)")
+        if host_fn is None:
+            fails.append(("iconEnv",
+                          "找不到 OkaHostIsAppStore 定义：面板无法区分宿主装态，"
+                          "只能对所有未启用用户喊「重装可恢复」——自签环境用户"
+                          "实测重装无效，这句是误导"))
+        else:
+            if "iTunesMetadata" not in host_fn or "mobileprovision" not in host_fn:
+                fails.append(("iconEnv",
+                              "OkaHostIsAppStore 没同时查 iTunesMetadata 与 "
+                              "mobileprovision：与 helper 的 IsAppStoreInstall 口径"
+                              "不一致，面板会给出与安装期行为矛盾的文案"))
+        if "OkaHostIsAppStore()" not in pnl:
+            fails.append(("iconEnv",
+                          "面板没调 OkaHostIsAppStore()：未启用文案不分宿主装态，"
+                          "「重装本插件可恢复」会被说给重装也没用的用户"))
+        if "宿主非 App Store 原版装态" not in pnl:
+            fails.append(("iconEnv",
+                          "面板没有「宿主非 App Store 原版装态」文案：自签/侧载用户"
+                          "看不到真实原因（门控跳过），也看不到 inject --force 放行路径"))
+        if "重装本插件 deb 可恢复" not in pnl:
+            fails.append(("iconEnv",
+                          "面板没有 App Store 分支的恢复文案：App 更新后丢失时"
+                          "用户不知道该重装 deb"))
+        if pnl.count("重装本插件 deb 可恢复") > 1 or \
+                src.count("重装本插件 deb 可恢复") > 1:
+            fails.append(("iconEnv",
+                          "「重装本插件 deb 可恢复」出现多于一处：它只能属于 "
+                          "App Store 分支，回退成无条件文案就是 v1.6.7 的误导形态"))
+
     # ---------- 按钮改名与换位 ----------
     if '"⚙️ 设置"' not in src:
         fails.append(("btnTitle", "按钮标题不是 \"⚙️ 设置\"：面板功能已不止密码，标题必须随功能改名"))
@@ -451,8 +513,9 @@ def main(path):
     else:
         # v1.6.7：用户实测 constant:8.0 时浮动按钮正好压在 WiFi 页顶部提示
         # 标签的文字上，标题和按钮糊成一团；挪到 40（约两行文字高）才错开。
-        # 只判「用没用 topAnchor」挡不住把常量改回去——那种回归必须让闸门
-        # 自己炸，所以这里把偏移量下限钉死。
+        # v1.6.8：真机复测 40 仍稍微压住提示文字（提示区比两行略高），
+        # 再降到 56。只判「用没用 topAnchor」挡不住把常量改回去——那种回归
+        # 必须让闸门自己炸，所以这里把偏移量下限钉死。
         _cm = re.search(
             r"\[btn\.topAnchor constraintEqualToAnchor:"
             r"view\.safeAreaLayoutGuide\.topAnchor\s*\n\s*constant:([0-9.]+)\]",
@@ -461,10 +524,10 @@ def main(path):
             fails.append(("btnPos",
                           "btn.topAnchor 约束行找不到 constant: 数值：约束被改写，"
                           "偏移量无从验证，等于放任按钮压回提示标签（用户实测缺陷）"))
-        elif float(_cm.group(1)) < 40.0:
+        elif float(_cm.group(1)) < 56.0:
             fails.append(("btnPos",
-                          "浮动按钮 topAnchor 常量 %s < 40.0：用户实测 8.0 时按钮"
-                          "叠加在页面顶部提示标签文字上，偏移必须足够大"
+                          "浮动按钮 topAnchor 常量 %s < 56.0：用户实测 40.0 时按钮"
+                          "仍稍微叠加在页面顶部提示标签文字上，偏移必须足够大"
                           % _cm.group(1)))
     if "btn.bottomAnchor" in src:
         fails.append(("btnPos",
@@ -495,11 +558,13 @@ def main(path):
     print("  ✓ 切换只走公开 API setAlternateIconName:（on=绿 / off=primary），门控齐全（开关/注入标记/系统版本）")
     print("  ✓ 四同步点：启动成功亮绿（先落状态）、停服回原图、冷启动兜底（首个 return 之前）、回前台无条件纠正")
     print("  ✓ 回前台注册：class_addMethod 补实现 + 已实现时 HookInstanceMethod 接力，注册前无任何开关 gate")
-    print("  ✓ 声明先于使用：OkaIconSwitchReady / OkaSetAppIcon / OkaSelfHealService "
-          "调用点早于定义时必有更早前向声明（v1.6.6/v1.6.7 CI 编译红的同型教训）")
-    print("  ✓ 面板只读状态行（读 OkaIconSwitchReady，走 plist 文件不走启动快照）；"
-          "「长按快捷菜单」开关行是第一个 action、取消垫尾；"
-          "按钮改名 ⚙️ 设置，topAnchor 偏移 ≥ 40 避开顶部提示标签；IconSwitch 偏好可读")
+    print("  ✓ 声明先于使用：OkaIconSwitchReady / OkaSetAppIcon / OkaSelfHealService / "
+          "OkaHostIsAppStore 调用点早于定义时必有更早前向声明"
+          "（v1.6.6/v1.6.7 CI 编译红的同型教训）")
+    print("  ✓ 面板只读状态行：图标三态按宿主装态分支（已启用 / App Store 丢失可重装恢复 / "
+          "非 App Store 门控跳过讲清放行路径，重装承诺只属于 App Store 分支）；"
+          "「长按快捷菜单」开关行是第一个 action、取消垫尾；构建版本只读行在主动作之前；"
+          "按钮改名 ⚙️ 设置，topAnchor 偏移 ≥ 56 避开顶部提示标签；IconSwitch 偏好可读")
     print("  ✓ 无 setApplicationIconBadgeNumber 回流（角标方案已被否决）")
     return 0
 

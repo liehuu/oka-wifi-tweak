@@ -172,7 +172,7 @@ def build_cases():
         "respondsToSelector 系统版本守卫两行")
     constraint_old = grab(
         r"[ \t]*\[btn\.topAnchor constraintEqualToAnchor:view\.safeAreaLayoutGuide\.topAnchor\n"
-        r"[ \t]*constant:40\.0\],\n",
+        r"[ \t]*constant:56\.0\],\n",
         "浮动按钮 topAnchor 约束两行")
     launch_old = grab(
         r"[ \t]*// ★ v1\.6\.6：按真实服务状态同步桌面图标。\n"
@@ -265,10 +265,12 @@ def build_cases():
          "    NSString *name = on ? [NSString stringWithUTF8String:OKA_ICON_NAME_GREEN] : nil;\n"
          "    [[UIApplication sharedApplication] setApplicationIconBadgeNumber:1];\n",
          {"noBadgeDylib"}),
-        # M12 删面板状态行：桌面没切换时 App 内看不到「未启用」
+        # M12 删面板状态行：桌面没切换时 App 内看不到「未启用」。
+        #   v1.6.8 起 iconEnv 判据同时在面板里找 OkaHostIsAppStore()/三态文案，
+        #   整块删掉会一起触发 —— 预期集合从 {"panelRow"} 扩为两者。
         ("M12 删面板状态行",
          panel_block, "",
-         {"panelRow"}),
+         {"panelRow", "iconEnv"}),
         # M13 删偏好读取：plist 写 false 也关不掉
         ("M13 删 IconSwitch 偏好读取",
          "    if (d[@\"IconSwitch\"])        gEnableSwitchIcon  = [d[@\"IconSwitch\"] boolValue];\n",
@@ -300,6 +302,8 @@ def build_cases():
          {"readyFn"}),
         # M30 取消 action 挪回第一行：v1.6.6 实测「菜单开关被看漏」的形态
         #   （取消第一、菜单夹后面）。行序回归闸门必须自己炸。
+        #   v1.6.8 起版本行也排在主动作之前，同一变异同时违反两条行序不变量 ——
+        #   预期集合是 {"panelOrder", "versionRow"}，少任何一个都是漏报。
         ("M30 取消 action 挪到菜单行前",
          "    BOOL menuOn = gEnableShortcut;\n",
          "    // 取消放最后（v1.6.7 行序调整）：开关/状态行现在是面板第一眼看到的内容。\n"
@@ -307,7 +311,43 @@ def build_cases():
          "                                          style:UIAlertActionStyleCancel\n"
          "                                        handler:nil]];\n\n"
          "    BOOL menuOn = gEnableShortcut;\n",
-         {"panelOrder"}),
+         {"panelOrder", "versionRow"}),
+        # M31 图标状态行退回无条件文案：v1.6.7 的误导形态原样复活 ——
+        #   真机实测（自签宿主上卸载重装 deb 仍不生效）证明「重装本插件可恢复」
+        #   对门控跳过的用户是假承诺。三态分家必须让闸门自己炸。
+        ("M31 图标行退回无条件文案",
+         "    NSString *iconState;\n"
+         "    if (iconReady) {\n"
+         "        iconState = @\"已启用（开=绿 / 关=原图标）\";\n"
+         "    } else if (OkaHostIsAppStore()) {\n"
+         "        iconState = @\"未启用（App 更新或重装会丢失，重装本插件 deb 可恢复）\";\n"
+         "    } else {\n"
+         "        iconState = @\"未启用（宿主非 App Store 原版装态，安装期注入被安全策略跳过；\"\n"
+         "                    @\"需 App Store 原版宿主，或按安装期输出执行 inject --force）\";\n"
+         "    }\n"
+         "    UIAlertAction *iconRow = [UIAlertAction actionWithTitle:\n"
+         "        [NSString stringWithFormat:@\"桌面动态图标：%@\", iconState]\n"
+         "                                          style:UIAlertActionStyleDefault\n"
+         "                                        handler:nil];\n",
+         "    UIAlertAction *iconRow = [UIAlertAction actionWithTitle:\n"
+         "        [NSString stringWithFormat:@\"桌面动态图标：%@\",\n"
+         "            iconReady ? @\"已启用（开=绿 / 关=原图标）\"\n"
+         "                      : @\"未启用（重装本插件可恢复）\"]\n"
+         "                                          style:UIAlertActionStyleDefault\n"
+         "                                        handler:nil];\n",
+         {"iconEnv"}),
+        # M32 删构建版本只读行：用户报「开关不见了」时失去第一现场证据
+        #   （无法当场核对设备实跑构建，只能 Round-Trip 猜）。
+        ("M32 删构建版本行",
+         "    UIAlertAction *verRow = [UIAlertAction actionWithTitle:\n"
+         "        [NSString stringWithFormat:@\"插件版本：%@（这行确认设备实跑构建）\",\n"
+         "            OKA_BUILD_TAG]\n"
+         "                                          style:UIAlertActionStyleDefault\n"
+         "                                        handler:nil];\n"
+         "    verRow.enabled = NO;\n"
+         "    [ac addAction:verRow];\n",
+         "",
+         {"versionRow"}),
     ]
     for name, old, _new, _exp in cases:
         if isinstance(old, tuple):   # 两步变异：分别验锚点

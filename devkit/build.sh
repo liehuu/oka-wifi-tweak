@@ -217,7 +217,7 @@ if ! python3 "$ROOT/devkit/check-icon-switch.py" "$ROOT/Tweak.xm"; then
   echo "✗ 动态图标闸门未通过（开/关图标不会自动切换，或入口位置/文案退化）"
   exit 1
 fi
-echo "✓ v1.6.6 动态图标：切换链路/四个同步点/becomeActive 兜底/注入标记门齐备"
+echo "✓ v1.6.6 起动态图标：切换链路/四个同步点/becomeActive 兜底/注入标记门齐备；v1.6.8：偏移≥56/图标三态/版本行"
 
 # v1.6.6 dylib 侧指纹（切换链路与门控的标识，丢了不会报错、只会不切换）
 for sym in "setAlternateIconName:completionHandler:" \
