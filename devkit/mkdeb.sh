@@ -111,10 +111,17 @@ printf '\n'
 # ---- v1.6.6：桌面动态图标注入 ----
 # 备选图标（默认图标红色替换为绿色的版本）+ Info.plist 声明，必须由安装期
 # root 完成（dylib 在 App 沙箱里写不了 .app）。
-# ★ helper 的任何失败都**不阻断安装**：|| true 兜住返回码；门控拒绝
-#   （自签环境等）本身就是设计内的安全跳过，只打印说明。
-printf '正在注入桌面动态图标（开=红染绿 / 关=默认原图标）...\n'
-__HELPER__ inject 2>&1 || true
+# ★ v1.6.7：捕获退出码讲清楚 —— 0=注入成功/已注入；2=安全跳过（门控拒绝/
+#   无红色主色/找不到 App）；1=真失败。|| true 保留（任何码都不阻断 dpkg），
+#   但 2 必须告诉用户「为什么没生效、还能怎么办」：v1.6.6 原实现一句
+#   `|| true` 全吞掉，用户实测「卸载重装也没生效」时设备上零线索。
+__RC=0
+__HELPER__ inject 2>&1 || __RC=$?
+if [ "$__RC" = "2" ]; then
+  printf '桌面动态图标已跳过：宿主不是 App Store 原版装态（自签/企业签环境）。\n'
+  printf '  这是设计内的安全跳过：不碰非原版签名的 App。\n'
+  printf '  确认自担签名风险可强行注入：设备上执行 __HELPER__ inject --force\n'
+fi
 # uicache：让 SpringBoard 重读 bundle Info.plist（alternate icon 声明
 # 否则它拿缓存里的旧版本，会拒绝切换）。路径按 scheme 拼（rootless 不同）。
 if [ -x __UICACHE__ ]; then __UICACHE__ 2>/dev/null || true; fi

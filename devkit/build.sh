@@ -228,6 +228,41 @@ for sym in "setAlternateIconName:completionHandler:" \
 done
 echo "✓ v1.6.6 dylib 切换链路指纹齐全（alternate 名/标记键/becomeActive）"
 
+# ---------- 4-0c) v1.6.7 服务假死自愈闸门（源码判据） ----------
+# 用户实测：开着 WiFi 传输过一会儿网页打不开，App 没被杀、连接状态从
+#   「已连接」变「等待中」；关开开关即恢复 = 服务端假死而 isRunning 恒 YES。
+# 判据盯四件事：探活走本地回环（不读 isRunning）/ 自愈重放原 hook
+#   （不另起私路只改状态位）/ 防抖与三个触发面齐备 / 实例与 options 落袋。
+# 反证见 selftest-service-heal.py：9 个破坏样本 + 1 个良性样本。
+if ! python3 "$ROOT/devkit/check-service-heal.py" "$ROOT/Tweak.xm"; then
+  echo "✗ 服务自愈闸门未通过（假死后网页打不开，用户只能手动关开）"
+  exit 1
+fi
+echo "✓ v1.6.7 服务自愈：回环探活/原路重放/防抖与三触发面/实例落袋齐备"
+
+# dylib 侧指纹：回环探活与自愈重放的标识。CFSocketConnectToAddress 是
+# CoreFoundation 的未定义符号（nm -u 可见，编进产物就有；假死探活删掉
+# 整段时它一起消失）。startWithOptions:error: 走 __objc_methname。
+for sym in CFSocketConnectToAddress startWithOptions:error:; do
+  grep -aq "$sym" "$BUILD/$NAME.dylib" \
+    || { echo "✗ dylib 缺 ${sym}（服务自愈会静默失效）"; exit 1; }
+done
+echo "✓ v1.6.7 dylib 自愈链路指纹齐全（回环连接/重放 selector）"
+
+# ---------- 4-0d) v1.6.7 postinst 注入退出码捕获 ----------
+# 用户实测「卸载插件重装 deb 仍显示未启用」时设备上零线索：v1.6.6 的
+# postinst 对 helper 注入一句 || true 全吞掉。退出码 2 = 安全跳过
+# （宿主不是 App Store 原版装态），此时必须把原因和 --force 指引打印出来。
+# 判据是成对存在性：捕获行 / 2 分支 / --force 提示，缺一条都可能重演。
+if ! grep -qF '__RC=0' "$ROOT/devkit/mkdeb.sh" \
+   || ! grep -qF '__HELPER__ inject 2>&1 || __RC=$?' "$ROOT/devkit/mkdeb.sh" \
+   || ! grep -qF 'if [ "$__RC" = "2" ]' "$ROOT/devkit/mkdeb.sh" \
+   || ! grep -qF 'inject --force' "$ROOT/devkit/mkdeb.sh"; then
+  echo "✗ mkdeb.sh 的 postinst 没捕获/讲清注入退出码（装完没生效时用户零线索）"
+  exit 1
+fi
+echo "✓ v1.6.7 postinst 捕获注入退出码并在跳过时给出 --force 指引"
+
 # 功能 2a：蜂窝解禁
 for sym in SCNetworkReachabilityGetFlags reachabilityChangedWithNote: \
            changeWifiTransferStateAction: setHidden:; do

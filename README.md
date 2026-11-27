@@ -8,6 +8,7 @@
 | 2 | 蜂窝 / 热点可开启 | 用手机流量或个人热点时，WiFi 传输页面的「开始」按钮正常出现，可正常开启；且显示的地址是手机在热点网段的真实 IP（`172.20.10.1` 这类），不再是 `unknown` |
 | 3 | 电脑网页端增强（v1.1.8） | 保留原 `Upload Files` 按钮；**整个页面就是放置区**（没有独立拖放框），把单个/多个文件、整个文件夹拖进网页任意位置即可上传（拖入时全屏提示 + 成功/失败汇总 + 失败重试）；**复用原版行末「移动」按钮与原弹窗**，增强为目录浏览 + 可勾选批量移动 + 结果反馈。v1.1.2：**文件夹置顶**、**顶部紧凑**、**任务面板默认折叠**；v1.1.5：文件夹琥珀黄 + 行内重命名按钮；**v1.1.6：删除按钮挪到最右、重命名在它左边；文件名左侧整片区域点一下即选中；每行新增下载按钮，文件直接下载、整个文件夹自动打成 ZIP；点行不再下载**；**v1.1.7：点文件夹行进入目录、点文件行在线预览 txt / pdf / mp4 / 图片 / 音频；目录 ZIP 显式带顶层文件夹；图标列按文件类型显示不同图标**；**v1.1.8：下载改 Blob 保存，不再触发 Chrome「已阻止不安全的下载」；PDF 预览可用；目录下载不再引发 IDM 弹一堆窗口**；**v1.1.9：彻底删掉导航式下载（「等二三十秒 + 已阻止不安全的下载 + IDM 接管」的根因）；每行显示最后修改时间**；**v1.2.0：每行新增「复制下载链接」，把真实下载地址发给别人，对方浏览器 / IDM / 迅雷直接下载** |
 | 4 | 桌面动态图标（v1.6.6） | WiFi 传输开着时，桌面 App 图标自动切成「红染绿」版（把现在默认图标上的红色替换成绿色）；关掉时自动切回默认原图标。四个同步点兜底（启动成功 / 停服 / 冷启动 / 回前台），**关态与未启用态同图**——不会把没生效骗成已生效；切换只调 iOS 公开 API，不碰 App 签名 |
+| 5 | 服务假死自愈（v1.6.7） | 开着 WiFi 传输放着不管，监听 socket 可能被系统回收而「假死」：实例 `isRunning` 仍报 YES、宿主显示「已连接」，但电脑网页打不开。v1.6.7 起每 45s 用**本地回环 connect 实测**端口（不读恒 YES 的 `isRunning`），回前台时也顺手探一次；确认死了就自动重放一次「关开」（同一条 hook 路，suspend=NO / 密码头 / 端口 fallback 全量补齐），90s 内不重复。可用 `ServiceHeal` 偏好关掉 |
 
 > **v1.1.9：下载慢/被拦的真正根因已清除，并新增「最后修改时间」列。**
 >
@@ -298,6 +299,25 @@ _GCDWebServerGetPrimaryIPAddress 硬编码 strcmp(ifa_name,"en0")
 **dylib 与 helper 共用同一份常量头** `devkit/include/oka-icon-common.h`（alternate 图标名 `OkaIconGreen` / 标记键 `OkaIconInjected` / 宿主 bundle id）——任何一边改名而另一边没跟上，症状都是「注入成功但切换失效」且零报错，只能从源头消除。
 
 **顺带的两个 UI 修正**：设置面板入口按钮「🔒 密码」改名「⚙️ 设置」（功能早已不止密码）；浮动按钮从右下角挪到页面右上角（右下会遮挡 WebDAV 传输页签，用户实测反馈）。
+
+**v1.6.7 的四处实测修正**（都来自真机复现，不是猜的）：
+
+- **浮动按钮偏移 8 → 40**：v1.6.6 的 `constant:8.0` 让按钮正好压在 WiFi 页顶部提示标签的文字上，按钮和文字糊成一团（用户实测「位置有点高、叠加在提示标签那里」）。改 40（约两行文字高）错开顶部提示区；
+- **`OkaIconSwitchReady` 改读 plist 文件**：原来的 `[NSBundle mainBundle].infoDictionary` 是 App 启动那一刻的快照——helper 在 deb 安装期把注入标记写进 `.app/Info.plist` 后，**不重启 App 缓存里永远没有这个键**，这正是「卸载插件重装 deb 仍显示未启用」的一半原因（另一半是自签环境下 helper 安全跳过，见 postinst 的退出码提示）。直接读文件后装完即生效，不必杀 App；
+- **postinst 讲清注入退出码**：helper 退出码 2 = 安全跳过（宿主不是 App Store 原版装态）时打印「为什么没生效 + 怎么强行注入」，不再一句 `|| true` 全吞掉——设备上零线索是这次排查最花的成本；
+- **面板行序调整**：「长按快捷菜单：开/关」行成为面板**第一个 action**，「取消」垫尾——用户实测 v1.6.6 里这行被夹在密码字段和取消之间看漏，误以为开关被删了。
+
+### 功能 5 —— 服务假死自愈（v1.6.7）
+
+**用户实测症状**：开着 WiFi 传输过一会儿电脑网页打不开；App 没被杀；WiFi 传输页连接状态从「已连接」变「等待中」；**关掉再打开开关，电脑立刻能访问、状态回「已连接」**。即服务层假死，而 App 的 ON/OFF 开关与宿主 UI 都不体现死态。
+
+**为什么不能拿 `isRunning` 当探活判据**：假死时（监听 socket 被系统回收 / Wi-Fi 漫游后僵住）实例 `isRunning` 仍恒 YES，宿主也照常显示 ON——拿它探活等于没探。必须 `CFSocketConnectToAddress` 连 `127.0.0.1` 的本地回环实测（0.5s 超时，只碰本机不外联）。
+
+**自愈走与用户手动「关开」完全相同的路**：`objc_msgSend` 给同一实例发 `stop` + `startWithOptions:error:`，自然经过 `my_startWithOptions` hook，`suspend=NO`、密码头、固定端口 fallback（`use != base` 退一步）全部自动重放——不另起一条私路，也不出现「状态位置成成功但服务没起来」的脱节。
+
+**三个触发面**：`applicationDidBecomeActive:` 回前台顺手探一次（用户回来第一件事就是刷新网页）；启动时挂 45s 周期定时器（兜「没人切前后台、一直挂着」）；防抖 90s（连续假死通常是路由器踢客户端 / 系统限制，无限重拉只会耗电刷日志还掩盖真问题）。自愈结果照常同步桌面图标（成功=绿 / 失败=回原图）。
+
+**反例判据全部可失败**（`devkit/check-service-heal.py` + `selftest-service-heal.py` 9 个破坏样本 + 1 个良性）：探活改用 `isRunning` / 自愈只改状态位不重放 / 删防抖 / 删任一触发面 / 删 `dispatch_resume`（timer 创建了永不触发）/ 实例或 options 不落袋（重放丢密码头，网页端 401）/ `ServiceHeal` 偏好读不到，每一条都必须让闸门红。
 
 ### 功能 3 —— 电脑网页端增强（v1.1.1 定型，v1.1.2 ~ v1.2.0 持续增强）
 
@@ -647,8 +667,10 @@ sh devkit/build.sh arm64  iphoneos-arm    1.2.0   # 传统 rootful
 | `devkit/selftest-shortcut-gate.py` | 上面那个闸门的反证：7 个破坏注入 + 1 个良性样本 | CI 的 Shortcut clear gate；本地可跑 |
 | `devkit/check-hover-css.py` | v1.6.3 行悬停 CSS 的性质判据（真上色 / 色差 ≥1.20 / 悬停≠选中 / 选中更深） | `build.sh` 内；CI 的 Hover highlight gate 同代码 |
 | `devkit/selftest-hover-gate.py` | 上面那个闸门的反证：9 个破坏注入 | CI 的 Hover highlight gate；本地可跑 |
-| `devkit/check-icon-switch.py` | v1.6.6 桌面动态图标：切换只走公开 API 两参调用、on=绿/off=primary、四同步点（启动/停服/冷启动/回前台）与顺序、becomeActive 注册不被开关 gate、共源常量头、面板只读状态行、按钮改名换位、负向拦截角标 API | `build.sh` 内；CI 的 Icon switch gate 同代码 |
-| `devkit/selftest-icon-gate.py` | 上面那个闸门的反证：20 个 dylib 侧 + 8 个 devkit 侧样本（含 2 个良性注释变更）——反向测试实测抓到过闸门自身缺陷（裸子串被「加后缀改名」放过、prototype 令 fn_body 抓错函数体），修的是闸门不是测试；M26/M27 分别锁「声明先于使用」与「SDK 常量↔框架头」（v1.6.6 run 42/43 两个编译盲区） | CI 的 Icon switch gate；本地可跑 |
+| `devkit/check-icon-switch.py` | v1.6.6 桌面动态图标：切换只走公开 API 两参调用、on=绿/off=primary、四同步点（启动/停服/冷启动/回前台）与顺序、becomeActive 注册不被开关 gate、共源常量头、面板只读状态行、按钮改名换位、负向拦截角标 API。v1.6.7 起还钉：按钮 topAnchor 偏移 ≥ 40（8.0 会压住顶部提示标签）、`OkaIconSwitchReady` 必须读 plist 文件（不许回退 `infoDictionary` 启动快照）、「长按快捷菜单」行必须是第一个 action | `build.sh` 内；CI 的 Icon switch gate 同代码 |
+| `devkit/selftest-icon-gate.py` | 上面那个闸门的反证：23 个 dylib 侧 + 8 个 devkit 侧样本（含 2 个良性注释变更）——反向测试实测抓到过闸门自身缺陷（裸子串被「加后缀改名」放过、prototype 令 fn_body 抓错函数体），修的是闸门不是测试；M26/M27 分别锁「声明先于使用」与「SDK 常量↔框架头」（v1.6.6 run 42/43 两个编译盲区）；M28/M29/M30 分别锁「常量退回 8.0」「回退 infoDictionary」「取消挪回第一行」（v1.6.7 三个实测回归） | CI 的 Icon switch gate；本地可跑 |
+| `devkit/check-service-heal.py` | v1.6.7 服务假死自愈：探活必须本地回环 connect 且**不许读 `isRunning`**（恒 YES，探了等于没探）；自愈必须重放 `startWithOptions:error:` 原路（不许只改状态位）；防抖 90s；三个触发面齐备（回前台 / 45s 定时器含 `dispatch_resume` / 启动即挂）；实例与 options 在 `my_startWithOptions` 落袋；`ServiceHeal` 偏好可读；自愈段无 NSLog；声明先于使用 | `build.sh` 内；CI 的 Service heal gate 同代码 |
+| `devkit/selftest-service-heal.py` | 上面那个闸门的反证：9 个破坏样本（每个精确触发一个判据键）+ 1 个良性注释变更 | CI 的 Service heal gate；本地可跑 |
 | `devkit/selftest-iconinject.c` | 红→绿像素映射 host 单测（10 个 expect_tint + 4 条 is_red 断言）：视觉规格的判定边界（什么算红）改坏了只有这里会红 | `build.sh` 内先跑再编 helper |
 | `node --check web/oka-wifi.js` | 用真实 JS 解析器验语法（不是正则数括号）；runner 缺 node 时**明确报错**，不静默跳过 | CI 的 Web assets gate |
 
@@ -803,7 +825,10 @@ v1.1.3 起插件**不输出任何系统日志**，所以判据一律看功能表
 | 开了 WiFi 传输，桌面图标还是默认原图 | ① 注入没完成（宿主 App 更新过 / 自签形态默认不注入）；② 系统拒绝切换 | 先看 App 内设置面板那行「桌面动态图标」：显示「未启用」→ 重装本插件 deb 即可恢复（postinst 会重新注入）；显示「已启用」仍不变 → 系统极少见的拒绝路径，功能本身（传输）不受影响，且**关态与未启用同图，不会出现「绿图标但服务没开」的误导** |
 | 关了 WiFi 传输，桌面图标还是绿的 | 同步点被跳过（极少见：停服没走 `stop`） | 杀掉了 App 再重开即恢复默认原图（冷启动同步在所有 `return` 之前）；若反复出现，确认 App 停服是否走了 `-[GCDWebServer stop]` |
 | 卸载插件后桌面图标残留绿色版本 / 长按菜单出现「开启WiFi传输」的空壳 | 卸载时 prerm 的 restore 没跑成功 | 手动 `dpkg -i` 重装一次本插件再走正常卸载（prerm 会重跑 restore）；极端情况下用 Filza 删 `<App>.app/OkaIconGreen*.png` 与 Info.plist 里的 `OkaIconInjected` 键（备份还原失败的兜底路径） |
-| 设置面板的浮动按钮又压住底部 WebDAV 页签了 | 按钮约束回退到了 bottomAnchor | 确认装的是 v1.6.6；按钮应锚在页面右上角 `btn.topAnchor`。有导航栏的页面走导航栏右侧 ⚙️，本就不占内容区 |
+| 设置面板的浮动按钮又压住底部 WebDAV 页签了 | 按钮约束回退到了 bottomAnchor | 确认装的是 v1.6.7；按钮应锚在页面右上角 `btn.topAnchor`。有导航栏的页面走导航栏右侧 ⚙️，本就不占内容区 |
+| 设置面板的浮动按钮压住页面顶部提示标签的文字了 | 偏移常量退回 < 40 | v1.6.7 起钉死 `constant ≥ 40`；确认装的是 v1.6.7 |
+| 桌面动态图标装完 deb 仍显示「未启用」 | ① 宿主不是 App Store 原版装态（自签/企业签），helper 安全跳过；② App 没重启而读到的是旧缓存（v1.6.7 已改读文件，不再有此问题） | 看 postinst 输出：跳过时会打印原因和 `inject --force` 强行注入的指引；确认装的是 v1.6.7 |
+| 开着 WiFi 传输过一会儿网页打不开，连接状态变「等待中」，关开开关就恢复 | 服务端假死：监听 socket 被系统回收 / Wi-Fi 漫游后僵住，`isRunning` 仍报 YES | v1.6.7 起 45s 周期 + 回前台自动探活自愈（本地回环实测，90s 防抖）。可 `plist` 写 `ServiceHeal=false` 关闭自愈观察旧行为 |
 
 
 ---
@@ -834,6 +859,7 @@ wifitweak/
 ├── devkit/
 │   ├── build.sh                # 零 Theos 编译：资源内联 + xcrun clang + codesign + 闸门（含 helper 编译与红→绿 host 单测）
 │   ├── mkdeb.sh                # 纯 Python 拼 ar 归档（不依赖 dpkg-deb）；postinst 调 helper 注入、prerm 调 restore
+│   ├── push-via-api.py         # github.com 被代理 502 时的等价推送通道（Git Data API，重建 tree sha 与本地一致才落 ref）
 │   ├── gen-webassets.py        # JS/CSS -> .build/OkaWebAssets.h（含往返解码自检）
 │   ├── selftest-webassets.py   # 上面这个资源闸门的自测：7 用例，证明它会失败
 │   ├── check-shell.py          # 静态闸门：bash 3.2 兼容性（本地也能跑）
@@ -842,8 +868,10 @@ wifitweak/
 │   ├── selftest-shortcut-gate.py # 上面这个闸门的反证：7 破坏注入 + 1 良性样本
 │   ├── check-hover-css.py      # v1.6.3 行悬停 CSS 闸门
 │   ├── selftest-hover-gate.py  # 上面这个闸门的反证
-│   ├── check-icon-switch.py    # v1.6.6 桌面动态图标闸门（切换链路 / 四同步点 / 共源常量 / UI 改名换位）
-│   ├── selftest-icon-gate.py   # 上面这个闸门的反证：19 个 dylib 侧 + 7 个 devkit 侧样本
+│   ├── check-icon-switch.py    # v1.6.6 桌面动态图标闸门（切换链路 / 四同步点 / 共源常量 / UI 改名换位；v1.6.7：偏移≥40 / 读文件 / 行序）
+│   ├── selftest-icon-gate.py   # 上面这个闸门的反证：23 个 dylib 侧 + 8 个 devkit 侧样本
+│   ├── check-service-heal.py   # v1.6.7 服务假死自愈闸门（回环探活不读 isRunning / 原路重放 / 防抖 / 三触发面）
+│   ├── selftest-service-heal.py # 上面这个闸门的反证：9 破坏样本 + 1 良性样本
 │   ├── iconinject.m            # v1.6.6 注入 helper CLI（inject/restore，安装期以 root 跑，只用 printf）
 │   ├── iconinject-core.h       # 红→绿像素映射纯函数（无 SDK 依赖，可 host 单测）
 │   ├── selftest-iconinject.c   # 红→绿映射 host 单测（10 个 expect_tint + 4 条 is_red 断言）
@@ -875,7 +903,7 @@ wifitweak/
 
 ### 可选：偏好设置
 
-插件会读 `/var/mobile/Library/Preferences/com.oka.wifitweak.plist`，六个开关，缺省全开：
+插件会读 `/var/mobile/Library/Preferences/com.oka.wifitweak.plist`，七个开关，缺省全开：
 
 ```xml
 <dict>
@@ -885,6 +913,7 @@ wifitweak/
     <key>EnableWebEnhance</key>  <true/>   <!-- 功能 3：网页拖放上传 / 批量移动 -->
     <key>CopyURLOnShortcut</key> <true/>   <!-- 开启后复制地址到剪贴板 -->
     <key>IconSwitch</key>        <true/>   <!-- 功能 4：桌面动态图标（开=红染绿） -->
+    <key>ServiceHeal</key>       <true/>   <!-- 功能 5：服务假死自愈（回环探活 + 自动重放，v1.6.7） -->
 </dict>
 ```
 

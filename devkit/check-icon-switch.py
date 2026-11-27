@@ -262,6 +262,20 @@ def main(path):
         fails.append(("readyFn",
                       "OkaIconSwitchReady 没读共源标记键 OKA_ICON_KEY_INJECTED："
                       "helper 注入成功与否 dylib 无从得知，未启用时也会尝试切换"))
+    else:
+        # v1.6.7：用户实测「卸载插件重装 deb 后仍显示未启用」根因之一 ——
+        # [NSBundle mainBundle].infoDictionary 是 App 启动那一刻的快照，
+        # helper 在安装期往 .app/Info.plist 写注入标记后，不重启 App 缓存
+        # 里永远没有这个键。必须直接读 plist 文件。
+        if "infoDictionary" in ready:
+            fails.append(("readyFn",
+                          "OkaIconSwitchReady 读 infoDictionary：那是启动快照，"
+                          "helper 安装期写盘后不重启 App 读不到——用户实测"
+                          "「卸载重装 deb 也没生效」正是这个缓存"))
+        if not re.search(r"pathForResource:@\"Info\"\s*\n\s*ofType:@\"plist\"", ready):
+            fails.append(("readyFn",
+                          "OkaIconSwitchReady 没走 pathForResource:@\"Info\" ofType:@\"plist\""
+                          " 读文件：拿不到安装期写入 Info.plist 的注入标记"))
 
     # ---------- 声明先于使用（C 规则，v1.6.6 CI 实测教训） ----------
     # v1.6.6 首发 CI 三个 scheme 全挂在同一个编译错：OkaIconSwitchReady 的
@@ -270,7 +284,7 @@ def main(path):
     # non-static declaration。本地只跑文本闸门不跑 clang，这类错只有 CI 能
     # 抓，所以闸门必须自己看行序：任何调用点早于定义时，必须存在更早的
     # 前向声明（以分号结尾、无函数体的那行）。
-    for _fname in ("OkaIconSwitchReady", "OkaSetAppIcon"):
+    for _fname in ("OkaIconSwitchReady", "OkaSetAppIcon", "OkaSelfHealService"):
         _def_re = re.compile(r"^\s*static\s+\w+\s+%s\s*\([^;]*\)\s*\{" % _fname)
         _proto_re = re.compile(r"^\s*static\s+\w+\s+%s\s*\([^;]*\)\s*;" % _fname)
         _call_re = re.compile(r"\b%s\s*\(" % _fname)
@@ -402,6 +416,29 @@ def main(path):
             fails.append(("panelRow",
                           "状态行没读 OkaIconSwitchReady()：显示的启用状态与实际注入状态无关，"
                           "是纯粹的误导"))
+        # v1.6.7：用户实测「长按快捷菜单」开关行被看漏，误以为被删。
+        #   开关行藏在保存/取消之间，小屏面板要滚才见。行序判据：
+        #   菜单 action 必须排在保存/取消/关闭密码之前，取消必须排在最后
+        #   —— 可见性不是审美问题，是「功能存在但用户找不到」的实测回归。
+        i_menu = pnl.find('@"长按快捷菜单：')
+        i_close = pnl.find('@"关闭密码"')
+        i_save = pnl.find('@"保存"')
+        i_cancel = pnl.find('@"取消"')
+        if i_menu < 0:
+            fails.append(("panelOrder",
+                          "面板找不到「长按快捷菜单」行标题：用户没有 App 内自清开关入口"))
+        else:
+            for _nm, _i in (("保存", i_save), ("取消", i_cancel), ("关闭密码", i_close)):
+                if _i >= 0 and _i < i_menu:
+                    fails.append(("panelOrder",
+                                  "「长按快捷菜单」行排在「%s」之后：开关行必须是面板第一个 "
+                                  "action、第一眼可见——用户实测埋在后面会被看漏，"
+                                  "误以为开关被删" % _nm))
+            for _nm, _i in (("保存", i_save), ("关闭密码", i_close)):
+                if i_cancel >= 0 and _i >= 0 and i_cancel < _i:
+                    fails.append(("panelOrder",
+                                  "「取消」排在「%s」之前：取消必须是最后一个 action，"
+                                  "否则用户第一眼先看到取消，顺手划掉，看不到下面的开关" % _nm))
 
     # ---------- 按钮改名与换位 ----------
     if '"⚙️ 设置"' not in src:
@@ -411,6 +448,24 @@ def main(path):
             fails.append(("btnTitle", "仍存在旧标题字面量 %s：改名不彻底" % old))
     if "btn.topAnchor" not in src:
         fails.append(("btnPos", "浮动按钮没用 btn.topAnchor：还压在 WebDAV 页签上"))
+    else:
+        # v1.6.7：用户实测 constant:8.0 时浮动按钮正好压在 WiFi 页顶部提示
+        # 标签的文字上，标题和按钮糊成一团；挪到 40（约两行文字高）才错开。
+        # 只判「用没用 topAnchor」挡不住把常量改回去——那种回归必须让闸门
+        # 自己炸，所以这里把偏移量下限钉死。
+        _cm = re.search(
+            r"\[btn\.topAnchor constraintEqualToAnchor:"
+            r"view\.safeAreaLayoutGuide\.topAnchor\s*\n\s*constant:([0-9.]+)\]",
+            src)
+        if _cm is None:
+            fails.append(("btnPos",
+                          "btn.topAnchor 约束行找不到 constant: 数值：约束被改写，"
+                          "偏移量无从验证，等于放任按钮压回提示标签（用户实测缺陷）"))
+        elif float(_cm.group(1)) < 40.0:
+            fails.append(("btnPos",
+                          "浮动按钮 topAnchor 常量 %s < 40.0：用户实测 8.0 时按钮"
+                          "叠加在页面顶部提示标签文字上，偏移必须足够大"
+                          % _cm.group(1)))
     if "btn.bottomAnchor" in src:
         fails.append(("btnPos",
                       "浮动按钮仍用 btn.bottomAnchor：底部约束会遮挡 WebDAV 传输页签"
@@ -440,7 +495,11 @@ def main(path):
     print("  ✓ 切换只走公开 API setAlternateIconName:（on=绿 / off=primary），门控齐全（开关/注入标记/系统版本）")
     print("  ✓ 四同步点：启动成功亮绿（先落状态）、停服回原图、冷启动兜底（首个 return 之前）、回前台无条件纠正")
     print("  ✓ 回前台注册：class_addMethod 补实现 + 已实现时 HookInstanceMethod 接力，注册前无任何开关 gate")
-    print("  ✓ 面板只读状态行（读 OkaIconSwitchReady）；按钮改名 ⚙️ 设置并移至右上；IconSwitch 偏好可读")
+    print("  ✓ 声明先于使用：OkaIconSwitchReady / OkaSetAppIcon / OkaSelfHealService "
+          "调用点早于定义时必有更早前向声明（v1.6.6/v1.6.7 CI 编译红的同型教训）")
+    print("  ✓ 面板只读状态行（读 OkaIconSwitchReady，走 plist 文件不走启动快照）；"
+          "「长按快捷菜单」开关行是第一个 action、取消垫尾；"
+          "按钮改名 ⚙️ 设置，topAnchor 偏移 ≥ 40 避开顶部提示标签；IconSwitch 偏好可读")
     print("  ✓ 无 setApplicationIconBadgeNumber 回流（角标方案已被否决）")
     return 0
 

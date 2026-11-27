@@ -172,7 +172,7 @@ def build_cases():
         "respondsToSelector 系统版本守卫两行")
     constraint_old = grab(
         r"[ \t]*\[btn\.topAnchor constraintEqualToAnchor:view\.safeAreaLayoutGuide\.topAnchor\n"
-        r"[ \t]*constant:8\.0\],\n",
+        r"[ \t]*constant:40\.0\],\n",
         "浮动按钮 topAnchor 约束两行")
     launch_old = grab(
         r"[ \t]*// ★ v1\.6\.6：按真实服务状态同步桌面图标。\n"
@@ -280,6 +280,34 @@ def build_cases():
         ("M26 删 OkaIconSwitchReady 前置声明",
          "static BOOL OkaIconSwitchReady(void);\n", "",
          {"declBeforeUse"}),
+        # M28 按钮常量退回 8.0：用户实测的原始缺陷原样复活（叠加提示标签）。
+        #   旧闸门只查用没用 topAnchor，这种回归静默漏网 —— v1.6.7 起钉死下限。
+        ("M28 按钮常量退回 8.0",
+         constraint_old,
+         "        [btn.topAnchor constraintEqualToAnchor:view.safeAreaLayoutGuide.topAnchor\n"
+         "                                    constant:8.0],\n",
+         {"btnPos"}),
+        # M29 ready 回退 infoDictionary：用户实测「卸载重装 deb 仍显示未启用」
+        #   的根因形态（启动快照缓存），只查读没读标记键拦不住它。
+        ("M29 ready 回退 infoDictionary",
+         "    NSString *plistPath = [[NSBundle mainBundle] pathForResource:@\"Info\"\n"
+         "                                                          ofType:@\"plist\"];\n"
+         "    if (!plistPath) return NO;\n"
+         "    NSDictionary *plist = [NSDictionary dictionaryWithContentsOfFile:plistPath];\n"
+         "    return plist[[NSString stringWithUTF8String:OKA_ICON_KEY_INJECTED]] != nil;\n",
+         "    NSDictionary *plist = [[NSBundle mainBundle] infoDictionary];\n"
+         "    return plist[[NSString stringWithUTF8String:OKA_ICON_KEY_INJECTED]] != nil;\n",
+         {"readyFn"}),
+        # M30 取消 action 挪回第一行：v1.6.6 实测「菜单开关被看漏」的形态
+        #   （取消第一、菜单夹后面）。行序回归闸门必须自己炸。
+        ("M30 取消 action 挪到菜单行前",
+         "    BOOL menuOn = gEnableShortcut;\n",
+         "    // 取消放最后（v1.6.7 行序调整）：开关/状态行现在是面板第一眼看到的内容。\n"
+         "    [ac addAction:[UIAlertAction actionWithTitle:@\"取消\"\n"
+         "                                          style:UIAlertActionStyleCancel\n"
+         "                                        handler:nil]];\n\n"
+         "    BOOL menuOn = gEnableShortcut;\n",
+         {"panelOrder"}),
     ]
     for name, old, _new, _exp in cases:
         if isinstance(old, tuple):   # 两步变异：分别验锚点

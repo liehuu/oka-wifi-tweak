@@ -130,6 +130,10 @@ static Class LookupClass(NSString *mangled, NSString *swiftName) {
 // 运行期配置（读 plist，缺省全开）
 // ---------------------------------------------------------------------------
 static BOOL gEnableSwitchIcon = YES;   // 功能 4（v1.6.6）：桌面动态图标（开=红染绿）
+// ★ v1.6.7：服务假死自愈（回前台探活 + 45s 定时探活，假死自动重拉）。
+//   默认 YES —— 用户红线①「不能有时生效有时不生效」的运行期落点；
+//   写 false 可整套关掉（含定时器线程，不留后台空转）。
+static BOOL gEnableServiceHeal = YES;
 static BOOL gEnableShortcut    = YES;   // 功能 1：长按菜单
 static BOOL gEnableCellular    = YES;   // 功能 2a：蜂窝/热点可开启
 static BOOL gEnableIPFix       = YES;   // 功能 2b：热点 IP 修正
@@ -210,6 +214,8 @@ static void LoadPrefs(void) {
     if (d[@"EnableIPFix"])       gEnableIPFix       = [d[@"EnableIPFix"] boolValue];
     // v1.6.6：桌面动态图标（红染绿）。默认 YES，写 false 可关。
     if (d[@"IconSwitch"])        gEnableSwitchIcon  = [d[@"IconSwitch"] boolValue];
+    // v1.6.7：服务假死自愈。默认 YES，写 false 关（用户可自担「放着会假死」）
+    if (d[@"ServiceHeal"])       gEnableServiceHeal = [d[@"ServiceHeal"] boolValue];
     if (d[@"EnableWebEnhance"])  gEnableWebEnhance  = [d[@"EnableWebEnhance"] boolValue];
     if (d[@"CopyURLOnShortcut"]) gCopyURLOnShortcut = [d[@"CopyURLOnShortcut"] boolValue];
     if (d[@"EnableFixedAddr"])   gEnableFixedAddr   = [d[@"EnableFixedAddr"] boolValue];
@@ -247,6 +253,14 @@ static void RetainObject(id o) {
 // port / isRunning 更新，比 startWithPort: hook 可靠（App 可能走 startWithOptions:）。
 static NSUInteger gServerPort = 0;
 static BOOL gServerRunning = NO;
+// ★ v1.6.7 自愈三件套（声明必须放在最靠前 —— my_startWithOptions /
+//   my_serverURL 都要写它们，而这两个 hook 在文件中部，定义在后）：
+//   gServerInstance  GCDWebServer 实例（自愈重拉的落点）
+//   gServerOptions   最近一次成功启动的 options（自愈重放）
+//   gLastHealAt      上次自愈时刻（防抖，reference date）
+static id gServerInstance = nil;
+static NSDictionary *gServerOptions = nil;
+static NSTimeInterval gLastHealAt = 0.0;
 
 // ===========================================================================
 //  一、功能 2b：热点 IP 修正
@@ -623,6 +637,10 @@ static NSURL *(*orig_serverURL)(id, SEL);
 static NSURL *my_serverURL(id self, SEL _cmd) {
     NSURL *url = orig_serverURL ? orig_serverURL(self, _cmd) : nil;
 
+    // ★ v1.6.7：serverURL 比 startWithOptions 更早被调（宿主刷新 UI 就读），
+    //   这里补记实例：自愈不依赖启动路径的时序。
+    if (!gServerInstance) gServerInstance = self;
+
     // 运行状态 / 真实端口一律从实例取（权威判据，不猜端口）
     BOOL running = NO;
     if ([self respondsToSelector:@selector(isRunning)]) {
@@ -848,6 +866,12 @@ static void OkaToggleShortcutMenu(void);
 //   call to undeclared function（implicit declaration），再
 //   static declaration follows non-static declaration。
 static BOOL OkaIconSwitchReady(void);
+// ★ v1.6.7：服务假死自愈入口，实现在 becomeActive hook 之后的自愈段。
+//   第三次同型教训：OkaSelfHealService 的调用点（my_applicationDidBecomeActive，
+//   文件中部）早于定义（自愈段，文件后部）——缺前置声明时 clang 先报 call to
+//   undeclared function，再报 static declaration follows non-static
+//   declaration，三个 scheme 一起死。本地闸门 declBeforeUse 盯这条，别再手滑。
+static void OkaSelfHealService(void);
 
 // hook: reachabilityChangedWithNote:
 static void (*orig_reachabilityChanged)(id, SEL, id);
@@ -1205,10 +1229,10 @@ static void OkaPresentWebAuthSettings(id page) {
         tf.autocorrectionType = UITextAutocorrectionTypeNo;
     }];
 
-    [ac addAction:[UIAlertAction actionWithTitle:@"取消"
-                                          style:UIAlertActionStyleCancel
-                                        handler:nil]];
-
+    // ★ v1.6.7：行序调整 —— 「取消」挪到最后，两行开关/状态提到最前。
+    //   用户实测：v1.6.6 面板里「长按快捷菜单」行被用户看漏（夹在取消
+    //   与动态图标行之间、密码字段下方），误以为开关被删。顺序上让开关
+    //   行成为面板第一个 action，第一眼可见，不再靠滚。
     // ★ v1.6.5：长按快捷菜单开关。放在这里而不是再加按钮 ——
     //   OkaAttachWebAuthEntry 的挂载逻辑是「右上角空则占右上角，否则浮动」，
     //   第二个入口会和密码入口抢同一个位子。面板里多一行零冲突。
@@ -1257,9 +1281,14 @@ static void OkaPresentWebAuthSettings(id page) {
             OkaToast(@"密码不能为空。要取消密码请用「关闭密码」。");
             return;
         }
-        OkaSaveWebAuth(u.length ? u : @"oka", p);
-        OkaToast(@"已保存。重新开启 WiFi 传输后生效。");
-    }]];
+OkaSaveWebAuth(u.length ? u : @"oka", p);
+            OkaToast(@"已保存。重新开启 WiFi 传输后生效。");
+        }]];
+
+    // 取消放最后（v1.6.7 行序调整）：开关/状态行现在是面板第一眼看到的内容。
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消"
+                                          style:UIAlertActionStyleCancel
+                                        handler:nil]];
 
     [vc presentViewController:ac animated:YES completion:nil];
 }
@@ -1329,8 +1358,11 @@ static void OkaAttachWebAuthEntry(id page) {
         //   用户实测：右下角悬浮按钮遮挡 WebDAV 传输页签（底部横排页签的
         //   右下格）。右上角在无导航栏的页面顶通常是空白/标题区，
         //   不占内容、不碰底部页签。有导航栏时走 ① 分支，此路本就走不到。
+        // ★ v1.6.7：用户实测 constant:8 时按钮**叠加在页面顶部提示标签
+        //   文字上**（safeArea 顶部与提示文字同一垂直带），按钮和文字互相
+        //   糊成一团。下移到 40（约两行文字高度）避开顶部提示区。
         [btn.topAnchor constraintEqualToAnchor:view.safeAreaLayoutGuide.topAnchor
-                                    constant:8.0],
+                                    constant:40.0],
         [btn.heightAnchor constraintEqualToConstant:26.0],
     ]];
 }
@@ -1420,8 +1452,16 @@ static void OkaToggleShortcutMenu(void) {
 // 注入是否完成？读宿主 Info.plist 的 OkaIconInjected 标记键
 // （helper 成功时写入；App 更新/重装会丢失，需重装 deb 恢复）。
 static BOOL OkaIconSwitchReady(void) {
-    return [[NSBundle mainBundle].infoDictionary
-            objectForKey:[NSString stringWithUTF8String:OKA_ICON_KEY_INJECTED]] != nil;
+    // ★ v1.6.7：直接读 Info.plist 文件，**不走 infoDictionary**。
+    //   infoDictionary 是 App 启动那一刻的快照：helper 在 deb 安装期把
+    //   注入标记写进 .app/Info.plist 后，没重启 App 时缓存里永远没有这个键
+    //   —— 用户实测「卸载重装 deb 也没生效」正是这个缓存（v1.6.6 原实现
+    //   用 infoDictionary，装完必须杀 App 才能好，而面板不会告诉用户）。
+    NSString *plistPath = [[NSBundle mainBundle] pathForResource:@"Info"
+                                                          ofType:@"plist"];
+    if (!plistPath) return NO;
+    NSDictionary *plist = [NSDictionary dictionaryWithContentsOfFile:plistPath];
+    return plist[[NSString stringWithUTF8String:OKA_ICON_KEY_INJECTED]] != nil;
 }
 
 // 切图标。所有同步点都在主线程（用户点击 / GCDWebServer 回调 / App 生命周期
@@ -1443,6 +1483,10 @@ static void OkaSetAppIcon(BOOL on) {
 static BOOL (*orig_startWithOptions)(id, SEL, NSDictionary *, NSError **);
 static BOOL my_startWithOptions(id self, SEL _cmd, NSDictionary *options, NSError **error) {
     if (!orig_startWithOptions) return NO;
+
+    // ★ v1.6.7：记下实例与本次 options —— 假死自愈要拿它们重拉
+    //   （自愈走 objc_msgSend，会重新经过本 hook，逻辑自动全量重放）。
+    gServerInstance = self;
 
     // ★ v1.4.1：关掉 GCDWebServer 的「进后台自动停服」。
     //   GCDWebServer 的 AutomaticallySuspendInBackground 默认 YES：App 一进后台
@@ -1481,6 +1525,7 @@ static BOOL my_startWithOptions(id self, SEL _cmd, NSDictionary *options, NSErro
     if (real) gServerPort = real;
     if (ok) {
         gServerRunning = YES;
+        gServerOptions = use;   // v1.6.7：自愈重放用这份（suspend=NO/密码头/端口 fallback 都在内）
         // ★ v1.6.6：启动成功 → 桌面图标切「红染绿」版（OkaIconGreen）。
         //   放在 if (ok) 块内：启动失败时不允许亮绿图标。
         OkaSetAppIcon(YES);
@@ -1533,6 +1578,90 @@ static void my_applicationDidBecomeActive(id self, SEL _cmd, UIApplication *app)
         orig_applicationDidBecomeActive(self, _cmd, app);
     }
     OkaSetAppIcon(gServerRunning);
+    // ★ v1.6.7：回前台顺手探活自愈 —— 假死多发生在「放着没人管」的时候，
+    //   用户回来第一件事就是刷新网页，此时不修就要再吃一次打不开。
+    OkaSelfHealService();
+}
+
+// ===========================================================================
+//  v1.6.7：服务假死自愈（用户实测：开着放着「过一会儿」网页打不开，
+//  App 没被杀、连接状态从「已连接」变「等待中」，关开 WiFi 传输即恢复）
+// ===========================================================================
+//  症状形态：监听 socket 被系统回收 / Wi-Fi 漫游后假死。此时实例
+//  isRunning 仍报 YES、宿主 UI 仍显示 ON，但任何连接都失败 —— 所以
+//  **不能拿 isRunning 当探活判据**（它恒 YES，探了等于没探），必须
+//  用本地回环 connect 实测。自愈走与用户手动「关开」完全相同的路
+//  （objc_msgSend startWithOptions:error: 自然经过 my hook，suspend=NO /
+//  密码头 / 端口 fallback 全部自动重放），不另起一条私路。
+//  三个状态变量声明在文件前部全局区（my_startWithOptions 在中部就要写）。
+
+// 本地回环探活。超时取 0.5s：主线程也会调它（回前台路径），本地回环
+// 要么瞬通要么立刻 ECONNREFUSED，挂死的 socket 不会拖满超时。
+static BOOL OkaPortAlive(NSUInteger port) {
+    if (!port) return NO;
+    CFSocketContext ctx = { 0, NULL, NULL, NULL, NULL };
+    CFSocketRef sock = CFSocketCreate(kCFAllocatorDefault,
+                                      PF_INET, SOCK_STREAM, IPPROTO_TCP,
+                                      kCFSocketNoCallBack, &ctx);
+    if (!sock) return NO;
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_len = sizeof(addr);
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((uint16_t)port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);   // 只探本机，不碰外网
+    CFDataRef addrData = CFDataCreate(kCFAllocatorDefault,
+                                      (const UInt8 *)&addr, sizeof(addr));
+    BOOL alive = NO;
+    if (addrData) {
+        alive = (CFSocketConnectToAddress(sock, addrData, 0.5)
+                 == kCFSocketSuccess);
+        CFRelease(addrData);
+    }
+    CFSocketInvalidate(sock);
+    CFRelease(sock);
+    return alive;
+}
+
+// 自愈。所有前置条件都不满足时安静返回 —— 这是运行期路径，
+// 不允许弹窗、不允许 NSLog（dpkg/设备日志纪律），只做事不说话。
+static void OkaSelfHealService(void) {
+    if (!gEnableServiceHeal) return;          // 偏好开关（默认 YES，LoadPrefs）
+    if (!gServerRunning || !gServerPort) return;
+    // 防抖：90s 内不重复自愈。连续假死说明环境有问题（路由器踢客户端 /
+    // 系统限制），无限重拉只会耗电、刷日志，还掩盖真问题。
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (gLastHealAt && now - gLastHealAt < 90.0) return;
+    if (OkaPortAlive(gServerPort)) return;    // 活着就别动
+    id srv = gServerInstance;
+    if (!srv) return;
+    gLastHealAt = now;
+    ((void (*)(id, SEL))objc_msgSend)(srv, @selector(stop));
+    NSError *err = nil;
+    BOOL ok = ((BOOL (*)(id, SEL, NSDictionary *, NSError **))objc_msgSend)(
+        srv, @selector(startWithOptions:error:), gServerOptions ?: @{}, &err);
+    NSUInteger real = ((NSUInteger (*)(id, SEL))objc_msgSend)(srv, @selector(port));
+    if (real) gServerPort = real;
+    gServerRunning = ok;
+    // 自愈结果同步桌面图标（成功=绿 / 失败=回原图，语义与手动开关一致）。
+    OkaSetAppIcon(gServerRunning);
+}
+
+// 定时探活：45s 一轮兜「没人切前后台、一直挂着」的场景。
+// App 被系统挂起时该 timer 随之暂停 —— 正常，回前台那条路径会补探。
+static void OkaStartHealTimer(void) {
+    dispatch_source_t t = dispatch_source_create(
+        DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+        dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    if (!t) return;
+    dispatch_source_set_timer(t, dispatch_walltime(NULL, 0),
+                              45ull * NSEC_PER_SEC, 5ull * NSEC_PER_SEC);
+    dispatch_source_set_event_handler(t, ^{
+        dispatch_async(dispatch_get_main_queue(), ^{
+            OkaSelfHealService();
+        });
+    });
+    dispatch_resume(t);
 }
 
 // 兜底算地址：自己的 IP + 记录到的端口
@@ -1911,6 +2040,10 @@ static BOOL my_didFinishLaunching(id self, SEL _cmd, UIApplication *app, NSDicti
     //   同时兜住上次 App 被系统杀掉时图标停在"绿"的残留 —— 那会让用户
     //   以为服务还在跑，正是"图标误导"要防的情况。
     OkaSetAppIcon(gServerRunning);
+    // ★ v1.6.7：挂定时探活。冷启动必然服务没起（自愈函数自己会早退），
+    //   放在这里只求「App 活着期间一直有人值班」；开关关掉时自愈首行
+    //   即返回，定时器空转成本 ≈ 0。
+    OkaStartHealTimer();
 
     // 一次遍历同时得出「有没有自己那条」和「把别人那条留下来」。
     // 不能只判断 exists 再整体重写：app.shortcutItems 可能含 App 自带项

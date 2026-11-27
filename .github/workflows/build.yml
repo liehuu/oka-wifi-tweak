@@ -25,7 +25,7 @@ on:
 
 env:
   # 版本号单一来源，禁止在别处硬编码（否则会出现「包名 v1.0、内容 v1.1」）。
-  VERSION: ${{ github.event.inputs.version || '1.6.6' }}
+  VERSION: ${{ github.event.inputs.version || '1.6.7' }}
   HOMEBREW_NO_AUTO_UPDATE: 1
 
 jobs:
@@ -131,7 +131,7 @@ jobs:
 
       # v1.6.6 桌面动态图标闸门：
       #  check-icon-switch.py 是 build.sh 构建时真正调用的那一份；
-      #  selftest-icon-gate.py 对它做 19 个破坏注入 + 7 个 devkit 侧样本
+      #  selftest-icon-gate.py 对它做 23 个破坏注入 + 8 个 devkit 侧样本
       #  （含 2 个良性注释变更），证明这些判据**会失败**、且不误伤。
       #  反向测试实测抓到过闸门自身的缺陷（裸子串 in 判断被「加后缀改名」
       #  放过），修的是闸门不是测试 —— 这就是为什么两个都要跑。
@@ -140,6 +140,17 @@ jobs:
           set -eu
           python3 devkit/check-icon-switch.py Tweak.xm
           python3 devkit/selftest-icon-gate.py
+
+      # v1.6.7 服务假死自愈闸门：
+      #  check-service-heal.py 是 build.sh 构建时真正调用的那一份；
+      #  selftest-service-heal.py 对它做 9 个破坏注入 + 1 个良性样本。
+      #  守住的实测症状：开着传输过一会儿网页打不开、App 未杀、状态从
+      #  「已连接」变「等待中」，关开开关即恢复（服务假死 + isRunning 恒 YES）。
+      - name: Service heal gate
+        run: |
+          set -eu
+          python3 devkit/check-service-heal.py Tweak.xm
+          python3 devkit/selftest-service-heal.py
 
       - name: Build ${{ matrix.scheme }}
         run: |
