@@ -94,10 +94,12 @@
 #define APPDEL_CLASS_MANGLED @"_TtC7Blinker11AppDelegate"
 #define APPDEL_CLASS_SWIFT   @"Blinker.AppDelegate"
 
-// ★ v1.6.8：构建标识。写进设置面板只读版本行 —— 用户实测「开关不见了」
-//   时第一件事是核对设备上跑的到底是哪个构建（旧实例残留 / 装错方案
-//   都会让新代码不生效，而面板外观看不出来）。改版本号必须同步这里。
-#define OKA_BUILD_TAG @"v1.6.8"
+// ★ v1.6.9：构建标识。写进设置面板 message 的版本行 —— 用户实测
+//   「开关不见了」时第一件事是核对设备上跑的到底是哪个构建（旧实例残留 /
+//   装错方案都会让新代码不生效，而面板外观看不出来）。改版本号必须同步这里。
+//   v1.6.9 起只读信息（图标三态 + 版本）全部走 message、不再占 action 行，
+//   原因见 OkaPresentWebAuthSettings 里的 v1.6.9 注释。
+#define OKA_BUILD_TAG @"v1.6.9"
 
 static NSString *const kPrefsPath = @"/var/mobile/Library/Preferences/com.oka.wifitweak.plist";
 
@@ -1219,9 +1221,31 @@ static void OkaPresentWebAuthSettings(id page) {
         : @"当前未启用 —— 同一 WiFi 下谁都能直接打开网页。\n\n"
           @"设置后要重新开启 WiFi 传输才生效。";
 
+    // ★ v1.6.9：只读信息全部改走 alert message，不再占 action 行。
+    //   真机实测不变式（v1.6.7 / v1.6.8 两张反馈截图，密码框获焦、键盘
+    //   均弹起）：动作行总数一旦超过末 4 行，超出的行从栈顶开始整行消失
+    //   —— v1.6.7 丢第 1 行「长按快捷菜单」、v1.6.8 再丢「桌面动态图标」，
+    //   两代可见行恒为最末 4 行；而消息文本行从不丢。message 是纯文本、
+    //   可控高、不参与动作行淘汰，所以图标三态 + 构建版本放进 message，
+    //   动作栈只留 4 行交互行（菜单 / 关闭密码 / 保存 / 取消）。
+    //   「不能误导」红线不变：三态文案一字不挪，只是换了个不会丢的容器。
+    BOOL iconReady = OkaIconSwitchReady();
+    NSString *iconState;
+    if (iconReady) {
+        iconState = @"已启用（开=绿 / 关=原图标）";
+    } else if (OkaHostIsAppStore()) {
+        iconState = @"未启用（App 更新或重装会丢失，重装本插件 deb 可恢复）";
+    } else {
+        iconState = @"未启用（宿主非 App Store 原版装态，安装期注入被安全策略跳过；"
+                    @"需 App Store 原版宿主，或按安装期输出执行 inject --force）";
+    }
+    NSString *infoMsg = [NSString stringWithFormat:
+        @"%@\n\n桌面动态图标：%@\n插件版本：%@（确认设备实跑构建）",
+        msg, iconState, OKA_BUILD_TAG];
+
     UIAlertController *ac =
         [UIAlertController alertControllerWithTitle:@"网页访问密码"
-                                            message:msg
+                                            message:infoMsg
                                      preferredStyle:UIAlertControllerStyleAlert];
 
     [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
@@ -1238,7 +1262,7 @@ static void OkaPresentWebAuthSettings(id page) {
         tf.autocorrectionType = UITextAutocorrectionTypeNo;
     }];
 
-    // ★ v1.6.7：行序调整 —— 「取消」挪到最后，两行开关/状态提到最前。
+    // ★ v1.6.7：行序调整 —— 「取消」挪到最后，开关行提到最前。
     //   用户实测：v1.6.6 面板里「长按快捷菜单」行被用户看漏（夹在取消
     //   与动态图标行之间、密码字段下方），误以为开关被删。顺序上让开关
     //   行成为面板第一个 action，第一眼可见，不再靠滚。
@@ -1255,42 +1279,6 @@ static void OkaPresentWebAuthSettings(id page) {
         OkaToggleShortcutMenu();
     }]];
 
-    // ★ v1.6.6：动态图标是否已实际生效的只读状态行（不可点）。
-    //   用户红线「不能误导」：桌面没切换时，用户必须能在 App 内看到
-    //   「未启用」，而不是猜自己哪里点错了。
-    // ★ v1.6.8：未启用的原因分家。v1.6.6/v1.6.7 一律写「重装本插件可恢复」，
-    //   真机实测证伪：宿主是自签/侧载装态时 helper 按安全门控直接跳过，
-    //   卸载重装 deb 一万次也不会注入。文案按宿主装态分三种：
-    //     已启用 / 未启用（App Store 装态丢失→重装 deb 可恢复）/
-    //     未启用（非 App Store 装态被门控跳过→讲清放行路径）。
-    //   语义不变：开=红染绿图标，关=App 默认原图标。
-    BOOL iconReady = OkaIconSwitchReady();
-    NSString *iconState;
-    if (iconReady) {
-        iconState = @"已启用（开=绿 / 关=原图标）";
-    } else if (OkaHostIsAppStore()) {
-        iconState = @"未启用（App 更新或重装会丢失，重装本插件 deb 可恢复）";
-    } else {
-        iconState = @"未启用（宿主非 App Store 原版装态，安装期注入被安全策略跳过；"
-                    @"需 App Store 原版宿主，或按安装期输出执行 inject --force）";
-    }
-    UIAlertAction *iconRow = [UIAlertAction actionWithTitle:
-        [NSString stringWithFormat:@"桌面动态图标：%@", iconState]
-                                          style:UIAlertActionStyleDefault
-                                        handler:nil];
-    iconRow.enabled = NO;
-    [ac addAction:iconRow];
-
-    // ★ v1.6.8：构建版本只读行。「设置里的开关不见了」类反馈的第一现场：
-    //   先看这行确认设备实跑构建 —— 旧 dylib 残留（装过别的方案没卸干净）、
-    //   App 装完没杀都在让新代码不生效，而面板外观看不出差别。不可点。
-    UIAlertAction *verRow = [UIAlertAction actionWithTitle:
-        [NSString stringWithFormat:@"插件版本：%@（这行确认设备实跑构建）",
-            OKA_BUILD_TAG]
-                                          style:UIAlertActionStyleDefault
-                                        handler:nil];
-    verRow.enabled = NO;
-    [ac addAction:verRow];
     if (on) {
         [ac addAction:[UIAlertAction actionWithTitle:@"关闭密码"
                                                style:UIAlertActionStyleDestructive
@@ -1316,12 +1304,21 @@ OkaSaveWebAuth(u.length ? u : @"oka", p);
             OkaToast(@"已保存。重新开启 WiFi 传输后生效。");
         }]];
 
-    // 取消放最后（v1.6.7 行序调整）：开关/状态行现在是面板第一眼看到的内容。
+    // 取消放最后（v1.6.7 行序调整）：开关行现在是面板第一眼看到的内容。
     [ac addAction:[UIAlertAction actionWithTitle:@"取消"
                                           style:UIAlertActionStyleCancel
                                         handler:nil]];
 
-    [vc presentViewController:ac animated:YES completion:nil];
+    // ★ v1.6.9：先收键盘再弹面板。密码框还获焦时键盘占掉约 290pt 高度，
+    //   alert 高度预算被压爆正是动作行成片消失的直接诱因（v1.6.7/v1.6.8
+    //   实测只末 4 行可见）。收键盘 + 动作栈收敛到 4 行双管齐下。
+    //   present 延迟 0.35s：等键盘退场动画做完（约 0.25s）再弹，避免
+    //   alert 在键盘仍占位的窗口期里定型。
+    [vc.view endEditing:YES];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [vc presentViewController:ac animated:YES completion:nil];
+    });
 }
 
 // 块式 target：页面是 Swift 类，不能靠给它加方法挂 action。

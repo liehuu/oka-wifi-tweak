@@ -11,8 +11,9 @@
   本闸门把这两条拆成可失败的源码判据：
   · 「不能时灵时不灵」= 四个同步点（启动成功 / 停服 / 冷启动 / 回前台）
     全部在位且顺序正确；helper 侧注入与 dylib 侧切换共用同一份常量头；
-  · 「不能误导」= 关态回 primary（=未注入时的显示态），面板里有只读
-    状态行告诉用户到底启没启用；
+  · 「不能误导」= 关态回 primary（=未注入时的显示态），面板 message 里
+    有只读信息告诉用户到底启没启用（v1.6.9 起只读信息走 message 不占
+    action 行 —— 真机实测动作行超过末 4 行时从栈顶整行消失）；
   · 「不能打不开」= dylib 只调公开 API setAlternateIconName:，不碰
     Info.plist、不写 .app 目录（写盘全在 helper / deb 安装期，另由
     build.sh 二进制指纹与 verify-deb.py 把关）。
@@ -400,35 +401,48 @@ def main(path):
                               "SEL selActive 注册之前出现了 if (gEnable...)：开关关掉后同步点④"
                               "不挂载，而它的症状正是用户报的「图标没自动切换」"))
 
-    # ---------- 面板只读状态行（「不能误导」的 App 内可见性） ----------
+    # ---------- 面板（「不能误导」的 App 内可见性 + v1.6.9 渲染层修复） ----------
     pnl = fn_body(src, "static void OkaPresentWebAuthSettings(")
     if pnl is None:
         fails.append(("panelFn", "找不到 OkaPresentWebAuthSettings 定义"))
     else:
-        if "iconRow" not in pnl:
-            fails.append(("panelRow",
-                          "设置面板没有桌面动态图标状态行：桌面没切换时用户在 App 内"
-                          "看不到「未启用」，只能猜自己哪里点错了"))
-        elif "iconRow.enabled = NO;" not in pnl:
-            fails.append(("panelRow",
-                          "状态行没置 enabled = NO：可点的动作行点下去没反应，"
-                          "比没有这一行更糟"))
-        if "OkaIconSwitchReady()" not in pnl:
-            fails.append(("panelRow",
-                          "状态行没读 OkaIconSwitchReady()：显示的启用状态与实际注入状态无关，"
-                          "是纯粹的误导"))
-        # v1.6.7：用户实测「长按快捷菜单」开关行被看漏，误以为被删。
-        #   开关行藏在保存/取消之间，小屏面板要滚才见。行序判据：
-        #   菜单 action 必须排在保存/取消/关闭密码之前，取消必须排在最后
-        #   —— 可见性不是审美问题，是「功能存在但用户找不到」的实测回归。
+        # v1.6.9 渲染层修复源码不变量 —— 三条全部来自真机实测，不是审美：
+        #   ① actionCap：动作行 ≤ 4 行。实测（v1.6.7/v1.6.8 两张反馈截图，
+        #      密码框获焦、键盘弹起）：动作行超过末 4 行时，超出行从栈顶开始
+        #      整行消失 —— v1.6.7 丢第 1 行「长按快捷菜单」、v1.6.8 再丢
+        #      「桌面动态图标」，两代可见行恒为最末 4 行。
+        #   ② msgInfo：只读信息（图标三态 + 构建版本）必须走 alert message ——
+        #      message 是文本、可控高、不参与动作行淘汰，文本行实测从不丢。
+        #   ③ keyboardDismiss：present 前必须收键盘（高度溢出直接诱因），
+        #      并延迟到键盘退场动画做完再弹，否则 alert 在键盘仍占位的
+        #      窗口期里定型。
+        #   v1.6.7 行序判据不变：菜单行第一个 action、取消垫尾。
         i_menu = pnl.find('@"长按快捷菜单：')
         i_close = pnl.find('@"关闭密码"')
         i_save = pnl.find('@"保存"')
         i_cancel = pnl.find('@"取消"')
         if i_menu < 0:
-            fails.append(("panelOrder",
+            fails.append(("panelRow",
                           "面板找不到「长按快捷菜单」行标题：用户没有 App 内自清开关入口"))
         else:
+            if "menuOn" not in pnl:
+                fails.append(("panelRow",
+                              "菜单行标题不带实时状态（menuOn）：用户要点进去才知道"
+                              "开关是开是关，面板第一眼信息量为零"))
+            if "OkaToggleShortcutMenu();" not in pnl:
+                fails.append(("panelRow",
+                              "菜单行 handler 没调 OkaToggleShortcutMenu()：开关入口是"
+                              "装饰，点下去不切换（check-shortcut-clear.py 只查全局有"
+                              "没有这行调用，查不到挂在别的 handler 上的偷梁换柱）"))
+            if "OkaIconSwitchReady()" not in pnl:
+                fails.append(("iconEnv",
+                              "面板没读 OkaIconSwitchReady()：显示的启用状态与实际注入"
+                              "状态无关，是纯粹的误导"))
+            for _nm, _i in (("保存", i_save), ("取消", i_cancel)):
+                if _i < 0:
+                    fails.append(("panelOrder",
+                                  "面板找不到「%s」行：四行交互结构"
+                                  "（菜单/关闭密码/保存/取消）残缺" % _nm))
             for _nm, _i in (("保存", i_save), ("取消", i_cancel), ("关闭密码", i_close)):
                 if _i >= 0 and _i < i_menu:
                     fails.append(("panelOrder",
@@ -441,32 +455,64 @@ def main(path):
                                   "「取消」排在「%s」之前：取消必须是最后一个 action，"
                                   "否则用户第一眼先看到取消，顺手划掉，看不到下面的开关" % _nm))
 
-        # v1.6.8：构建版本只读行。「开关不见了」类反馈的第一现场是核对设备
-        #   实跑构建（旧 dylib 残留 / 装错方案 / App 没杀，外观都看不出差别）。
-        #   行位：跟在菜单行、图标行之后，保存/取消/关闭密码之前。
-        i_ver = pnl.find('@"插件版本：')
-        if i_ver < 0:
+        # ① 动作栈容量：addAction 计数 ≤ 4（菜单/关闭密码/保存/取消）。
+        #   超量的直接后果就是 v1.6.7/v1.6.8 实测的「开关行整行消失」。
+        n_act = pnl.count("addAction:")
+        if n_act > 4:
+            fails.append(("actionCap",
+                          "面板动作行 %d 个 > 4：真机实测动作行超过末 4 行时，超出行"
+                          "从栈顶开始整行消失（v1.6.7 丢「长按快捷菜单」、v1.6.8 再丢"
+                          "「桌面动态图标」，可见行恒为最末 4 行）。只读信息一律走 "
+                          "message" % n_act))
+
+        # ② 只读信息在 message，不在动作栈。
+        if "message:infoMsg" not in pnl:
+            fails.append(("msgInfo",
+                          "alert 的 message 没传 infoMsg：只读信息（图标三态 + 构建"
+                          "版本）没进消息区 = v1.6.9 修复被架空"))
+        if "插件版本：%@" not in pnl:
+            fails.append(("msgInfo",
+                          "message 里没有「插件版本：%@」：用户报「开关不见了」时"
+                          "失去第一现场证据（无法当场核对设备实跑构建）"))
+        if "桌面动态图标：%@" not in pnl:
+            fails.append(("msgInfo",
+                          "message 里没有「桌面动态图标：%@」：桌面没切换时用户在 "
+                          "App 内看不到「未启用」，只能猜自己哪里点错了"))
+        if "OKA_BUILD_TAG" not in pnl:
             fails.append(("versionRow",
-                          "面板没有构建版本只读行：用户报「开关不见了」时无法当场"
-                          "核对设备实跑构建，只能 Round-Trip 猜"))
+                          "版本信息没引用 OKA_BUILD_TAG：写死字符串的话改版本号"
+                          "只会改一半，面板显示的和真实构建对不上"))
+        if "iconState" not in pnl:
+            fails.append(("msgInfo",
+                          "message 没引 iconState：图标三态没真正进消息区"))
+        for _bad in ("addAction:iconRow", "addAction:verRow"):
+            if _bad in pnl:
+                fails.append(("msgInfo",
+                              "出现 %s：只读行又搬回动作栈 —— v1.6.8 实测只读行动作行"
+                              "超量时从栈顶整行消失，版本/图标行必须留在 message" % _bad))
+
+        # ③ present 前收键盘 + 延迟到键盘退场后再弹。
+        i_end = pnl.find("[vc.view endEditing:YES]")
+        i_pres = pnl.find("presentViewController:")
+        if i_end < 0 or i_pres < 0:
+            fails.append(("keyboardDismiss",
+                          "面板 present 前没有 [vc.view endEditing:YES]：密码框获焦时"
+                          "键盘占掉约 290pt，alert 高度预算被压爆正是动作行成片消失的"
+                          "直接诱因（v1.6.7/v1.6.8 实测）"))
+        elif i_end > i_pres:
+            fails.append(("keyboardDismiss",
+                          "endEditing 排在 present 之后：收了键盘也白收，present 时键盘"
+                          "还占着高度"))
         else:
-            if "verRow.enabled = NO;" not in pnl:
-                fails.append(("versionRow",
-                              "版本行没置 enabled = NO：可点的动作行点下去没反应，"
-                              "比没有这一行更糟"))
-            if "OKA_BUILD_TAG" not in pnl:
-                fails.append(("versionRow",
-                              "版本行没引用 OKA_BUILD_TAG：写死字符串的话改版本号"
-                              "只会改一半，面板显示的和真实构建对不上"))
-            for _nm, _i in (("保存", i_save), ("取消", i_cancel), ("关闭密码", i_close)):
-                if _i >= 0 and _i < i_ver:
-                    fails.append(("versionRow",
-                                  "版本行排在「%s」之后：版本行属于辅助信息，"
-                                  "必须在主动作之前" % _nm))
-            if i_menu >= 0 and i_ver < i_menu:
-                fails.append(("versionRow",
-                              "版本行排在菜单行之前：菜单开关行必须是第一个 action，"
-                              "第一眼可见（v1.6.7 实测回归）"))
+            _d = re.search(r"\(int64_t\)\(([0-9.]+) \* NSEC_PER_SEC\)", pnl)
+            if _d is None:
+                fails.append(("keyboardDismiss",
+                              "present 没走 dispatch_after 延时：键盘退场动画约 0.25s，"
+                              "退场完成前弹面板，alert 会在键盘仍占位的窗口期里定型"))
+            elif float(_d.group(1)) < 0.3:
+                fails.append(("keyboardDismiss",
+                              "present 延时 %ss < 0.3s：等不到键盘退场（约 0.25s）做完"
+                              % _d.group(1)))
 
         # v1.6.8：图标状态行三态文案。真机实测（卸载重装 deb 仍显示未启用）：
         #   宿主是自签/侧载装态时 helper 按安全门控跳过，「重装本插件可恢复」
@@ -561,9 +607,12 @@ def main(path):
     print("  ✓ 声明先于使用：OkaIconSwitchReady / OkaSetAppIcon / OkaSelfHealService / "
           "OkaHostIsAppStore 调用点早于定义时必有更早前向声明"
           "（v1.6.6/v1.6.7 CI 编译红的同型教训）")
-    print("  ✓ 面板只读状态行：图标三态按宿主装态分支（已启用 / App Store 丢失可重装恢复 / "
+    print("  ✓ 面板 v1.6.9 渲染层修复：动作栈 ≤ 4 行交互行（菜单/关闭密码/保存/取消），"
+          "只读信息（图标三态 + 构建版本）走 message 不进行动栈；present 前 "
+          "endEditing 收键盘 + 延时 ≥ 0.3s 等键盘退场（v1.6.7/v1.6.8 实测只末 4 行可见）")
+    print("  ✓ 面板只读状态：图标三态按宿主装态分支（已启用 / App Store 丢失可重装恢复 / "
           "非 App Store 门控跳过讲清放行路径，重装承诺只属于 App Store 分支）；"
-          "「长按快捷菜单」开关行是第一个 action、取消垫尾；构建版本只读行在主动作之前；"
+          "「长按快捷菜单」开关行是第一个 action、取消垫尾；构建版本引 OKA_BUILD_TAG 且在 message 内；"
           "按钮改名 ⚙️ 设置，topAnchor 偏移 ≥ 56 避开顶部提示标签；IconSwitch 偏好可读")
     print("  ✓ 无 setApplicationIconBadgeNumber 回流（角标方案已被否决）")
     return 0

@@ -158,13 +158,27 @@ def build_cases():
         r"[ \t]*\}\n"
         r"[ \t]*OkaSetAppIcon\(gServerRunning\);\n",
         "回前台同步块")
-    panel_block = grab(
-        r"[ \t]*// ★ v1\.6\.6：动态图标是否已实际生效的只读状态行（不可点）。\n"
-        r"(?:[ \t]*//[^\n]*\n)*"
-        r"[ \t]*BOOL iconReady = OkaIconSwitchReady\(\);\n"
-        r"(?:[^\n]*\n)*?"
-        r"[ \t]*\[ac addAction:iconRow\];\n",
-        "面板状态行整块")
+    # v1.6.9 起只读信息走 message：图标三态块与 message 构造块是两个
+    # 独立锚点（整字节字面量，uniqueness 由 build_cases 末尾计数把关）。
+    # 注意 ObjC 字面量里的 \n 是**两个字符**（反杠 + n），Python 侧必须
+    # 写成 \\n，写成 \n 会变成真换行、永远匹配不上。
+    icon_state_block = (
+        "    BOOL iconReady = OkaIconSwitchReady();\n"
+        "    NSString *iconState;\n"
+        "    if (iconReady) {\n"
+        "        iconState = @\"已启用（开=绿 / 关=原图标）\";\n"
+        "    } else if (OkaHostIsAppStore()) {\n"
+        "        iconState = @\"未启用（App 更新或重装会丢失，重装本插件 deb 可恢复）\";\n"
+        "    } else {\n"
+        "        iconState = @\"未启用（宿主非 App Store 原版装态，安装期注入被安全策略跳过；\"\n"
+        "                    @\"需 App Store 原版宿主，或按安装期输出执行 inject --force）\";\n"
+        "    }\n"
+    )
+    info_msg_block = (
+        "    NSString *infoMsg = [NSString stringWithFormat:\n"
+        "        @\"%@\\n\\n桌面动态图标：%@\\n插件版本：%@（确认设备实跑构建）\",\n"
+        "        msg, iconState, OKA_BUILD_TAG];\n"
+    )
     osguard_block = grab(
         r"[ \t]*if \(!\[\[UIApplication sharedApplication\] respondsToSelector:\n"
         r"[ \t]*@selector\(setAlternateIconName:completionHandler:\)\]\) return;"
@@ -265,12 +279,13 @@ def build_cases():
          "    NSString *name = on ? [NSString stringWithUTF8String:OKA_ICON_NAME_GREEN] : nil;\n"
          "    [[UIApplication sharedApplication] setApplicationIconBadgeNumber:1];\n",
          {"noBadgeDylib"}),
-        # M12 删面板状态行：桌面没切换时 App 内看不到「未启用」。
-        #   v1.6.8 起 iconEnv 判据同时在面板里找 OkaHostIsAppStore()/三态文案，
-        #   整块删掉会一起触发 —— 预期集合从 {"panelRow"} 扩为两者。
-        ("M12 删面板状态行",
-         panel_block, "",
-         {"panelRow", "iconEnv"}),
+        # M12 删图标三态：桌面没切换时 App 内看不到「未启用」。
+        #   v1.6.9 起三态搬进 message 构造（iconState 块），删它时
+        #   OkaHostIsAppStore() 调用 / 三态文案 / 重装承诺一并消失，
+        #   iconEnv 判据同时在面板找这几样 —— 预期 {"iconEnv"}。
+        ("M12 删面板图标三态",
+         icon_state_block, "",
+         {"iconEnv"}),
         # M13 删偏好读取：plist 写 false 也关不掉
         ("M13 删 IconSwitch 偏好读取",
          "    if (d[@\"IconSwitch\"])        gEnableSwitchIcon  = [d[@\"IconSwitch\"] boolValue];\n",
@@ -301,53 +316,71 @@ def build_cases():
          "    return plist[[NSString stringWithUTF8String:OKA_ICON_KEY_INJECTED]] != nil;\n",
          {"readyFn"}),
         # M30 取消 action 挪回第一行：v1.6.6 实测「菜单开关被看漏」的形态
-        #   （取消第一、菜单夹后面）。行序回归闸门必须自己炸。
-        #   v1.6.8 起版本行也排在主动作之前，同一变异同时违反两条行序不变量 ——
-        #   预期集合是 {"panelOrder", "versionRow"}，少任何一个都是漏报。
+        #   （取消第一、菜单夹后面）。变异是「复制一份取消插到菜单行前」，
+        #   所以同时违反两条不变量：取消早于菜单（panelOrder）+ 动作行
+        #   变 5 个（actionCap，键盘弹起时第 5 行会整行消失的形态）。
+        #   v1.6.9 起版本行进 message、不再有位置判据，versionRow 不触发。
         ("M30 取消 action 挪到菜单行前",
          "    BOOL menuOn = gEnableShortcut;\n",
-         "    // 取消放最后（v1.6.7 行序调整）：开关/状态行现在是面板第一眼看到的内容。\n"
+         "    // 取消放最后（v1.6.7 行序调整）：开关行现在是面板第一眼看到的内容。\n"
          "    [ac addAction:[UIAlertAction actionWithTitle:@\"取消\"\n"
          "                                          style:UIAlertActionStyleCancel\n"
          "                                        handler:nil]];\n\n"
          "    BOOL menuOn = gEnableShortcut;\n",
-         {"panelOrder", "versionRow"}),
-        # M31 图标状态行退回无条件文案：v1.6.7 的误导形态原样复活 ——
+         {"panelOrder", "actionCap"}),
+        # M31 图标三态退回无条件文案：v1.6.7 的误导形态原样复活 ——
         #   真机实测（自签宿主上卸载重装 deb 仍不生效）证明「重装本插件可恢复」
         #   对门控跳过的用户是假承诺。三态分家必须让闸门自己炸。
-        ("M31 图标行退回无条件文案",
-         "    NSString *iconState;\n"
-         "    if (iconReady) {\n"
-         "        iconState = @\"已启用（开=绿 / 关=原图标）\";\n"
-         "    } else if (OkaHostIsAppStore()) {\n"
-         "        iconState = @\"未启用（App 更新或重装会丢失，重装本插件 deb 可恢复）\";\n"
-         "    } else {\n"
-         "        iconState = @\"未启用（宿主非 App Store 原版装态，安装期注入被安全策略跳过；\"\n"
-         "                    @\"需 App Store 原版宿主，或按安装期输出执行 inject --force）\";\n"
-         "    }\n"
-         "    UIAlertAction *iconRow = [UIAlertAction actionWithTitle:\n"
-         "        [NSString stringWithFormat:@\"桌面动态图标：%@\", iconState]\n"
-         "                                          style:UIAlertActionStyleDefault\n"
-         "                                        handler:nil];\n",
-         "    UIAlertAction *iconRow = [UIAlertAction actionWithTitle:\n"
-         "        [NSString stringWithFormat:@\"桌面动态图标：%@\",\n"
-         "            iconReady ? @\"已启用（开=绿 / 关=原图标）\"\n"
-         "                      : @\"未启用（重装本插件可恢复）\"]\n"
-         "                                          style:UIAlertActionStyleDefault\n"
-         "                                        handler:nil];\n",
+        #   v1.6.9：锚点是 message 构造前的 iconState 块（不再经过 action 行）。
+        ("M31 图标三态退回无条件文案",
+         icon_state_block,
+         "    BOOL iconReady = OkaIconSwitchReady();\n"
+         "    NSString *iconState = iconReady ? @\"已启用（开=绿 / 关=原图标）\"\n"
+         "                                    : @\"未启用（重装本插件可恢复）\";\n",
          {"iconEnv"}),
-        # M32 删构建版本只读行：用户报「开关不见了」时失去第一现场证据
-        #   （无法当场核对设备实跑构建，只能 Round-Trip 猜）。
-        ("M32 删构建版本行",
-         "    UIAlertAction *verRow = [UIAlertAction actionWithTitle:\n"
-         "        [NSString stringWithFormat:@\"插件版本：%@（这行确认设备实跑构建）\",\n"
-         "            OKA_BUILD_TAG]\n"
-         "                                          style:UIAlertActionStyleDefault\n"
-         "                                        handler:nil];\n"
-         "    verRow.enabled = NO;\n"
+        # M32 删 message 里的构建版本：用户报「开关不见了」时失去第一现场证据
+        #   （无法当场核对设备实跑构建，只能 Round-Trip 猜）。OKA_BUILD_TAG
+        #   引用也一并消失 → msgInfo + versionRow 双触发，少一个是漏报。
+        ("M32 删 message 构建版本",
+         info_msg_block,
+         "    NSString *infoMsg = [NSString stringWithFormat:\n"
+         "        @\"%@\\n\\n桌面动态图标：%@\",\n"
+         "        msg, iconState];\n",
+         {"msgInfo", "versionRow"}),
+        # M33 只读行搬回动作栈：把 v1.6.8 的形态原样复活（addAction:iconRow /
+        #   addAction:verRow）。这正是「只末 4 行可见」缺陷的源码形态 ——
+        #   动作行 6 个、超量行从栈顶整行消失，用户看到的就是「开关不见了」。
+        ("M33 只读行搬回动作栈",
+         "    UIAlertController *ac =\n",
+         "    UIAlertController *ac =\n"
+         "    [ac addAction:iconRow];\n"
          "    [ac addAction:verRow];\n",
+         {"msgInfo", "actionCap"}),
+        # M34 删 present 前的收键盘：高度溢出（键盘占约 290pt）直接诱因复活，
+        #   keyboardDismiss 判据必须自己炸。
+        ("M34 删 present 前收键盘",
+         "    [vc.view endEditing:YES];\n", "",
+         {"keyboardDismiss"}),
+        # M35 删保存行：四行交互结构残缺，panelOrder 的存在性检查必须炸
+        #   （老闸门只查相对顺序，行整行没了反而无人报）。
+        ("M35 删保存行动作",
+         "    __weak UIAlertController *weakAC = ac;\n"
+         "    [ac addAction:[UIAlertAction actionWithTitle:@\"保存\"\n"
+         "                                          style:UIAlertActionStyleDefault\n"
+         "                                        handler:^(UIAlertAction *a) {\n"
+         "        UIAlertController *s = weakAC;\n"
+         "        if (!s) return;\n"
+         "        NSString *u = s.textFields.count > 0 ? s.textFields[0].text : @\"\";\n"
+         "        NSString *p = s.textFields.count > 1 ? s.textFields[1].text : @\"\";\n"
+         "        if (!p.length) {\n"
+         "            OkaToast(@\"密码不能为空。要取消密码请用「关闭密码」。\");\n"
+         "            return;\n"
+         "        }\n"
+         "OkaSaveWebAuth(u.length ? u : @\"oka\", p);\n"
+         "            OkaToast(@\"已保存。重新开启 WiFi 传输后生效。\");\n"
+         "        }]];\n",
          "",
-         {"versionRow"}),
+         {"panelOrder"}),
     ]
     for name, old, _new, _exp in cases:
         if isinstance(old, tuple):   # 两步变异：分别验锚点
@@ -367,6 +400,12 @@ BENIGN = [
     # 只改注释文字：闸门必须放过（证明它不是什么都拦）。
     ("B1 只改注释文字",
      "        // ★ v1.6.6：启动成功 → 桌面图标切「红染绿」版（OkaIconGreen）。\n",
+     None),
+    # B3 只改面板注释文字：v1.6.9 面板判据（actionCap / msgInfo /
+    #   keyboardDismiss / panelOrder）全部跑在剥注释后的源码上，
+    #   注释改写必须原样放过。
+    ("B3 只改面板注释文字",
+     "    // ★ v1.6.7：行序调整 —— 「取消」挪到最后，开关行提到最前。\n",
      None),
 ]
 
