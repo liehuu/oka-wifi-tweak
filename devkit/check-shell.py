@@ -38,6 +38,7 @@ R4  &>> 追加重定向                  → bash 4.0+
 R5  |& 管道                         → bash 4.0+
 R6  mapfile / readarray             → bash 4.0+
 R7  wait -n                         → bash 4.3+
+R8  sed -i / --in-place（GNU-only） → BSD sed 用法不同
 
 用法
 ====
@@ -98,6 +99,16 @@ BASH4_PATTERNS = [
     ('R5', re.compile(rb'(?<!\|)\|&(?!\|)'), '|& 管道（自动合并 stderr）是 bash 4.0+'),
     ('R6', re.compile(rb'\b(?:mapfile|readarray)\b'), 'mapfile / readarray 是 bash 4.0+'),
     ('R7', re.compile(rb'\bwait\s+-n\b'), 'wait -n 是 bash 4.3+'),
+    # R8：sed -i。本机是 Git Bash（GNU sed）跑得通、CI 是 macOS（BSD sed）
+    # —— 又是「本地零约束力」项。v1.6.6 run 44 实测：mkdeb.sh 的
+    # `sed -i "s|__HELPER__|...|g" file` 在 BSD sed 上把 script 当 backup
+    # 后缀，报 `sed: rename(): No such file or directory`。
+    # 双兼容写法：sed + 临时文件 + mv（见 mkdeb.sh sub_file）。
+    ('R8', re.compile(rb'\bsed\b[^\n|]*\s-i\b'), 'sed -i 是 GNU-only：macOS 的 BSD sed 要求 -i 带 '
+     'backup 后缀（且会多留 .bak 垃圾），两种实现写法互不相容。改用 '
+     'sed 脚本 + 临时文件 + mv（参考 mkdeb.sh 的 sub_file）'),
+    ('R8', re.compile(rb'\bsed\s+--in-place\b'), 'sed --in-place 是 GNU-only：BSD sed 没有这个长选项。'
+     '改用 sed 脚本 + 临时文件 + mv（参考 mkdeb.sh 的 sub_file）'),
 ]
 
 

@@ -138,11 +138,23 @@ chmod 755 "$STAGE/DEBIAN/prerm"
 # ---- 把 scheme 相关的路径写进安装脚本 ----
 # postinst/prerm 是设备上跑的 shell，用单引号 heredoc 写死了文本；
 # helper/uicache 路径随 scheme 变（rootless 多一层 /var/jb），
-# 这里用 sed 后处理注入字面量（路径是 ASCII、无 sed 元字符）。
+# 这里后处理注入字面量（路径是 ASCII、无 sed 元字符）。
+# ★ 不许用原地编辑标志（GNU 专属短选项）：GNU sed 直接吃 script，BSD sed
+#   （CI macos runner）要求它带 backup 后缀，两边写法互不相容 ——
+#   v1.6.6 run 44 实测死在 rename 报错。统一走 sed + 临时文件 + mv，
+#   两个实现行为一致，且不产生 .bak 垃圾（用户红线）。
+sub_file() {  # $1=sed 脚本，$2..=目标文件；BSD/GNU 双兼容
+  _script="$1"; shift
+  for _f in "$@"; do
+    _tmp="${_f}.oka-tmp"
+    sed "$_script" "$_f" > "$_tmp" || { rm -f "$_tmp"; return 1; }
+    mv "$_tmp" "$_f"
+  done
+}
 HELPER="$PREFIX/usr/bin/oka-iconinject"
 UICACHE="$PREFIX/usr/bin/uicache"
-sed -i "s|__HELPER__|$HELPER|g"  "$STAGE/DEBIAN/postinst" "$STAGE/DEBIAN/prerm"
-sed -i "s|__UICACHE__|$UICACHE|g" "$STAGE/DEBIAN/postinst"
+sub_file "s|__HELPER__|$HELPER|g"  "$STAGE/DEBIAN/postinst" "$STAGE/DEBIAN/prerm"
+sub_file "s|__UICACHE__|$UICACHE|g" "$STAGE/DEBIAN/postinst"
 
 # ---- 打包 ----
 DEB="$OUT/${PKG}_${VER}_${ARCH}.deb"

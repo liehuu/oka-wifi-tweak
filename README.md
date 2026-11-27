@@ -636,7 +636,8 @@ sh devkit/build.sh arm64  iphoneos-arm    1.2.0   # 传统 rootful
 
 | 脚本 | 作用 | 在哪跑 |
 |---|---|---|
-| `devkit/check-shell.py` | 拦 `$VAR` 后紧跟非 ASCII、以及 bash 4+ 专有语法（`declare -A`、`${v,,}`、`&>>`、`\|&`、`mapfile`、`wait -n`） | CI 独立步骤；本地可跑 |
+| `devkit/check-shell.py` | 拦 `$VAR` 后紧跟非 ASCII、bash 4+ 专有语法（`declare -A`、`${v,,}`、`&>>`、`\|&`、`mapfile`、`wait -n`）、以及 GNU-only 的 `sed -i` / `--in-place`（R8，v1.6.6 run 44 的 BSD sed rename 事故后新增） | CI 独立步骤；本地可跑 |
+| `devkit/selftest-shell.py` | **证明上面这个 shell 闸门会失败**：7 个用例（GNU `sed -i` 三种变体 + `$CPU，` 形态必须被 R8/R1 精确拦下；`sub_file` 双兼容替换 / `${CPU}` / 管道 sed 必须放过），仓库文件 sha256 前后比对 | CI 的 Shell compatibility gate；本地可跑 |
 | `devkit/verify-deb.py --check-macho` | 编译后立刻读 Mach-O 头的 `cputype/cpusubtype` 做**整数比较**，并检查 `LC_CODE_SIGNATURE` | `build.sh` 内；CI 同代码 |
 | `devkit/verify-deb.py <deb> <scheme> <arch>` | 校验 deb 的 ar 结构、Architecture、载荷路径、DEBIAN 隔离、PAX 头、架构、签名、权限；v1.6.6 起含 C12：注入 helper 的路径按 scheme 前缀 / 755 / Mach-O 架构与 dylib 一致 / LC_CODE_SIGNATURE / 四个链路指纹标识，以及 postinst 与 prerm **存在性**（C9 只查 mode，文件整个缺失时静默通过） | CI 的 Verify deb 步骤；本地可跑 |
 | `devkit/selftest-verify.py` | **证明上面这个校验器会失败**：30 个用例（正向 5 / 反向 25），用代码拼出的 Mach-O 与 deb，含「arm64e 冒充 arm64」「缺签名」「PAX」「权限错」「helper 缺失/架构不符/缺指纹/缺 prerm」等 | CI 独立步骤；本地可跑 |
@@ -647,7 +648,7 @@ sh devkit/build.sh arm64  iphoneos-arm    1.2.0   # 传统 rootful
 | `devkit/check-hover-css.py` | v1.6.3 行悬停 CSS 的性质判据（真上色 / 色差 ≥1.20 / 悬停≠选中 / 选中更深） | `build.sh` 内；CI 的 Hover highlight gate 同代码 |
 | `devkit/selftest-hover-gate.py` | 上面那个闸门的反证：9 个破坏注入 | CI 的 Hover highlight gate；本地可跑 |
 | `devkit/check-icon-switch.py` | v1.6.6 桌面动态图标：切换只走公开 API 两参调用、on=绿/off=primary、四同步点（启动/停服/冷启动/回前台）与顺序、becomeActive 注册不被开关 gate、共源常量头、面板只读状态行、按钮改名换位、负向拦截角标 API | `build.sh` 内；CI 的 Icon switch gate 同代码 |
-| `devkit/selftest-icon-gate.py` | 上面那个闸门的反证：19 个 dylib 侧 + 7 个 devkit 侧样本（含 2 个良性注释变更）——反向测试实测抓到过闸门自身缺陷（裸子串被「加后缀改名」放过），修的是闸门不是测试 | CI 的 Icon switch gate；本地可跑 |
+| `devkit/selftest-icon-gate.py` | 上面那个闸门的反证：20 个 dylib 侧 + 8 个 devkit 侧样本（含 2 个良性注释变更）——反向测试实测抓到过闸门自身缺陷（裸子串被「加后缀改名」放过、prototype 令 fn_body 抓错函数体），修的是闸门不是测试；M26/M27 分别锁「声明先于使用」与「SDK 常量↔框架头」（v1.6.6 run 42/43 两个编译盲区） | CI 的 Icon switch gate；本地可跑 |
 | `devkit/selftest-iconinject.c` | 红→绿像素映射 host 单测（10 个 expect_tint + 4 条 is_red 断言）：视觉规格的判定边界（什么算红）改坏了只有这里会红 | `build.sh` 内先跑再编 helper |
 | `node --check web/oka-wifi.js` | 用真实 JS 解析器验语法（不是正则数括号）；runner 缺 node 时**明确报错**，不静默跳过 | CI 的 Web assets gate |
 
@@ -784,6 +785,7 @@ v1.1.3 起插件**不输出任何系统日志**，所以判据一律看功能表
 | 复制出来的链接对方打不开 | 对方不在同一局域网，或本机传输已关闭 / 换了网段 | 这条地址是**内网地址**（`192.168.x.x` / `172.20.10.x`），只对同一 WiFi / 热点下的设备有效；手机切了 WiFi 或重启过 App 端口会变，重新复制一次即可 |
 | 复制出来的链接端口不对 / 是写死的 8080 | 不是本插件的行为（端口取自 `location`，代码里没有字面量 `8080`） | 若看到非 `location` 来的端口，说明装的不是 v1.2.0；正常情况端口必然与手机页面顶部显示的地址一致 |
 | 系统日志里还能看到 `[OkaWiFi]` | 装的不是 v1.1.3（或更早） | v1.1.3 起源码和产物里都不会有 `NSLog` / `[OkaWiFi]`；确认装的是 1.1.3 的包并重启 App |
+| CI 的 Build 步骤报 `sed: rename(): No such file or directory` | 脚本里写了 GNU-only 的 `sed -i`（v1.6.6 mkdeb.sh 引入过） | macOS 自带 BSD sed 的 `-i` 必须带 backup 后缀，脚本形式直接被当后缀、rename 失败；本地 Git Bash（GNU sed）跑得通所以看不出。改成 `sed + 临时文件 + mv`（参考 `mkdeb.sh` 的 `sub_file`），并跑 `python3 devkit/check-shell.py .`（R8） |
 | CI 报 `CPU: unbound variable`，但编译和签名都成功了 | 某行 `echo` 里写了 `$CPU，`（后跟全角标点） | macOS 的 bash 3.2 把 `0xEF` 吞进变量名。改 `${CPU}`，并跑 `python3 devkit/check-shell.py .` 扫全仓库 |
 | CI 的 Verify deb 步骤报 `IndentationError` 或 YAML `ScannerError` | 在 `run: \|` 里内嵌了 Python heredoc | 这两个错误互斥、无解：YAML 要缩进、Python 要顶格。校验逻辑必须外置成 `.py` 文件 |
 | 蜂窝/热点下能开启，但服务器地址显示 `unknown` | `Helper.uploaderUrl` 在 `serverURL == nil` 时返回 Swift 常量 `"unknown"`（framework `0x713C` 的 `mov/movk` 立即数已确认）。前两版改 UI 控件没打中源头 | **v1.0.2 直接 hook `-[GCDWebServer serverURL]`** 返回正确 NSURL。应急仍可用电脑浏览器直接开 `http://172.20.10.1:8080` |
@@ -835,6 +837,7 @@ wifitweak/
 │   ├── gen-webassets.py        # JS/CSS -> .build/OkaWebAssets.h（含往返解码自检）
 │   ├── selftest-webassets.py   # 上面这个资源闸门的自测：7 用例，证明它会失败
 │   ├── check-shell.py          # 静态闸门：bash 3.2 兼容性（本地也能跑）
+│   ├── selftest-shell.py       # 上面这个闸门的反证：7 用例（R8/R1 破坏 + 良性）
 │   ├── check-shortcut-clear.py # v1.6.4 快捷菜单自清闸门（源码判据）
 │   ├── selftest-shortcut-gate.py # 上面这个闸门的反证：7 破坏注入 + 1 良性样本
 │   ├── check-hover-css.py      # v1.6.3 行悬停 CSS 闸门

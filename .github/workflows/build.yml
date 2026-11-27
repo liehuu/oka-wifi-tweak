@@ -72,6 +72,11 @@ jobs:
         run: |
           set -eu
           python3 devkit/check-shell.py .
+          # 反证：破坏样本（GNU sed 原地编辑 / $VAR 后跟中文）必须被 R8/R1
+          # 精确拦下，良性样本（sub_file 双兼容 / ${VAR}）必须放过 ——
+          # 一个从不失败的检查等于没有检查。v1.6.6 run 44 的 BSD sed
+          # rename 事故后新增 R8 与本反证。
+          python3 devkit/selftest-shell.py
 
       # 校验器自身的自测：证明 verify-deb.py 的判定**会失败**。
       # 一个从不失败的检查等于没有检查 —— 这条就是为了防这个。
