@@ -14,9 +14,15 @@
 //
 // 用户三条红线如何落实：
 //   · 不能导致 App 打不开：
-//       - 安装形态门控：只在 App Store 原版环境注入（iTunesMetadata.plist
-//         存在且无 embedded.mobileprovision）。自签/企业签/未知形态
-//         **默认不动**（提示用户可 --force 自担）。
+//       - 安装形态门控（v1.6.9.2 起口径）：embedded.mobileprovision 存在
+//         = 第三方签名（自签/企业签/TestFlight/重签名）才否决；无 prov 的
+//         Apple 签名形态（App Store / VPP / MDM，含 iTunesMetadata 缺失的
+//         真 App Store 安装）一律放行。iTunesMetadata 只是旁证，不再作为
+//         否决项 —— 旧判据据此误拒过 App Store 安装的宿主（用户 2026-11-28
+//         反馈「我这个就是 AppStore 安装的啊」，注入被白白跳过）。判据本体
+//         在 iconinject-core.h（oka_install_form / oka_form_allows_inject），
+//         与 dylib 的 OkaHostIsAppStore 共用，并有 host 单测钉住边界。
+//         放行路径：--force 或 plist 写 IconInjectForce=true（自担）。
 //       - plist 写坏自愈：写前备份（Preferences 目录，只活毫秒级），写后读回
 //         校验（层级/键值/标记全对才算成功），任一不过立即从备份还原。
 //       - 全程只动两个文件：两张新 PNG + Info.plist。主可执行文件、
@@ -115,12 +121,22 @@ static NSString *FindHostAppBundle(void) {
     return nil;
 }
 
-// 安装形态判定。App Store = iTunesMetadata.plist 存在且无 embedded.mobileprovision。
-static BOOL IsAppStoreInstall(NSString *app) {
+// ★ v1.6.9.2：安装形态判定改为「只有 embedded.mobileprovision 才是硬否决项」。
+//   旧判据（iTunesMetadata 存在且无 prov）把 metadata 缺失也当否决 —— 真机
+//   实测：App Store 安装的宿主也可能没有 iTunesMetadata.plist（用户
+//   2026-11-28：「我这个就是 AppStore 安装的啊」被旧判据误判成「非原版
+//   装态」，注入被白白跳过）。只有 embedded.mobileprovision 是第三方签名
+//   （自签/企业签/TestFlight/重签名）的硬信号，才对应「改 bundle 会破坏
+//   签名」红线；metadata 只是旁证，缺失不否决。判据本体在
+//   iconinject-core.h（与 dylib 的 OkaHostIsAppStore 共用 + host 单测）。
+//   has_meta / has_prov 是设备上的事实（文件存在性），不是推断。
+static OkaInstallForm InstallFormOf(NSString *app, BOOL *hasMeta, BOOL *hasProv) {
     NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *meta = [app stringByAppendingPathComponent:@"iTunesMetadata.plist"];
-    NSString *prov = [app stringByAppendingPathComponent:@"embedded.mobileprovision"];
-    return [fm fileExistsAtPath:meta] && ![fm fileExistsAtPath:prov];
+    *hasMeta = [fm fileExistsAtPath:
+                [app stringByAppendingPathComponent:@"iTunesMetadata.plist"]];
+    *hasProv = [fm fileExistsAtPath:
+                [app stringByAppendingPathComponent:@"embedded.mobileprovision"]];
+    return oka_install_form(*hasMeta, *hasProv);
 }
 
 // 从 Info.plist 找主图标 basename（CFBundleIcons→CFBundlePrimaryIcon→CFBundleIconFiles）。
@@ -305,15 +321,22 @@ static int DoInject(NSString *app, BOOL force) {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSString *pl  = [app stringByAppendingPathComponent:@"Info.plist"];
 
-    // ---- 门控：安装形态 ----
-    if (!IsAppStoreInstall(app)) {
+    // ---- 门控：安装形态（v1.6.9.2 口径，判据本体见 iconinject-core.h）----
+    // 先把两个事实与判定结果原样打出来：真机报「装完没生效」时，这一行
+    // 就是第一现场证据（旧版只打一句含糊的「不是 App Store 原版装态」，
+    // 分不清是 metadata 缺失还是被门控拒，用户与作者都只能靠猜）。
+    BOOL hasMeta = NO, hasProv = NO;
+    OkaInstallForm form = InstallFormOf(app, &hasMeta, &hasProv);
+    say("[inject] 装态判定：iTunesMetadata=%s embedded.mobileprovision=%s → %s",
+        hasMeta ? "在" : "无", hasProv ? "在" : "无", oka_form_name(form));
+    if (form == OKA_FORM_THIRD_PARTY) {
         if (!force && !ForceFlagFromPrefs()) {
-            say("[inject] 宿主 App 不是 App Store 原版装态（检测到 embedded.mobileprovision 或无 iTunesMetadata）。");
+            say("[inject] 检测到 embedded.mobileprovision = 第三方签名装态（自签/企业签/TestFlight/重签名）。");
             say("[inject] 为守住「不能导致 App 打不开」红线，默认不注入。");
             say("[inject] 确认要注入：plist 写 IconInjectForce=true 或用 --force 重跑。");
             return 2;
         }
-        say("[inject] 非 App Store 装态，已按强制标志继续（用户自担）。");
+        say("[inject] 第三方签名装态，已按强制标志继续（用户自担）。");
     }
 
     // ---- 幂等 ----

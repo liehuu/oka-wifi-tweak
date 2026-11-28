@@ -55,4 +55,56 @@ static inline int oka_tint_rgba(uint8_t *px) {
     return 1;
 }
 
+// ---- v1.6.9.2：安装形态门控的纯函数核心 ----
+//
+// 为什么也放进这个"无 SDK 依赖"的头：
+//   这条判定直接决定「deb 安装期注不注入桌面动态图标」，helper
+//   （devkit/iconinject.m）与 dylib（Tweak.xm 的 OkaHostIsAppStore）
+//   共用同一份判据 —— 两份各写一遍必然漂移，漂移的症状是「面板说
+//   一套、安装期做另一套」，运行时零报错。
+//
+// 为什么必须是纯函数（与红→绿边界同理）：
+//   旧判据 `iTunesMetadata 存在 且 无 embedded.mobileprovision` 把
+//   「metadata 缺失」也当否决项。真机实测（用户 2026-11-28 反馈
+//   「我这个就是 AppStore 安装的啊」）：App Store 安装的宿主同样
+//   可能没有 iTunesMetadata.plist，被旧判据误判成「非原版装态」，
+//   安装期注入被白白跳过、面板显示未启用 —— 用户看到的只有一句
+//   文案，没有任何报错。判定边界坏了没人会发现，必须能被 host
+//   单测钉住（devkit/selftest-iconinject.c）。
+//
+// 语义（两个输入都是设备上的事实）：
+//   has_meta = .app 里有 iTunesMetadata.plist（App Store 安装的旁证）
+//   has_prov = .app 里有 embedded.mobileprovision（第三方签名的硬信号）
+//   · 有 prov  → 第三方签名（自签/企业签/TestFlight/重签名）→ 拒绝：
+//     这类装态改 bundle 会破坏签名，「不能导致 App 打不开」红线命中；
+//   · 无 prov  → Apple 签名形态（App Store / VPP / MDM，含 metadata
+//     被清理掉的真 App Store 安装）→ 放行；metadata 只在报告里区分，
+//     **不作为否决项**。
+typedef enum {
+    OKA_FORM_APPSTORE = 0,    // iTunesMetadata 在、无 embedded.mobileprovision
+    OKA_FORM_APPLE_SIGNED,    // 无 iTunesMetadata、无 embedded.mobileprovision
+    OKA_FORM_THIRD_PARTY,     // 有 embedded.mobileprovision
+} OkaInstallForm;
+
+static inline OkaInstallForm oka_install_form(int has_meta, int has_prov) {
+    if (has_prov) return OKA_FORM_THIRD_PARTY;
+    if (has_meta) return OKA_FORM_APPSTORE;
+    return OKA_FORM_APPLE_SIGNED;
+}
+
+// 放行判据：只有第三方签名形态拒绝。v1.6.9.2 修复的正是 metadata
+// 缺失不再否决（旧实现 has_meta && !has_prov 会误拒真 App Store 安装）。
+static inline int oka_form_allows_inject(OkaInstallForm f) {
+    return f != OKA_FORM_THIRD_PARTY;
+}
+
+// 形态名：报告 / 诊断输出用（host 单测与设备输出对齐）。
+static inline const char *oka_form_name(OkaInstallForm f) {
+    switch (f) {
+        case OKA_FORM_APPSTORE:     return "AppStore";
+        case OKA_FORM_APPLE_SIGNED: return "AppleSigned";
+        default:                    return "ThirdParty";
+    }
+}
+
 #endif /* OKA_ICONINJECT_CORE_H */

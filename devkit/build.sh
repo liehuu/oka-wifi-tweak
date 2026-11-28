@@ -71,8 +71,12 @@ python3 "$ROOT/devkit/gen-webassets.py" "$ROOT/web" "$BUILD/OkaWebAssets.h" \
 #     · 向 UIViewController* 发 respondsToSelector: 时用变量 SEL
 #   代码侧已尽量从根源改（HookInstanceMethod 的 outOrig 改成 void **），
 #   但运行时 hook 代码天然绕不开强转，抑制项保留。
+# ★ -I "$ROOT/devkit" 也是必需的（v1.6.9.2）：Tweak.xm import 了
+#   devkit/iconinject-core.h（安装形态门控判据，与 helper 共用）。该头在
+#   devkit/ 根而不是 devkit/include/，不加这个 -I 编译直接
+#   fatal error: 'iconinject-core.h' file not found。
 xcrun clang -target "$TRIPLE" -isysroot "$SDK" \
-  -I "$INC" -I "$BUILD" \
+  -I "$INC" -I "$ROOT/devkit" -I "$BUILD" \
   -x objective-c \
   -dynamiclib -fobjc-arc -fobjc-exceptions -Os -Wall \
   -Wno-unused-parameter -Wno-unused-function -Wno-deprecated-declarations \
@@ -124,8 +128,11 @@ codesign --force --sign - "$BUILD/oka-iconinject"
 
 # 指纹闸门：注入/声明链路上四个关键标识，缺任何一个都是"静默功能
 # 缺失"（helper 能装、能跑，但注入的东西 dylib 认不出，或反过来）。
+# v1.6.9.2：装态判据的两个文件字面量（helper 侧门控的输入事实），
+#   丢了等于门控失效但没有任何报错。
 for sym in OkaIconGreen OkaIconInjected CFBundleAlternateIcons \
-           com.blinker.documents; do
+           com.blinker.documents \
+           iTunesMetadata.plist embedded.mobileprovision; do
   grep -aq "$sym" "$BUILD/oka-iconinject" \
     || { echo "✗ helper 缺 ${sym}（注入/声明链路不完整）"; exit 1; }
 done
@@ -217,13 +224,16 @@ if ! python3 "$ROOT/devkit/check-icon-switch.py" "$ROOT/Tweak.xm"; then
   echo "✗ 动态图标闸门未通过（开/关图标不会自动切换，或入口位置/文案退化）"
   exit 1
 fi
-echo "✓ v1.6.6 起动态图标：切换链路/四个同步点/becomeActive 兜底/注入标记门齐备；v1.6.8：偏移≥56/图标三态；v1.6.9：动作栈≤4行/只读信息走message/present前收键盘；v1.6.9.1：completion 再收 alert 自动获焦"
+echo "✓ v1.6.6 起动态图标：切换链路/四个同步点/becomeActive 兜底/注入标记门齐备；v1.6.8：偏移≥56/图标三态；v1.6.9：动作栈≤4行/只读信息走message/present前收键盘；v1.6.9.1：completion 再收 alert 自动获焦；v1.6.9.2：装态门控与 helper 共源（只有 embedded.mobileprovision 才否决）"
 
 # v1.6.6 dylib 侧指纹（切换链路与门控的标识，丢了不会报错、只会不切换）
+# v1.6.9.2：OkaHostIsAppStore 的两个查询字面量（@"iTunesMetadata" /
+#   @"embedded" + @"mobileprovision"）—— 缺任何一个，面板装态判定失真。
 for sym in "setAlternateIconName:completionHandler:" \
            "OkaIconGreen" "OkaIconInjected" \
            "applicationDidBecomeActive:" \
-           "endEditing" "resignFirstResponder"; do
+           "endEditing" "resignFirstResponder" \
+           "iTunesMetadata" "mobileprovision"; do
   grep -aq "$sym" "$BUILD/$NAME.dylib" \
     || { echo "✗ dylib 缺 ${sym}（桌面动态图标会静默失效 / v1.6.9 面板不收键盘，动作行会被键盘高度 budget 挤掉）"; exit 1; }
 done

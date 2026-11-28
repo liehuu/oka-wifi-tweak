@@ -174,6 +174,13 @@ def main(path):
         fails.append(("sharedHeader",
                       "Tweak.xm 没 #import \"oka-icon-common.h\"：dylib 拿不到共源常量，"
                       "只能硬编码字面量，helper 一改名就静默分叉"))
+    # v1.6.9.2：装态门控判据也必须共源。两边各写一份 = 口径漂移，症状是
+    #   「面板说一套、安装期做另一套」（面板判可恢复、安装期却跳过注入），
+    #   运行时零报错 —— 旧口径就是这么漂移出事儿的（见 host_fn 判据）。
+    if '#import "iconinject-core.h"' not in src:
+        fails.append(("sharedHeader",
+                      "Tweak.xm 没 #import \"iconinject-core.h\"：dylib 拿不到共享门控判据"
+                      "oka_install_form，只能自己写一份口径"))
 
     # ---------- helper 侧源码在位（check 单文件化，缺一个都算本功能残） ----------
     # ★ 一律用正则 + 词边界 / 否定展望，**禁止裸子串 in**：
@@ -187,6 +194,17 @@ def main(path):
         ("iconinject.m", r"\brestore\b", "helper 缺 restore 子命令（卸载后图标声明与 PNG 永驻）"),
         ("iconinject-core.h", r"\boka_tint_rgba\b", "红→绿纯函数不在位：像素映射无法单测"),
         ("selftest-iconinject.c", r"\bexpect_tint\b", "红→绿 host 单测不在位：阈值改动无人发现"),
+        # v1.6.9.2：装态门控共源四件套（判据 / 放行 / helper 调用点 / 回归输入）
+        ("iconinject-core.h", r"\boka_install_form\b",
+         "装态门控判据不在位：helper 与 dylib 口径无法共用，"
+         "会漂移成「面板说一套、安装期做另一套」"),
+        ("iconinject-core.h", r"\boka_form_allows_inject\b",
+         "放行判据不在位：v1.6.9.2 口径（iTunesMetadata 缺失不否决）无人把守"),
+        ("iconinject.m", r"\bInstallFormOf\b",
+         "helper 没走共享装态判据：安装期门控与面板口径各写一份"),
+        ("selftest-iconinject.c", r"oka_install_form\(0, 0\)",
+         "host 单测没覆盖「无 iTunesMetadata + 无 prov」输入："
+         "v1.6.9.2 修复的回归点没被钉住（旧口径正是误拒这个输入）"),
     ):
         p = os.path.join(HERE, rel)
         try:
@@ -529,7 +547,10 @@ def main(path):
         # v1.6.8：图标状态行三态文案。真机实测（卸载重装 deb 仍显示未启用）：
         #   宿主是自签/侧载装态时 helper 按安全门控跳过，「重装本插件可恢复」
         #   对这类用户是假承诺。判据：panel 必须按宿主装态分支，且
-        #   「重装本插件可恢复」只能出现在 App Store 分支里（全文件仅一处）。
+        #   「重装本插件 deb 可恢复」只能出现在 Apple 签名形态分支里（全文件
+        #   仅一处）。
+        #   v1.6.9.2：第三态口径收紧为「只有 embedded.mobileprovision」（第三方
+        #   签名），见下面 host_fn 判据与文案判据。
         host_fn = fn_body(src, "static BOOL OkaHostIsAppStore(void)")
         if host_fn is None:
             fails.append(("iconEnv",
@@ -537,22 +558,48 @@ def main(path):
                           "只能对所有未启用用户喊「重装可恢复」——自签环境用户"
                           "实测重装无效，这句是误导"))
         else:
-            if "iTunesMetadata" not in host_fn or "mobileprovision" not in host_fn:
+            # v1.6.9.2 口径：只有 embedded.mobileprovision 才是硬否决项，
+            #   iTunesMetadata 缺失不再否决。三条判据，每条都能失败：
+            #   ① 必须查 prov 且走共享判据（否则面板与安装期口径漂移）；
+            #   ② meta/prov 两个事实必须**原样**喂进 oka_install_form
+            #      （少喂一个 = 比如 prov 恒传 0，第三方签名宿主也判可恢复，
+            #       红线失效）；
+            #   ③ 不许把 metadata 缺失当否决项（旧口径在此误拒过 App Store
+            #      安装 —— 用户 2026-11-28 实测「App Store 装的却被判非原版」）。
+            if "mobileprovision" not in host_fn or "oka_install_form" not in host_fn:
                 fails.append(("iconEnv",
-                              "OkaHostIsAppStore 没同时查 iTunesMetadata 与 "
-                              "mobileprovision：与 helper 的 IsAppStoreInstall 口径"
-                              "不一致，面板会给出与安装期行为矛盾的文案"))
+                              "OkaHostIsAppStore 没查 embedded.mobileprovision 或没走共享判据 "
+                              "oka_install_form：面板判据与安装期 helper 口径漂移，"
+                              "会出现「面板说可恢复、安装期却跳过」的矛盾文案"))
+            _m = re.search(r"oka_install_form\(([^)]*)\)", host_fn)
+            if not _m or _m.group(1).replace(" ", "") != "meta!=nil,prov!=nil":
+                fails.append(("iconEnv",
+                              "OkaHostIsAppStore 没把 meta/prov 两个事实原样喂给 oka_install_form"
+                              "（期望 oka_install_form(meta != nil, prov != nil)）：少喂一个事实"
+                              "（如 prov 恒传 0）会让第三方签名宿主也判『可恢复』，红线失效"))
+            if re.search(r"if\s*\(\s*!meta\b", host_fn) or "meta == nil" in host_fn:
+                fails.append(("iconEnv",
+                              "OkaHostIsAppStore 把「iTunesMetadata 缺失」当否决项：v1.6.9.2 "
+                              "真机实测 App Store 安装也可能没有该文件，旧口径据此把注入"
+                              "白白跳过、用户看到「非原版装态」文案（用户 2026-11-28 反馈）"))
         if "OkaHostIsAppStore()" not in pnl:
             fails.append(("iconEnv",
                           "面板没调 OkaHostIsAppStore()：未启用文案不分宿主装态，"
                           "「重装本插件可恢复」会被说给重装也没用的用户"))
-        if "宿主非 App Store 原版装态" not in pnl:
+        # v1.6.9.2：走到第三态的只剩「带 embedded.mobileprovision」一种情况，
+        #   文案从「非 App Store 原版装态」改为「带第三方签名」——旧文案是旧
+        #   口径的产物，会把 metadata 缺失的真 App Store 用户骗到这里。
+        if "宿主带第三方签名" not in pnl:
             fails.append(("iconEnv",
-                          "面板没有「宿主非 App Store 原版装态」文案：自签/侧载用户"
-                          "看不到真实原因（门控跳过），也看不到 inject --force 放行路径"))
+                          "面板没有「宿主带第三方签名」文案：第三方签名用户"
+                          "看不到真实原因（门控跳过）"))
+        if "inject --force" not in pnl:
+            fails.append(("iconEnv",
+                          "面板没给 inject --force 放行路径：门控跳过的用户"
+                          "没有任何自救指引，只能回来找作者"))
         if "重装本插件 deb 可恢复" not in pnl:
             fails.append(("iconEnv",
-                          "面板没有 App Store 分支的恢复文案：App 更新后丢失时"
+                          "面板没有 Apple 签名分支的恢复文案：App 更新后丢失时"
                           "用户不知道该重装 deb"))
         if pnl.count("重装本插件 deb 可恢复") > 1 or \
                 src.count("重装本插件 deb 可恢复") > 1:
@@ -623,10 +670,13 @@ def main(path):
           "只读信息（图标三态 + 构建版本）走 message 不进行动栈；present 前 "
           "endEditing 收键盘 + 延时 ≥ 0.3s 等键盘退场、completion 里再收一次 "
           "alert 自动获焦（v1.6.9/v1.6.9.1 两轮装机实测）")
-    print("  ✓ 面板只读状态：图标三态按宿主装态分支（已启用 / App Store 丢失可重装恢复 / "
-          "非 App Store 门控跳过讲清放行路径，重装承诺只属于 App Store 分支）；"
+    print("  ✓ 面板只读状态：图标三态按宿主装态分支（已启用 / Apple 签名形态丢失可重装恢复 / "
+          "第三方签名门控跳过讲清放行路径，重装承诺只属于 Apple 签名分支）；"
           "「长按快捷菜单」开关行是第一个 action、取消垫尾；构建版本引 OKA_BUILD_TAG 且在 message 内；"
           "按钮改名 ⚙️ 设置，topAnchor 偏移 ≥ 56 避开顶部提示标签；IconSwitch 偏好可读")
+    print("  ✓ v1.6.9.2 安装形态口径：dylib / helper 共用 iconinject-core.h 判据，"
+          "只有 embedded.mobileprovision 才否决；iTunesMetadata 缺失不否决"
+          "（回归点有 host 单测断言 + 反向样本 M37/M38）")
     print("  ✓ 无 setApplicationIconBadgeNumber 回流（角标方案已被否决）")
     return 0
 

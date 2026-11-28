@@ -85,6 +85,12 @@
 // v1.6.6 桌面动态图标：与 helper iconinject 共用的常量（icon 名 / 标记键 /
 // 宿主 bundle id）。两边必须同源，防止"注入成功但切换失效"的静默分叉。
 #import "oka-icon-common.h"
+// ★ v1.6.9.2：安装形态门控的**判据本体**（纯函数，无 SDK 依赖）。dylib 的
+//   OkaHostIsAppStore 与 helper 的安装期门控共用这一份 —— 两边各写一份
+//   必然漂移，漂移的症状是「面板说一套、安装期做另一套」，运行时零报错。
+//   旧口径（metadata 缺失即否决）在真机上误拒过 App Store 安装的宿主，
+//   见 oka_install_form 处的注释与 devkit/selftest-iconinject.c 断言。
+#import "iconinject-core.h"
 
 #define SHORTCUT_TYPE  @"com.oka.wifi.start"
 // ★ Swift 类在 ObjC 运行时里注册的是 mangled 名（我从 __objc_classlist 的
@@ -94,12 +100,14 @@
 #define APPDEL_CLASS_MANGLED @"_TtC7Blinker11AppDelegate"
 #define APPDEL_CLASS_SWIFT   @"Blinker.AppDelegate"
 
-// ★ v1.6.9：构建标识。写进设置面板 message 的版本行 —— 用户实测
+// ★ v1.6.9.2：构建标识。写进设置面板 message 的版本行 —— 用户实测
 //   「开关不见了」时第一件事是核对设备上跑的到底是哪个构建（旧实例残留 /
 //   装错方案都会让新代码不生效，而面板外观看不出来）。改版本号必须同步这里。
 //   v1.6.9 起只读信息（图标三态 + 版本）全部走 message、不再占 action 行，
 //   原因见 OkaPresentWebAuthSettings 里的 v1.6.9 注释。
-#define OKA_BUILD_TAG @"v1.6.9.1"
+//   本轮改的是安装形态门控口径：iTunesMetadata 缺失不再否决，只有
+//   embedded.mobileprovision（第三方签名）才否决，见 OkaHostIsAppStore。
+#define OKA_BUILD_TAG @"v1.6.9.2"
 
 static NSString *const kPrefsPath = @"/var/mobile/Library/Preferences/com.oka.wifitweak.plist";
 
@@ -1236,7 +1244,11 @@ static void OkaPresentWebAuthSettings(id page) {
     } else if (OkaHostIsAppStore()) {
         iconState = @"未启用（App 更新或重装会丢失，重装本插件 deb 可恢复）";
     } else {
-        iconState = @"未启用（宿主非 App Store 原版装态，安装期注入被安全策略跳过；"
+        // v1.6.9.2：走到这里只有一种情况 —— 宿主带 embedded.mobileprovision
+        //   （第三方签名）。旧文案「宿主非 App Store 原版装态」是旧口径的
+        //   产物：那时 iTunesMetadata 缺失也判非原版，真机把 App Store
+        //   安装的宿主也分流到这里，用户看着文案以为是自己装错了。
+        iconState = @"未启用（宿主带第三方签名，安装期注入被安全策略跳过；"
                     @"需 App Store 原版宿主，或按安装期输出执行 inject --force）";
     }
     NSString *infoMsg = [NSString stringWithFormat:
@@ -1503,19 +1515,26 @@ static BOOL OkaIconSwitchReady(void) {
     return plist[[NSString stringWithUTF8String:OKA_ICON_KEY_INJECTED]] != nil;
 }
 
-// 宿主是不是 App Store 原版装态？口径与 devkit/iconinject.m 的
-// IsAppStoreInstall 逐字对齐（helper 靠它决定装 deb 时注不注入）：
-//   iTunesMetadata.plist 存在 且 无 embedded.mobileprovision = App Store。
-// 用途：v1.6.8 面板图标状态行的三态文案 —— 未启用时分得清「App Store
-// 装态丢失（重装 deb 可恢复）」和「非 App Store 装态被门控跳过（重装无用）」，
+// 宿主是不是"可按 App Store 原版对待"？口径与 devkit/iconinject.m 的安装期
+// 门控逐字对齐（v1.6.9.2 起两边共用 iconinject-core.h 的 oka_install_form，
+// 不再各写一份会漂移的判据）：
+//   · embedded.mobileprovision 存在 = 第三方签名（自签/企业签/TestFlight/
+//     重签名）→ 判否。这类装态改 bundle 会破坏签名，「不能导致 App 打不开」
+//     红线命中；面板文案指引 inject --force 自担路径。
+//   · iTunesMetadata.plist 缺失**不再否决** —— 用户 2026-11-28 真机反馈：
+//     App Store 装的宿主被旧判据（缺 metadata 即否决）误判成「非原版装态」，
+//     安装期注入被白白跳过、面板显示未启用。metadata 只是旁证：在=App Store
+//     原版，缺=Apple 签名形态（VPP/MDM 或被清理过旁证的真 App Store 安装），
+//     一样放行。
+// 用途：v1.6.8 起面板图标状态行的三态文案 —— 未启用时分得清「Apple 签名
+// 形态但注入丢失（重装 deb 可恢复）」和「第三方签名被门控跳过（重装无用）」，
 //   不再拿一句「重装本插件可恢复」误导自签环境用户（真机实测踩过）。
 static BOOL OkaHostIsAppStore(void) {
     NSString *meta = [[NSBundle mainBundle] pathForResource:@"iTunesMetadata"
                                                      ofType:@"plist"];
-    if (!meta) return NO;
     NSString *prov = [[NSBundle mainBundle] pathForResource:@"embedded"
                                                      ofType:@"mobileprovision"];
-    return (prov == nil);
+    return oka_form_allows_inject(oka_install_form(meta != nil, prov != nil));
 }
 
 // 切图标。所有同步点都在主线程（用户点击 / GCDWebServer 回调 / App 生命周期

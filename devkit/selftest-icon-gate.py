@@ -170,7 +170,11 @@ def build_cases():
         "    } else if (OkaHostIsAppStore()) {\n"
         "        iconState = @\"未启用（App 更新或重装会丢失，重装本插件 deb 可恢复）\";\n"
         "    } else {\n"
-        "        iconState = @\"未启用（宿主非 App Store 原版装态，安装期注入被安全策略跳过；\"\n"
+        "        // v1.6.9.2：走到这里只有一种情况 —— 宿主带 embedded.mobileprovision\n"
+        "        //   （第三方签名）。旧文案「宿主非 App Store 原版装态」是旧口径的\n"
+        "        //   产物：那时 iTunesMetadata 缺失也判非原版，真机把 App Store\n"
+        "        //   安装的宿主也分流到这里，用户看着文案以为是自己装错了。\n"
+        "        iconState = @\"未启用（宿主带第三方签名，安装期注入被安全策略跳过；\"\n"
         "                    @\"需 App Store 原版宿主，或按安装期输出执行 inject --force）\";\n"
         "    }\n"
     )
@@ -283,6 +287,7 @@ def build_cases():
         #   v1.6.9 起三态搬进 message 构造（iconState 块），删它时
         #   OkaHostIsAppStore() 调用 / 三态文案 / 重装承诺一并消失，
         #   iconEnv 判据同时在面板找这几样 —— 预期 {"iconEnv"}。
+        #   v1.6.9.2：第三态文案改成「宿主带第三方签名」，锚点随之更新。
         ("M12 删面板图标三态",
          icon_state_block, "",
          {"iconEnv"}),
@@ -392,6 +397,26 @@ def build_cases():
          "        [vc presentViewController:ac animated:YES completion:^{\n"
          "        }];\n",
          {"keyboardDismiss"}),
+        # M37 门控口径回退到「iTunesMetadata 缺失即否决」：v1.6.9.2 修的正是
+        #   这个误判（用户 2026-11-28：App Store 装的宿主被旧判据判成非原版，
+        #   注入被白白跳过）。变异后 host_fn 里 oka_install_form 调用消失、
+        #   且出现 if (!meta) return NO —— iconEnv 三条判据同时命中，键唯一。
+        ("M37 门控回退 metadata 否决",
+         "    return oka_form_allows_inject(oka_install_form(meta != nil, prov != nil));\n",
+         "    if (!meta) return NO;\n"
+         "    return prov == nil;\n",
+         {"iconEnv"}),
+        # M38 prov 事实不喂判据（恒传 0）：第三方签名宿主也会被面板判成
+        #   「可恢复」，红线失效。闸门必须认出参数形式被动过。
+        ("M38 prov 事实不喂判据",
+         "    return oka_form_allows_inject(oka_install_form(meta != nil, prov != nil));\n",
+         "    return oka_form_allows_inject(oka_install_form(meta != nil, 0));\n",
+         {"iconEnv"}),
+        # M39 dylib 删共源门控头 import：口径漂移的起点（两边各写一份判据），
+        #   sharedHeader 判据必须炸。
+        ("M39 dylib 删共源门控头 import",
+         "#import \"iconinject-core.h\"\n", "",
+         {"sharedHeader"}),
     ]
     for name, old, _new, _exp in cases:
         if isinstance(old, tuple):   # 两步变异：分别验锚点
@@ -472,6 +497,13 @@ def devkit_cases():
             os.path.join(tmp, "Tweak.xm"),
             '#import "oka-icon-common.h"\n', "") else []
 
+    def m_helper_form(tmp):
+        # M40：共源门控判据被改名 —— helper 侧 import 的 oka_install_form 找不
+        #   到，编译期才炸；helperSrc 判据必须提前炸（v1.6.9.2 共源四件套之一）。
+        return ["iconinject-core.h"] if patch_file(
+            os.path.join(tmp, "iconinject-core.h"),
+            "oka_install_form", "oka_install_form_renamed") else []
+
     return [
         ("M14 共源头图标名改名", m_header, {"sharedHeader"}),
         ("M15 helper 备份路径改名", m_helper_bak, {"helperSrc"}),
@@ -480,6 +512,7 @@ def devkit_cases():
         ("M24 helper 删 tint 函数", m_helper_core, {"helperSrc"}),
         ("M25 删 host 单测入口", m_helper_selftest, {"helperSrc"}),
         ("M27 helper 删 MobileCoreServices import", m_helper_fw, {"helperFw"}),
+        ("M40 共源门控判据改名", m_helper_form, {"helperSrc"}),
     ]
 
 

@@ -115,11 +115,15 @@ printf '\n'
 #   无红色主色/找不到 App）；1=真失败。|| true 保留（任何码都不阻断 dpkg），
 #   但 2 必须告诉用户「为什么没生效、还能怎么办」：v1.6.6 原实现一句
 #   `|| true` 全吞掉，用户实测「卸载重装也没生效」时设备上零线索。
+# ★ v1.6.9.2：门控口径收紧为「只有 embedded.mobileprovision 才否决」，2 分支
+#   文案同步改成第三方签名口径。**原因不复述**：helper 自己会先打一行
+#   「装态判定：iTunesMetadata=… embedded.mobileprovision=… → <form>」，
+#   这里只补放行路径（复述两份必然漂移）。
 __RC=0
 __HELPER__ inject 2>&1 || __RC=$?
 if [ "$__RC" = "2" ]; then
-  printf '桌面动态图标已跳过：宿主不是 App Store 原版装态（自签/企业签环境）。\n'
-  printf '  这是设计内的安全跳过：不碰非原版签名的 App。\n'
+  printf '桌面动态图标已跳过：宿主带第三方签名（检测到 embedded.mobileprovision，自签/侧载/TestFlight）。\n'
+  printf '  这是设计内的安全跳过：不碰第三方签名 App 的 bundle。\n'
   printf '  确认自担签名风险可强行注入：设备上执行 __HELPER__ inject --force\n'
 fi
 # uicache：让 SpringBoard 重读 bundle Info.plist（alternate icon 声明
