@@ -1,6 +1,6 @@
 # Oka WiFi 传输增强（com.oka.wifitweak）
 
-针对 **Oka Files / Blinker 1.7.5**（`com.blinker.documents`）的越狱插件，实现六组功能（功能 4 桌面动态图标 v1.6.10 已移除，编号保留不变；功能 6 为 v1.6.11 新增）：
+针对 **Oka Files / Blinker 1.7.5**（`com.blinker.documents`）的越狱插件，实现六组功能（功能 4 桌面动态图标 v1.6.10 已移除，编号保留不变；功能 6 为 v1.6.11 新增，v1.6.12 修复其挂载不生效）：
 
 | # | 功能 | 效果 |
 |---|---|---|
@@ -9,7 +9,7 @@
 | 3 | 电脑网页端增强（v1.1.8） | 保留原 `Upload Files` 按钮；**整个页面就是放置区**（没有独立拖放框），把单个/多个文件、整个文件夹拖进网页任意位置即可上传（拖入时全屏提示 + 成功/失败汇总 + 失败重试）；**复用原版行末「移动」按钮与原弹窗**，增强为目录浏览 + 可勾选批量移动 + 结果反馈。v1.1.2：**文件夹置顶**、**顶部紧凑**、**任务面板默认折叠**；v1.1.5：文件夹琥珀黄 + 行内重命名按钮；**v1.1.6：删除按钮挪到最右、重命名在它左边；文件名左侧整片区域点一下即选中；每行新增下载按钮，文件直接下载、整个文件夹自动打成 ZIP；点行不再下载**；**v1.1.7：点文件夹行进入目录、点文件行在线预览 txt / pdf / mp4 / 图片 / 音频；目录 ZIP 显式带顶层文件夹；图标列按文件类型显示不同图标**；**v1.1.8：下载改 Blob 保存，不再触发 Chrome「已阻止不安全的下载」；PDF 预览可用；目录下载不再引发 IDM 弹一堆窗口**；**v1.1.9：彻底删掉导航式下载（「等二三十秒 + 已阻止不安全的下载 + IDM 接管」的根因）；每行显示最后修改时间**；**v1.2.0：每行新增「复制下载链接」，把真实下载地址发给别人，对方浏览器 / IDM / 迅雷直接下载** |
 | 4 | 桌面动态图标（v1.6.6 引入，**v1.6.10 已移除**） | 曾实现「WiFi 传输开着时桌面 App 图标自动红染绿、关时回默认原图标」。v1.6.6–v1.6.9.2 六个版本持续修注入链路，真机始终未生效（用户 2026-11-28 最终反馈「没生效」）。v1.6.10 整体移除：dylib 切换链、安装期 helper、共源常量头与全部正向闸门已删，构建改负向闸门防回流；装 / 卸 deb 都会顺手清理旧版可能注入的残留（见「功能 4」节）。**功能 1 / 2 / 3 / 5 不受影响** |
 | 5 | 服务假死自愈（v1.6.7） | 开着 WiFi 传输放着不管，监听 socket 可能被系统回收而「假死」：实例 `isRunning` 仍报 YES、宿主显示「已连接」，但电脑网页打不开。v1.6.7 起每 45s 用**本地回环 connect 实测**端口（不读恒 YES 的 `isRunning`），回前台时也顺手探一次；确认死了就自动重放一次「关开」（同一条 hook 路，suspend=NO / 密码头 / 端口 fallback 全量补齐），90s 内不重复。可用 `ServiceHeal` 偏好关掉 |
-| 6 | 导航栏 WiFi 传输开关（v1.6.11） | 文件列表页导航栏、左侧三条横线（侧边栏图标）右边的空白区加一颗胶囊开关，实时显示传输状态（**未开启 / 待连接 / 已连接 / 已停止**），点一下即开、再点即关。状态取自 GCDWebServer 的真实运行态与活跃连接数（`_activeConnections`），不是猜的。详见「功能 6」节 |
+| 6 | 导航栏 WiFi 传输开关（v1.6.11 起，v1.6.12 修复挂载） | 文件列表页导航栏、左侧三条横线（侧边栏图标）右边的空白区加一颗胶囊开关，实时显示传输状态（**未开启 / 待连接 / 已连接 / 已停止**），点一下即开、再点即关。状态取自 GCDWebServer 的真实运行态与活跃连接数（`_activeConnections`），不是猜的。详见「功能 6」节 |
 
 > **v1.1.9：下载慢/被拦的真正根因已清除，并新增「最后修改时间」列。**
 >
@@ -328,7 +328,17 @@ _GCDWebServerGetPrimaryIPAddress 硬编码 strcmp(ifa_name,"en0")
 
 **关闭路径有一个硬约束**：App 的 `-[BNHttpServerPage changeWifiTransferStateAction:]`（真实现 `0x100013a14`）**开、停两条分支**都对 weak outlet 做「load 完立刻 `cbz → brk #1`」的强制解包，七个 `brk` 连成一片（`0x100013e24..e40`）。页面没真正上屏时这些 outlet 是 nil，调下去就是**硬崩**——不是 ObjC 异常，`@try` 兜不住。所以调 App 入口前必须先过 `OkaXferOutletsReady`（逐个确认 `connectionView` / `qrCodeView` / `startBtn` / `ipAddress` 都非 nil）；不齐时降级为只对服务实例发 `stop` / `startWithOptions:error:`，绝不进那段代码。这也意味着：开关**不依赖**用户曾经打开过 WiFi 传输页。
 
-**③ 布局与对齐**：追加到 `leftBarButtonItems`（不是替换），所以落在汉堡按钮右侧那块空白区，不动右侧三个图标，也不碰 `titleView`。高度 27pt，垂直居中交给 `UIBarButtonItem` 自己处理（不写死 y），所以不同机型、不同导航栏高度下都对齐。左右内边距各 9pt、圆点 7pt、圆点与文字间距 6pt、文字区固定 40pt。
+**③ 布局与对齐**：三级挂载，按页面实际结构逐级回退——这是 v1.6.12 的修正，v1.6.11 只有第一级且判据写错（见下「为什么第一版没出现」）：
+
+| 路径 | 条件 | 落点 |
+|---|---|---|
+| A | `navigationController.topViewController == vc`（本页就是导航栏渲染的那一页） | 追加到 `leftBarButtonItems`（**不是替换**），落在汉堡右侧空白区，不动右侧三个图标，也不碰 `titleView` |
+| B | 本页是别人的子控制器 / item 轮不到渲染，但导航栏在屏上 | 直接 `addSubview` 到 `navigationBar`，`centerX` 对齐 + `centerY` 对齐（这一页标题在下面灰色路径条里，蓝栏中段本就是空的） |
+| C | 连可见导航栏都没有（自绘顶栏 / 全屏页） | 挂到 `vc.view`，`trailing` 让开右侧图标区 90pt、`top` 贴 safeArea 下 4pt |
+
+高度 27pt。A 路径的垂直居中交给 `UIBarButtonItem`；B/C 路径用 `centerYAnchor` / `topAnchor` 显式约束（不写死 y），所以不同机型、不同导航栏高度下都对齐。左右内边距各 9pt、圆点 7pt、圆点与文字间距 6pt、文字区固定 40pt。
+
+B/C 路径有一个必须配套的动作：胶囊不归导航栏管，页面切走不会自己消失。所以补了 `viewWillDisappear:`（本类原本**没有**实现它，走 `class_addMethod` 补，不能 `HookInstanceMethod`——那会沿继承链改到 `UIViewController`，污染全 App 每个页面），离开时摘掉；补实现后还要**向 super 转发**，否则等于屏蔽掉 `UIViewController` 自己的默认行为。
 
 **④ 为什么和现有状态栏风格一致**：胶囊圆角取高度的一半（`27/2`），与右侧 `toolbarViewModeButton` 的白色圆角容器是同一套语言；底色 `white 0.18`、文字 12pt semibold 白色，落在蓝色导航栏上对比度够、又不抢右侧图标的权重。**四个状态文案统一三个字**（未开启 / 待连接 / 已连接 / 已停止）：文字等长 + 文字区固定宽度，状态切换时胶囊宽度不变，导航栏不会因为文字变长而左右跳一下。
 
@@ -336,7 +346,23 @@ _GCDWebServerGetPrimaryIPAddress 硬编码 strcmp(ifa_name,"en0")
 
 **已知限度**：「已连接」是连接数不是传输速率（见上）；「已停止」需要一次回环连接才能判定，探活走后台队列并按 2s 节流，所以状态最多晚约 1~2 秒；胶囊不显示 IP 与端口（那是 WiFi 传输页的职责，塞进导航栏会挤掉标题）。
 
-**闸门**：`devkit/check-navswitch.py`（11 条判据，全部落在函数体内并检查调用形态与顺序——不写「标识符存在」这类永真判据）+ `devkit/selftest-navswitch.py`（18 个破坏样本，每条都要求**对应判据键精确变红**；只断言「返回 1」会放过「A 判据误拦了 B 的样本、B 其实从未被验证」这种假绿）。另有 2 个良性扰动样本，防判据过严。产物层同向判据在 `build.sh`：dylib 必须含 mangled 类名与四个状态文案。
+**为什么第一版没出现（v1.6.11 的实际故障）**：v1.6.11 的挂载函数第一行是
+
+```objc
+if (!vc.navigationController) return;   // ← 这条判据本身是错的
+```
+
+当时的理由写在注释里：「`navigationItem` 是懒建的，非 nil 不代表有导航栏；判据取 `navigationController` 才是真条件」。**理由错在**：子控制器（`parent` 链上的子页）读 `navigationController` 同样返回非 nil —— 这是个便利访问器，会沿 `parentViewController` 往上找。于是这一页若只是父容器的子控制器，守卫照样放行，item 被塞进一份**永远不会被渲染**的 `navigationItem`（导航栏只读 `topViewController` 的 item）。
+
+后果正是用户看到的那三种「什么都不发生」：不显示、不崩溃、不留日志。而且它连「加错地方」都算不上——item 确实加上了，只是没有一个 UIKit 对象会去读它。
+
+真正决定「item 会不会被画」的是 `nav.topViewController == vc`，不是非 nil。所以 v1.6.12 把判据换成这个，并补了 B/C 两条不依赖 `navigationItem` 的挂法：判不成栈顶时仍能让胶囊出现在蓝栏上。
+
+**同时补上了自证通道**：加 `GET /oka-xfer`，返回 `route`（走的是 A/B/C 哪条）、`host`（宿主类名）、`calls`（装挂被调了几次，0 = hook 根本没跑）、`ctlAlive` / `ctlInWindow`（胶囊是否还活着、是否真的在视图树上）、`frame`（实际几何）、`hidden` / `alpha`、`state`、`serverRunning`、`port`。理由是这次的教训：挂错了**没有任何痕迹可查**，用户只能说「没出现」，而本机既没有 clang（无法编译验证）也没有越狱设备（无法真机复现），只能靠静态反汇编推断，推错一次就是一个版本。有了这个接口，下次出问题打开 `http://<地址>/oka-xfer` 就能看到事实，不必再猜。
+
+**闸门**：`devkit/check-navswitch.py`（14 条判据，全部落在函数体内并检查调用形态与顺序——不写「标识符存在」这类永真判据）+ `devkit/selftest-navswitch.py`（23 个破坏样本，每条都要求**对应判据键精确变红**；只断言「返回 1」会放过「A 判据误拦了 B 的样本、B 其实从未被验证」这种假绿）。另有 2 个良性扰动样本，防判据过严。产物层同向判据在 `build.sh`：dylib 必须含 mangled 类名与四个状态文案。
+
+其中一条破坏样本就是 **v1.6.11 的真身**（「守卫退回只判 `navigationController` 非 nil」）。它当年能过闸门，因为闸门就是这么写的——现在留作永久反证：判据一放松回那个形态，立刻变红。
 
 ### 功能 3 —— 电脑网页端增强（v1.1.1 定型，v1.1.2 ~ v1.2.0 持续增强）
 
@@ -690,7 +716,7 @@ sh devkit/build.sh arm64  iphoneos-arm    1.2.0   # 传统 rootful
 | `devkit/selftest-noicongate.py` | 上面那个闸门的反证：1 个良性样本 + 7 个破坏注入（函数定义回流 / 调用点回流 / 注入判定回流 / 装态判定回流 / 开关变量回流 / selector 回流 / 偏好键回流）逐个必须 FAIL + 还原后复跑 PASS | CI 的 No-icon gate；本地可跑 |
 | `devkit/check-service-heal.py` | v1.6.7 服务假死自愈：探活必须本地回环 connect 且**不许读 `isRunning`**（恒 YES，探了等于没探）；自愈必须重放 `startWithOptions:error:` 原路（不许只改状态位）；防抖 90s；三个触发面齐备（回前台 / 45s 定时器含 `dispatch_resume` / 启动即挂）；实例与 options 在 `my_startWithOptions` 落袋；`ServiceHeal` 偏好可读；自愈段无 NSLog；声明先于使用 | `build.sh` 内；CI 的 Service heal gate 同代码 |
 | `devkit/selftest-service-heal.py` | 上面那个闸门的反证：10 个破坏样本（每个精确触发一个判据键）+ 1 个良性注释变更。注入锚点按**函数体作用域**替换（v1.6.11 起开关自己也会发一次同样的 start 重放，全文替换会误改开关那一处，把判据摊薄） | CI 的 Service heal gate；本地可跑 |
-| `devkit/check-navswitch.py` | v1.6.11 导航栏 WiFi 传输开关闸门，11 条判据：查类必须用 `FILESBROWSER_CLASS_MANGLED` 且值为 mangled 形式；挂载函数必须是 `if (!vc.navigationController) return;` 早退；调 App 入口前必须过 `OkaXferOutletsReady`（四个 outlet 齐全、守卫在调用之前、`!` 早退真实存在，且每处调用点所在函数在受守卫名单内）；幂等要求「按类识别 → 命中即 return」且判重在 `addObject` 之前；四状态文案从源码实际赋值里取长度比对；`viewDidLoad` 与 `viewWillAppear:` 两个 selector 都必须真注册；`_activeConnections` 必须直读 ivar 并校验类型编码；`if (!iv)` 必须返回 -1；定时器回调必须有 `if (!gXferControl) return;`；手势必须挂在胶囊自身而非 `_dot` | `build.sh` 内；CI 的 Nav switch gate 同代码 |
+| `devkit/check-navswitch.py` | 导航栏 WiFi 传输开关闸门，14 条判据：查类必须用 `FILESBROWSER_CLASS_MANGLED` 且值为 mangled 形式；挂 item 前必须判 `navigationController.topViewController == vc`（**不是判非 nil**——子控制器沿 parent 链也非 nil，v1.6.11 就栽在这里）；必须有「非 item 的回退挂法」且回退助手体里真有 `addSubview`、调用点不在恒假条件里；必须有可查询的自证接口 `OkaXferDiagResponse`（**查定义**而非查调用点）并注册成 `GET /oka-xfer`；非 item 挂法必须有 `viewWillDisappear:` 清理且真注册；调 App 入口前必须过 `OkaXferOutletsReady`（四个 outlet 齐全、守卫在调用之前、`!` 早退真实存在，且每处调用点所在函数在受守卫名单内）；幂等要求「按类识别 → 命中即 return」，B/C 路径还要求清掉不属于本页的胶囊；四状态文案从源码实际赋值里取长度比对；`viewDidLoad` 与 `viewWillAppear:` 两个 selector 都必须真注册；`_activeConnections` 必须直读 ivar 并校验类型编码；`if (!iv)` 必须返回 -1；定时器回调必须有 `if (!gXferControl) return;`；手势必须挂在胶囊自身而非 `_dot` | `build.sh` 内；CI 的 Nav switch gate 同代码 |
 | `devkit/selftest-navswitch.py` | 上面那个闸门的反证：18 个破坏样本，每个都要求**对应判据键精确变红**（只断言"返回 1"会放过「A 误拦 B 的样本、B 从未被验证」的假绿）+ 2 个良性扰动（注释 / 改变量名）证明判据不过严 + 还原复跑 + 磁盘 sha256 前后一致 | CI 的 Nav switch gate；本地可跑 |
 | `devkit/check-dylib-fingerprint.py` | v1.6.11 产物层指纹：dylib 里必须有 mangled 类名、`okaApplyState` selector 与四个状态文案。**中文文案按 UTF-16LE 找**——ObjC 的 `@"未开启"` 在 Mach-O 里就是 UTF-16LE，用 `grep -a 未开启`（UTF-8 字节）必然找不到；而 macOS 自带 BSD grep 没有 `-P` 不能按字节匹配。要求 `okaApplyState` 存在是为了排除「文案写进死数组、没人渲染」 | `build.sh` 内 |
 | `devkit/selftest-dylib-fingerprint.py` | 上面那个指纹判据的反证，用构造的假 dylib（不需要 iOS SDK）：2 良性（UTF-16LE / UTF-8 两种编码）+ 6 破坏（缺一个文案 / 近形字替换 / 缺 selector / 缺 mangled 名 / 空文件 / 文件不存在），每个破坏样本的失败理由必须各不相同 | CI 的 Nav switch gate；本地可跑 |
@@ -831,7 +857,8 @@ v1.1.3 起插件**不输出任何系统日志**，所以判据一律看功能表
 | 顶部还是很空 / 上传任务框还是占地方 | `body.oka-compact` 没加上，或注入的 CSS 被缓存了 | 控制台看 `document.body.classList.contains('oka-compact')`；为真但样式没变就强刷（Ctrl+F5）。任务面板的折叠由 `setTasksExpanded(false)` 控制，若上传后明细直接展开，检查 `startUpload()` 里那行是否被删；也可直接点头部「展开 / 收起」验证切换是否可用 |
 | 页面源码里出现两次 `OKA-WIFI-INJECTED` | 幂等标记失效（类方法 + 实例方法双 hook 都注入了） | 正常情况下 `OkaAugmentVariables` 会在第二次命中时直接返回原 variables。若重复，检查 `rangeOfString:@"OKA-WIFI-INJECTED"` 是否被改掉 |
 | 拖入文件夹后只剩顶层文件、子目录丢了 | `create` 用 `withIntermediateDirectories:NO`，父目录不存在时整条链会失败 | 任务面板会显示每个目录的失败原因。代码已按深度升序逐级创建并对「目录已存在」做 `list` 反查；若仍失败，把任务面板的失败明细发来 |
-| 导航栏上没有那颗 WiFi 开关胶囊 | 页面不是文件列表页（在 WiFi 传输页 / 设置页时按设计不挂）；或装的是 v1.6.10 及更早（该功能 v1.6.11 才有）；或该页当时不在导航栈里（守卫会拒绝挂一个看不见的孤儿 item） | 先回到「我的本地文件」那一页（导航栏左侧是三条横线的那页）再看。仍在 → 打开 App 设置面板核对「插件版本」行必须是 `v1.6.11`；旧实例残留时重装并重启 App |
+| 导航栏上没有那颗 WiFi 开关胶囊 | 页面不是文件列表页（在 WiFi 传输页 / 设置页时按设计不挂）；或装的是 v1.6.10 及更早（该功能 v1.6.11 才有）；**或装的是 v1.6.11——那一版的守卫判据写错了，见下一行** | 先回到「我的本地文件」那一页（导航栏左侧是三条横线的那页）再看。仍在 → 打开 App 设置面板核对「插件版本」行必须是 `v1.6.12`；旧实例残留时重装并重启 App |
+| **v1.6.11 装完开关完全没出现**（不崩溃、不报错、什么都没有） | `OkaInstallXferSwitch` 的守卫是 `if (!vc.navigationController) return;`。子控制器读 `navigationController` 同样返回非 nil（它会沿 `parentViewController` 往上找），于是守卫放行，item 被塞进一份**永远不会被渲染**的 `navigationItem` —— 导航栏只读 `topViewController` 的 item | 这是 v1.6.11 的已知缺陷，v1.6.12 已修：判据改为 `nav.topViewController == vc`，并补了「挂 navigationBar 本体」「挂 vc.view」两条回退。**验证方法**：连上 WiFi 传输后打开 `http://<地址>/oka-xfer`，看 `route` 字段——`A-navitem` / `B-navbar` / `C-view` 哪个生效一目了然；`calls: 0` 说明 hook 根本没跑 |
 | 开关胶囊点了没反应 | 服务实例还没被创建（App 从未启动过 WiFi 传输，且 `gServerInstance` 尚未落袋） | 首次启动一个实例的可靠办法：进 WiFi 传输页手动开一次，或长按桌面图标用快捷项。之后开关就能自己开 / 关，不再依赖那一页 |
 | 胶囊显示「已停止」 | 服务对外报在跑但本地回环 connect 失败 = 假死（与功能 5 同一套探活口径），不是显示错误 | 点一下开关（先关后开），或直接依赖 v1.6.7 的自愈（90s 防抖）；若反复出现，多为路由器踢客户端 / Wi-Fi 漫游，考虑固定 IP 或用热点 |
 | 胶囊一直显示「待连接」，但电脑上网页已经打开了 | `_activeConnections` 的计数口径是「已建立的 HTTP 连接」，浏览器请求结束、进入 keep-alive 空闲或页面关闭后会归零；它不等于「有电脑连着」 | 这是**如实反映连接数**，不是 bug（README「功能 6」已写明限度：它是连接数不是传输速率）。传输进行中会跳到「已连接」 |
@@ -892,7 +919,7 @@ wifitweak/
 │   ├── selftest-noicongate.py  # 上面那个闸门的反证：1 良性 + 7 破坏注入 + 还原复跑
 │   ├── check-service-heal.py   # v1.6.7 服务假死自愈闸门（回环探活不读 isRunning / 原路重放 / 防抖 / 三触发面）
 │   ├── selftest-service-heal.py # 上面这个闸门的反证：10 破坏样本 + 1 良性样本
-│   ├── check-navswitch.py      # v1.6.11 导航栏 WiFi 传输开关闸门（挂载类/导航栈守卫/outlet 守卫/幂等/文案等长/双 hook/真实连接数/定时器守卫/热区）
+│   ├── check-navswitch.py      # 导航栏 WiFi 传输开关闸门（挂载类/栈顶判据/回退挂法/自证接口/离开清理/outlet 守卫/幂等/文案等长/双 hook/真实连接数/定时器守卫/热区）
 │   ├── selftest-navswitch.py   # 上面这个闸门的反证：18 破坏样本（精确命中判据键）+ 2 良性扰动
 │   ├── check-dylib-fingerprint.py    # v1.6.11 dylib 指纹（mangled 类名 + okaApplyState + 四状态文案，中文按 UTF-16LE 找）
 │   ├── selftest-dylib-fingerprint.py # 上面这个指纹判据的反证：2 良性 + 6 破坏（假 dylib，无需 SDK）

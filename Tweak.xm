@@ -2062,6 +2062,14 @@ static BOOL gXferEverOn = NO;
 // 胶囊控件。自带状态渲染，外部只喂状态值。
 @interface OkaXferBarControl : UIView
 @property (nonatomic, assign) NSInteger xferState;
+// 这个胶囊属于哪个页面。挂到 navigationBar 上时必须有它：导航栏本身
+// 是跨页复用的同一个 view，页面切走后胶囊不会自己消失，会显示在**下一页**
+// 的顶栏上（状态还是对的，但归属是错的）。重挂时按它清掉别人的。
+@property (nonatomic, weak) UIViewController *okaOwner;
+// 这颗胶囊是不是装在 navigationItem 里（路径 A）。
+//   YES → 页面离开时不要 removeFromSuperview，导航栏自己会重画；
+//   NO  → 挂在 navigationBar / view 上的，必须自己摘。
+@property (nonatomic, assign) BOOL okaInNavItem;
 // 声明在 @interface 里：initWithFrame: 与 setXferState: 都调它，
 // 不声明会吃 -Wobjc-method-access（build.sh 已关掉该警告，但
 // 「靠关警告让它过」是隐患，正确写法是显式声明）。
@@ -2407,33 +2415,9 @@ static void OkaXferToggle(void) {
 - (void)okaXferTap:(id)sender { if (self.handler) self.handler(); }
 @end
 
-// 装到导航栏上。幂等：viewDidLoad / viewWillAppear 都可能被调多次，
-// 已经在 leftBarButtonItems 里就不再追加（否则会越叠越多）。
-static void OkaInstallXferSwitch(UIViewController *vc) {
-    if (!vc) return;
-    UINavigationItem *nav = vc.navigationItem;
-    if (!nav) return;
-
-    // ★ 只有真的在导航栈里才挂。
-    //   navigationItem 是懒建的（谁读谁有），所以它非 nil **不代表**页面上
-    //   有导航栏；不在栈里时把 item 塞进去，用户永远看不到，只留下一个
-    //   孤儿 item 挂在页面身上。判据取 navigationController —— 它才是
-    //   「这一页会被导航栏渲染」的真条件。
-    if (!vc.navigationController) return;
-
-    NSArray *left = nav.leftBarButtonItems;
-    for (UIBarButtonItem *it in left) {
-        if ([it.customView isKindOfClass:[OkaXferBarControl class]]) {
-            gXferControl = (OkaXferBarControl *)it.customView;   // 刷新弱引用
-            gXferPage = vc;
-            OkaXferRefreshAsync();
-            return;
-        }
-    }
-    // 单数形式（leftBarButtonItem）装过、但 leftBarButtonItems 为空：
-    // UIKit 里两者是同一份存储的两种视图，这里统一按数组处理，避免把它顶掉。
-    if (left.count == 0 && nav.leftBarButtonItem) left = @[ nav.leftBarButtonItem ];
-
+// 构造胶囊 + 点击手势。三条挂载路径共用同一份构造 —— 若三条各写一遍，
+// 日后改样式必然漏一条，界面上出现两个长得不一样的开关。
+static OkaXferBarControl *OkaXferMakeControl(void) {
     OkaXferBarControl *ctl =
         [[OkaXferBarControl alloc] initWithFrame:CGRectMake(0, 0,
             kOkaXferPadL + kOkaXferDot + kOkaXferGap + kOkaXferTextW + kOkaXferPadR,
@@ -2441,22 +2425,166 @@ static void OkaInstallXferSwitch(UIViewController *vc) {
     [ctl sizeToFit];
 
     // target 由手势识别器持有（UIGestureRecognizer 会强引用 target），
-    // 这里再挂一个关联对象是多余的；手势本身挂在 ctl 上，ctl 活着它就活着。
+    // 再挂一个关联对象是多余的；手势挂在 ctl 上，ctl 活着它就活着。
     OkaXferTapTarget *tap = [OkaXferTapTarget new];
     tap.handler = ^{ OkaXferToggle(); };
     UITapGestureRecognizer *g =
         [[UITapGestureRecognizer alloc] initWithTarget:tap action:@selector(okaXferTap:)];
     [ctl addGestureRecognizer:g];
+    return ctl;
+}
 
-    UIBarButtonItem *item = [[UIBarButtonItem alloc] initWithCustomView:ctl];
+// 宿主里已经有**属于本页**的胶囊了吗？有就复用，返回 YES。
+// viewDidLoad / viewWillAppear 都会调装挂，不复用就会越叠越多。
+// ★ 归属不同的胶囊直接移除：navigationBar 是跨页复用的同一个 view，
+//   上一页挂上去的胶囊不会随页面消失，留着就会显示在别的页顶栏上。
+static BOOL OkaXferReuseIn(UIView *host, UIViewController *vc) {
+    if (!host) return NO;
+    OkaXferBarControl *mine = nil;
+    for (UIView *v in [host.subviews copy]) {
+        if (![v isKindOfClass:[OkaXferBarControl class]]) continue;
+        OkaXferBarControl *c = (OkaXferBarControl *)v;
+        if (c.okaOwner == vc) mine = c;
+        else [c removeFromSuperview];      // 别人的：上一页遗留，清掉
+    }
+    if (!mine) return NO;
+    gXferControl = mine;
+    gXferPage = vc;
+    OkaXferStartTicker();
+    OkaXferRefreshAsync();
+    return YES;
+}
 
-    NSMutableArray *next = [left mutableCopy];
-    if (!next) next = [NSMutableArray array];
-    [next addObject:item];
-    nav.leftBarButtonItems = next;
+// 路径 B：直接挂到导航栏本体上。
+//   为什么需要这条路：本页若只是父页面的**子控制器**，它的 navigationItem
+//   永远不会被导航栏渲染（导航栏只读 topViewController 的 item），但它的
+//   navigationController 又会沿 parent 链返回非 nil —— 只判后者会「通过
+//   检查、装到没人看的地方」。挂到 navigationBar 本身就没有这个问题：
+//   蓝栏在屏上，胶囊就在屏上。
+static void OkaXferAttachToNavBar(UINavigationBar *bar, OkaXferBarControl *ctl) {
+    if (!bar || !ctl) return;
+    ctl.translatesAutoresizingMaskIntoConstraints = NO;
+    [bar addSubview:ctl];
+    // 蓝栏这一页没有标题（截图即证：标题在下面那条灰色路径条里），
+    // 横向居中正好落在「左侧汉堡」与「右侧三个图标」之间的空白区。
+    [NSLayoutConstraint activateConstraints:@[
+        [ctl.centerXAnchor constraintEqualToAnchor:bar.centerXAnchor],
+        [ctl.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
+        [ctl.heightAnchor constraintEqualToConstant:kOkaXferH],
+    ]];
+    [bar bringSubviewToFront:ctl];
+}
 
+// 路径 C：连导航栏都没有（页面自绘顶栏 / 全屏页）时，挂到页面自身顶部。
+static void OkaXferAttachToView(UIView *host, OkaXferBarControl *ctl) {
+    if (!host || !ctl) return;
+    ctl.translatesAutoresizingMaskIntoConstraints = NO;
+    [host addSubview:ctl];
+    [NSLayoutConstraint activateConstraints:@[
+        [ctl.trailingAnchor constraintEqualToAnchor:host.safeAreaLayoutGuide.trailingAnchor
+                                          constant:-90.0],
+        [ctl.topAnchor constraintEqualToAnchor:host.safeAreaLayoutGuide.topAnchor
+                                    constant:4.0],
+        [ctl.heightAnchor constraintEqualToConstant:kOkaXferH],
+    ]];
+}
+
+// ★ v1.6.12：挂载结果记账。
+//   v1.6.11 最大的问题不是挂错了地方，而是**挂错了没有任何痕迹可查** ——
+//   用户只说「没出现」，我在本机无法复现（没有 C 编译器、没有越狱设备），
+//   只能靠静态反汇编猜，猜错一次就是一个版本。
+//   所以这一版把「哪条路径生效、宿主是谁、栈顶是不是本页」记进静态变量，
+//   由 GET /oka-xfer 暴露出去。探测一次就知道该改哪条分支，不必再猜。
+static NSString *gXferRoute = nil;      // "A-navitem" / "B-navbar" / "C-view" / "none"
+static NSString *gXferHostDesc = nil;   // 宿主的类名
+static NSInteger gXferInstallCalls = 0; // 装挂被调用了几次
+
+static void OkaXferNote(NSString *route, id host) {
+    gXferRoute = [route copy];
+    gXferHostDesc = host ? NSStringFromClass([host class]) : @"(nil)";
+    gXferInstallCalls++;
+}
+
+// 装开关。三级挂载，按页面实际结构逐级回退：
+//   A 本页就是导航栏渲染的那一页 → 占 leftBarButtonItems（零布局冲突，最正）
+//   B 本页是子控制器 / item 不渲染 → 直接挂到 navigationBar 本体
+//   C 没有导航栏 → 挂到页面顶部
+//
+// ★ v1.6.12：A 的判据从「navigationController 非 nil」改成
+//   「navigationController.topViewController == vc」。前者是错的：
+//   子控制器沿 parent 链也能拿到非 nil，于是 item 被装进一个永远不被
+//   渲染的 navigationItem —— 不显示、不崩溃、不留日志，正是 v1.6.11
+//   用户看到的「装了什么都没出现」。这条判据必须能区分
+//   「我在栈顶，我的 item 会被画」和「我只是别人的子页」。
+static void OkaInstallXferSwitch(UIViewController *vc) {
+    if (!vc) return;
+
+    UINavigationController *nav = vc.navigationController;
+    UINavigationBar *bar = nav.navigationBar;
+
+    // ---- 路径 A：本页就是导航栏渲染的那一页 ----
+    if (nav && nav.topViewController == vc) {
+        UINavigationItem *item = vc.navigationItem;
+        if (item) {
+            NSArray *left = item.leftBarButtonItems;
+            for (UIBarButtonItem *it in left) {
+                if ([it.customView isKindOfClass:[OkaXferBarControl class]]) {
+                    gXferControl = (OkaXferBarControl *)it.customView;   // 刷新弱引用
+                    gXferPage = vc;
+                    OkaXferNote(@"A-navitem", vc.navigationItem);
+                    OkaXferStartTicker();
+                    OkaXferRefreshAsync();
+                    return;
+                }
+            }
+            // 单数形式（leftBarButtonItem）装过、但 leftBarButtonItems 为空：
+            // UIKit 里两者是同一份存储的两种视图，统一按数组处理，别把它顶掉。
+            if (left.count == 0 && item.leftBarButtonItem) {
+                left = @[ item.leftBarButtonItem ];
+            }
+
+            OkaXferBarControl *ctl = OkaXferMakeControl();
+            ctl.okaOwner = vc;
+            ctl.okaInNavItem = YES;      // 归导航栏管，离开时不自己摘
+            UIBarButtonItem *entry = [[UIBarButtonItem alloc] initWithCustomView:ctl];
+            NSMutableArray *next = [left mutableCopy];
+            if (!next) next = [NSMutableArray array];
+            [next addObject:entry];
+            item.leftBarButtonItems = next;
+
+            gXferControl = ctl;
+            gXferPage = vc;
+            OkaXferNote(@"A-navitem", vc.navigationItem);
+            OkaXferStartTicker();
+            OkaXferRefreshAsync();
+            return;
+        }
+    }
+
+    // ---- 路径 B：item 轮不到渲染 → 直接挂到蓝栏本体 ----
+    if (bar && !bar.hidden && !nav.isNavigationBarHidden) {
+        if (OkaXferReuseIn(bar, vc)) { OkaXferNote(@"B-navbar(reuse)", bar); return; }
+        OkaXferBarControl *ctl = OkaXferMakeControl();
+        ctl.okaOwner = vc;
+        OkaXferAttachToNavBar(bar, ctl);
+        gXferControl = ctl;
+        gXferPage = vc;
+        OkaXferNote(@"B-navbar", bar);
+        OkaXferStartTicker();
+        OkaXferRefreshAsync();
+        return;
+    }
+
+    // ---- 路径 C：没有可见导航栏 ----
+    UIView *host = vc.view;
+    if (!host) { OkaXferNote(@"none(view-nil)", vc); return; }
+    if (OkaXferReuseIn(host, vc)) { OkaXferNote(@"C-view(reuse)", host); return; }
+    OkaXferBarControl *ctl = OkaXferMakeControl();
+    ctl.okaOwner = vc;
+    OkaXferAttachToView(host, ctl);
     gXferControl = ctl;
     gXferPage = vc;
+    OkaXferNote(@"C-view", host);
     OkaXferStartTicker();
     OkaXferRefreshAsync();
 }
@@ -2477,6 +2605,46 @@ static void (*orig_fbcViewWillAppear)(id, SEL, BOOL);
 static void my_fbcViewWillAppear(id self, SEL _cmd, BOOL animated) {
     if (orig_fbcViewWillAppear) orig_fbcViewWillAppear(self, _cmd, animated);
     OkaInstallXferSwitch((UIViewController *)self);
+}
+
+// 页面离开时摘掉胶囊。
+//   为什么必须有这一步：路径 A 的胶囊装在 navigationItem 里，导航栏自己会
+//   随页面切换重画；但路径 B 挂在 navigationBar 本体、路径 C 挂在 view 上，
+//   两者都不归导航栏管 —— 不走就留在屏上，下一页顶栏也顶着一颗。
+//   FilesBrowserController **没有实现** viewWillDisappear:，直接
+//   HookInstanceMethod 会沿继承链改到 UIViewController 上（全 App 每个页面
+//   都受影响，是明确的事故形态），所以注册时走 class_addMethod 补实现。
+static void (*orig_fbcViewWillDisappear)(id, SEL, BOOL);
+static void my_fbcViewWillDisappear(id self, SEL _cmd, BOOL animated) {
+    // ★ 补实现（class_addMethod）时 orig 为 NULL，但**不能就此不转发**：
+    //   UIViewController 的 viewWillDisappear: 有系统默认行为，
+    //   补到子类上就等于把父类实现整个屏蔽掉（连带 super 链上的实现）。
+    //   class_addMethod 成功说明本类原本没有，那就直接向 super 转发。
+    if (orig_fbcViewWillDisappear) {
+        orig_fbcViewWillDisappear(self, _cmd, animated);
+    } else {
+        // ★ 必须用 [self class]（实例所属类）再取 superclass。
+        //   写成 class_getSuperclass(object_getClass(self)) 取的是**元类**的
+        //   父类 —— 那是类方法那一侧，objc_msgSendSuper 拿到会走错表。
+        struct objc_super su;
+        su.receiver = self;
+        su.super_class = class_getSuperclass([self class]);
+        ((void (*)(struct objc_super *, SEL, BOOL))objc_msgSendSuper)(&su, _cmd, animated);
+    }
+
+    OkaXferBarControl *ctl = gXferControl;
+    if (!ctl || ctl.okaOwner != (id)self) return;
+
+    // ★ 只清理「不归导航栏管」的那两种挂法。
+    //   路径 A 的胶囊在 navigationItem 里，它由 UINavigationBar 自己随页面
+    //   切换重画 —— 这时 [ctl removeFromSuperview] 摘的是 UIKit 内部正在
+    //   持有并复用的那一个 view，摘掉会让 item 处于「有 customView 但已脱管」
+    //   的坏状态，下次回到本页反而可能不显示。判据取 okaInNavItem。
+    if (ctl.okaInNavItem) return;      // 交给导航栏自己管
+
+    [ctl removeFromSuperview];
+    gXferControl = nil;
+    gXferPage = nil;
 }
 
 // --- AppDelegate hooks -----------------------------------------------------
@@ -2881,6 +3049,59 @@ static id OkaStatResponse(id server, id request) {
     return ((OkaJSONResp_t)(void *)objc_msgSend)((id)dataCls, selJson, out);
 }
 
+// GET /oka-xfer —— 开关挂载自证接口。
+//
+// 【为什么要有它】
+//  v1.6.11 装完「什么都没出现」，而我在本机既不能编译 C（无 clang）、
+//  也没有越狱设备可跑，只能靠静态反汇编推断，结果推错一次就是一个版本。
+//  这个接口把「运行时到底走了哪条挂载路径、宿主是谁」直接吐出来：
+//     route: A-navitem / B-navbar / C-view / none
+//     host:  宿主的类名
+//     calls: 装挂函数被调了几次（0 = hook 根本没跑）
+//     ctl:   胶囊对象是否还活着
+//     bar/nav/stackTop: 导航栏与栈顶判定结果
+//  用户点一下「开启 WiFi 传输」，打开 http://<地址>/oka-xfer 就能看到事实，
+//  不必再猜。
+//
+// 【为什么不写日志】
+//  build.sh 对源码与产物做日志调用与前缀常量的双向负向检查（v1.1.3 起
+//  产物里禁止 NSLog / os_log），写日志会让整个构建失败。走 HTTP 是唯一
+//  不碰那条红线的可观测通道 —— 而且它本来就是这个插件的主界面。
+static id OkaXferDiagResponse(void) {
+    UIViewController *page = gXferPage;
+    UIViewController *root = KeyWindow().rootViewController;
+    OkaXferBarControl *ctl = gXferControl;
+
+    NSMutableDictionary *d = [NSMutableDictionary dictionary];
+    [d setObject:(gXferRoute ?: @"none") forKey:@"route"];
+    [d setObject:(gXferHostDesc ?: @"(never)") forKey:@"host"];
+    [d setObject:[NSNumber numberWithInteger:gXferInstallCalls] forKey:@"calls"];
+    [d setObject:[NSNumber numberWithBool:(ctl != nil)] forKey:@"ctlAlive"];
+    [d setObject:[NSNumber numberWithBool:(ctl.superview != nil)] forKey:@"ctlInWindow"];
+    [d setObject:(page ? NSStringFromClass([page class]) : @"(nil)") forKey:@"page"];
+    [d setObject:[NSNumber numberWithInteger:OkaXferStateNow(NO)] forKey:@"state"];
+    [d setObject:[NSNumber numberWithBool:gServerRunning] forKey:@"serverRunning"];
+    [d setObject:[NSNumber numberWithInteger:gServerPort] forKey:@"port"];
+    [d setObject:(root ? NSStringFromClass([root class]) : @"(nil)") forKey:@"rootVC"];
+
+    // 胶囊在屏上的实际几何 —— 「装上了但被挡住 / 尺寸为 0」与
+    // 「压根没装」是两种完全不同的故障，只看 ctlAlive 分不出来。
+    if (ctl) {
+        CGRect f = ctl.frame;
+        [d setObject:[NSString stringWithFormat:@"%.1f,%.1f %.1fx%.1f",
+                      f.origin.x, f.origin.y, f.size.width, f.size.height]
+              forKey:@"frame"];
+        [d setObject:[NSNumber numberWithBool:ctl.hidden] forKey:@"hidden"];
+        [d setObject:[NSNumber numberWithDouble:ctl.alpha] forKey:@"alpha"];
+    }
+
+    Class dataCls = NSClassFromString(@"GCDWebServerDataResponse");
+    SEL selJson = NSSelectorFromString(@"responseWithJSONObject:");
+    if (!dataCls || ![dataCls respondsToSelector:selJson]) { return nil; }
+    typedef id (*OkaJSONResp_t)(id, SEL, id);
+    return ((OkaJSONResp_t)(void *)objc_msgSend)((id)dataCls, selJson, d);
+}
+
 // handler 只注册一次。reload 插件、App 反复 init uploader 都可能重复进入，
 // 重复 addHandlerForMethod 会让 GCDWebServer 抛「handler already registered」。
 //
@@ -2934,9 +3155,15 @@ static void OkaRegisterRawHandler(id server) {
         return OkaStatResponse(strong, request);
     };
 
+    // 自证接口：不依赖 server 实例状态，所以不判 weakServer 是否还活着。
+    OkaProcessBlock_t xferBlock = ^id(id request) {
+        return OkaXferDiagResponse();
+    };
+
     @try {
         fn(server, selAdd, @"GET", @"/oka-raw", reqCls, (id)rawBlock);
         fn(server, selAdd, @"GET", @"/oka-stat", reqCls, (id)statBlock);
+        fn(server, selAdd, @"GET", @"/oka-xfer", reqCls, (id)xferBlock);
         [gOkaRawRegistered addObject:server];
     } @catch (NSException *e) {
         // 注册失败不能让 App 崩。
@@ -3092,6 +3319,21 @@ static void OkaWiFiInit(void) {
                                    (IMP)my_fbcViewWillAppear,
                                    (void **)&orig_fbcViewWillAppear,
                                    "-[FilesBrowserController viewWillAppear:]");
+                // ★ v1.6.12：摘除。本类**没有**实现 viewWillDisappear:，
+                //   走 HookInstanceMethod 会沿继承链改到 UIViewController 上
+                //   （全 App 每个页面都受影响）。返回 YES 说明本类原本没有、
+                //   已由我们补上；返回 NO 说明它自己实现了，才走替换并取原实现。
+                SEL selDis = @selector(viewWillDisappear:);
+                if (!class_addMethod(fbc, selDis,
+                                     (IMP)my_fbcViewWillDisappear, "v@:B")) {
+                    // 返回 NO = 本类原本已实现，才需要取原实现并替换。
+                    HookInstanceMethod(fbc, selDis,
+                                       (IMP)my_fbcViewWillDisappear,
+                                       (void **)&orig_fbcViewWillDisappear,
+                                       "-[FilesBrowserController viewWillDisappear:]");
+                }
+                // 返回 YES = 已由我们补上；orig 保持静态零初始化（NULL），
+                // my_fbcViewWillDisappear 里走 super 转发那一支。
             }
         }
 

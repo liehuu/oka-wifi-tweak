@@ -59,11 +59,54 @@ INJECTIONS = [
      '#define FILESBROWSER_CLASS_MANGLED @"_TtC7Blinker22FilesBrowserController"',
      '#define FILESBROWSER_CLASS_MANGLED @"Blinker.FilesBrowserController"'),
 
-    # ③ 导航栈守卫变成「有括号但不早退」—— 标识符都还在，语义已错
-    ("导航栈守卫不早退（只留空块）",
+    # ③a 退回 v1.6.11 的错误判据：只判 navigationController 非 nil
+    # ★ 这条样本就是 v1.6.11 的真身。它当年能过闸门（因为闸门就是这么写的），
+    #   结果用户装完「什么都没出现」。留作永久反证：判据一放松到这个形态，
+    #   必须立刻变红。
+    ("守卫退回「只判 navigationController 非 nil」（v1.6.11 原错）",
      G.K_NAVGUARD,
-     "    if (!vc.navigationController) return;",
-     "    if (!vc.navigationController) { /* 少了 return */ }"),
+     "    if (nav && nav.topViewController == vc) {",
+     "    if (nav) {"),
+
+    # ③b 栈顶判据写成恒真：拿 topViewController 跟自己比，永远成立
+    # ★ 目标键是 K_NAVGUARD —— 这就是「栈顶判据本身失效」，
+    #   不是回退的问题。判据必须能识别「比的不是本页 vc」。
+    ("栈顶判据写成恒真（topViewController == nav.topViewController）",
+     G.K_NAVGUARD,
+     "    if (nav && nav.topViewController == vc) {",
+     "    if (nav && nav.topViewController == nav.topViewController) {"),
+
+    # ③c 两条回退**同时**退化成空壳：调用点都还在，但都不再 addSubview。
+    # ★ 必须一条样本同时打两处。只掏空一条时另一条仍能挂上去，回退整体
+    #   有效，闸门放行是正确行为 —— 那时判「未拦住」是样本错了，不是闸门有洞。
+    ("两条回退助手同时退化成空壳",
+     G.K_FALLBACK,
+     ("    ctl.translatesAutoresizingMaskIntoConstraints = NO;\n"
+      "    [host addSubview:ctl];",
+      "    ctl.translatesAutoresizingMaskIntoConstraints = NO;\n"
+      "    [bar addSubview:ctl];"),
+     ("    ctl.translatesAutoresizingMaskIntoConstraints = NO;\n"
+      "    (void)host;   // 假装挂上去了",
+      "    ctl.translatesAutoresizingMaskIntoConstraints = NO;\n"
+      "    (void)bar;    // 假装挂上去了")),
+
+    # ③d 自证接口函数被删掉：出故障就没了可查的事实
+    ("删掉自证接口函数",
+     G.K_DIAG,
+     "static id OkaXferDiagResponse(void) {",
+     "static id OkaXferDiagResponseUnused(void) {"),
+
+    # ③e 自证接口写了但没注册成路由
+    ("自证接口未注册成路由",
+     G.K_DIAG,
+     '        fn(server, selAdd, @"GET", @"/oka-xfer", reqCls, (id)xferBlock);',
+     '        (void)xferBlock;'),
+
+    # ③f 没有离开清理
+    ("没有 viewWillDisappear: 清理",
+     G.K_LEAVE_CLEAN,
+     "static void my_fbcViewWillDisappear(id self, SEL _cmd, BOOL animated) {",
+     "static void my_fbcViewWillDisappearUnused(id self, SEL _cmd, BOOL animated) {"),
 
     # ④a 守卫封装里顺序颠倒：先调用后守卫
     ("守卫封装里守卫排在调用之后",
@@ -91,27 +134,21 @@ INJECTIONS = [
     # ⑤a 认出已有胶囊但不 return：会继续往下追加
     ("识别到已有胶囊却没 return",
      G.K_IDEMPOTENT,
-     "            gXferPage = vc;\n"
-     "            OkaXferRefreshAsync();\n"
-     "            return;",
-     "            gXferPage = vc;\n"
-     "            OkaXferRefreshAsync();"),
+     "                    gXferPage = vc;\n"
+     "                    OkaXferNote(@\"A-navitem\", vc.navigationItem);\n"
+     "                    OkaXferStartTicker();\n"
+     "                    OkaXferRefreshAsync();\n"
+     "                    return;",
+     "                    gXferPage = vc;\n"
+     "                    OkaXferNote(@\"A-navitem\", vc.navigationItem);\n"
+     "                    OkaXferStartTicker();\n"
+     "                    OkaXferRefreshAsync();"),
 
-    # ⑤b 按类判重挪到追加之后（先追加再判断，每进一次叠一颗）
-    # ★ 构造要点：必须真的把「判重」搬到 addObject 后面，而不是把循环写空。
-    #   把 `for (it in left)` 改成 `for (it in @[])` 只是让循环不执行，
-    #   判重位置没变 —— 那种样本测的是「循环空了」，不是「顺序错了」。
-    ("按类判重排在 addObject 之后",
+    # ⑤b 复用函数里认出已有胶囊却不复用、也不清别人的
+    ("复用函数不清掉不属于本页的胶囊",
      G.K_IDEMPOTENT,
-     "    NSArray *left = nav.leftBarButtonItems;\n"
-     "    for (UIBarButtonItem *it in left) {\n"
-     "        if ([it.customView isKindOfClass:[OkaXferBarControl class]]) {",
-     "    NSArray *left = nav.leftBarButtonItems;\n"
-     "    for (UIBarButtonItem *it in ({\n"
-     "        NSMutableArray *tmp = [left mutableCopy];\n"
-     "        [tmp addObject:[NSNull null]];\n"
-     "        tmp; })) {\n"
-     "        if ([it.customView isKindOfClass:[OkaXferBarControl class]]) {"),
+     "        else [c removeFromSuperview];      // 别人的：上一页遗留，清掉",
+     "        else (void)c;                      // 别人的：留着"),
 
     # ⑥a 状态文案不等长：胶囊宽度会跳
     ("状态文案不等长（已连接 → 已连接中）",
@@ -239,13 +276,24 @@ def main() -> int:
     missed, wrong_key, collateral = [], [], []
     try:
         # ---- ② 逐条破坏 --------------------------------------------------
+        # ★ old/new 允许是**元组**（多点同时替换）。有些判据的语义是
+        #   「所有同类实现都不能坏」，只打一处另一处仍成立时闸门放行是
+        #   正确行为 —— 那种判据必须一条样本同时打掉全部同类实现，
+        #   否则「未拦住」的结论是样本错了，不是闸门有洞。
         for name, key, old, new in INJECTIONS:
-            if old not in src:
-                print("✗ 样本「%s」的锚点不在当前 Tweak.xm 里（样本过期，需更新）："
-                      % name)
-                print("    锚点: %r" % old[:100])
+            olds = old if isinstance(old, tuple) else (old,)
+            news = new if isinstance(new, tuple) else (new,)
+            if len(olds) != len(news):
+                print("✗ 样本「%s」的 old/new 数量不一致：构造有误。" % name)
                 return 1
-            bad = src.replace(old, new, 1)
+            bad = src
+            for o, n in zip(olds, news):
+                if o not in bad:
+                    print("✗ 样本「%s」的锚点不在当前 Tweak.xm 里（样本过期，需更新）："
+                          % name)
+                    print("    锚点: %r" % o[:100])
+                    return 1
+                bad = bad.replace(o, n, 1)
             if bad == src:
                 print("✗ 样本「%s」注入后内容未变：构造有误。" % name)
                 return 1

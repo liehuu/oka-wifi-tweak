@@ -248,7 +248,7 @@ for sym in CFSocketConnectToAddress startWithOptions:error:; do
 done
 echo "✓ v1.6.7 dylib 自愈链路指纹齐全（回环连接/重放 selector）"
 
-# ---------- 4-0c2) v1.6.11 导航栏 WiFi 传输开关闸门 ----------
+# ---------- 4-0c2) v1.6.11/1.6.12 导航栏 WiFi 传输开关闸门 ----------
 # 用户需求（配截图）：文件列表页导航栏、汉堡按钮右边的空白区放一个 WiFi
 #   传输开关，实时反映「未开启 / 待连接 / 已连接 / 已停止」，点一下能开能关。
 # 这个控件的失效形态全是**静默**的：挂错类 → 界面上什么都没有；不判导航栈
@@ -256,8 +256,13 @@ echo "✓ v1.6.7 dylib 自愈链路指纹齐全（回环连接/重放 selector�
 #   @try 兜不住）；文案不等长 → 导航栏左右抖；只挂 viewDidLoad → 进出一次
 #   选择模式开关永久消失。真机上这些都是「用户说没加」或「崩了」，零日志。
 # 判据抽成独立脚本（不写 heredoc，理由同 4a-5）；反证见 selftest-navswitch.py：
-#   18 个破坏样本，每条都必须让**对应判据键精确变红**（只要求"返回 1"会
+#   23 个破坏样本，每条都必须让**对应判据键精确变红**（只要求"返回 1"会
 #   放过「A 判据误拦了 B 的样本、B 其实没被验证」这种假绿）。
+# ★ v1.6.12 修正：v1.6.11 的「导航栈守卫」判据本身是错的 —— 它要求
+#   `if (!vc.navigationController) return;`，而子控制器沿 parent 链也能拿到
+#   非 nil 的 navigationController，于是 item 被装进**永不渲染**的
+#   navigationItem：不显示、不崩溃、不留日志。判据已改为比 topViewController，
+#   并要求有「非 item 的回退挂法」+ 可查询的自证接口。
 if ! python3 "$ROOT/devkit/check-navswitch.py" "$ROOT/Tweak.xm"; then
   echo "✗ 导航栏 WiFi 传输开关闸门未通过（开关不出现 / 会硬崩 / 状态是假的）"
   exit 1
@@ -266,7 +271,7 @@ if ! python3 "$ROOT/devkit/selftest-navswitch.py" "$ROOT/Tweak.xm"; then
   echo "✗ 导航栏开关反证未过（良性未过，或有破坏样本没被对应判据拦住）"
   exit 1
 fi
-echo "✓ v1.6.11 导航栏开关：11 条判据 + 18/18 破坏反证通过"
+echo "✓ v1.6.12 导航栏开关：14 条判据 + 23/23 破坏反证通过"
 
 # dylib 侧指纹：开关挂载用的 mangled 类名与状态文案。
 #   mangled 类名必须进产物 —— 用 Blinker.FilesBrowserController 查类会

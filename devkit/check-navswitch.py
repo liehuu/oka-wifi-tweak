@@ -33,7 +33,8 @@ import sys
 # 判据键名（selftest 会按集合精确比对，不许名字漂移）
 K_MOUNT_CLASS   = "mountClass"       # 必须真的用文件列表页那个类去查类
 K_MANGLED       = "mangledName"      # 类名必须是 mangled 形式
-K_NAVGUARD      = "navStackGuard"    # 挂之前必须判 navigationController
+K_NAVGUARD      = "stackTopGuard"    # 挂 item 前必须判「本页是不是栈顶」
+K_FALLBACK      = "mountFallback"    # 判不成栈顶时必须有非 item 的挂法
 K_OUTLET_GUARD  = "outletGuard"      # 调 App 入口前必须过 outlet 守卫
 K_IDEMPOTENT    = "idempotent"       # 必须幂等（识别到已有项就早退）
 K_LEN_EQUAL     = "labelLenEqual"    # 四个状态文案等长（宽度不跳）
@@ -42,6 +43,8 @@ K_IVAR_CONN     = "activeConnIvar"   # 用 _activeConnections 真实计数
 K_NO_FAKE_ZERO  = "noFakeZero"       # ivar 缺失返回 -1 而不是 0
 K_TICKER_STOP   = "tickerGuarded"    # 定时器在控件消失时早退
 K_POINT_ONLY    = "pointOnly"        # 点击热区是整个胶囊，不是只有圆点
+K_DIAG          = "diagChannel"      # 必须有可查询的挂载自证接口
+K_LEAVE_CLEAN   = "leaveCleanup"     # 非 item 挂法必须在页面离开时摘掉
 
 STATES = ["未开启", "待连接", "已连接", "已停止"]
 
@@ -169,18 +172,125 @@ def check(src: str):
             "Swift 类在 ObjC 运行时的注册名就是 mangled 形式，"
             "用 Blinker.FilesBrowserController 查不到类，hook 静默不生效。")
 
-    # ---- ③ 挂载函数必须存在，且判导航栈 -------------------------------
+    # ---- ③ 挂 item 前必须判「本页是不是栈顶」，且必须有回退挂法 ----
+    # ★ v1.6.12 修正：v1.6.11 的判据是 `if (!vc.navigationController) return;`，
+    #   而这条判据本身是错的 —— 子控制器沿 parent 链也能拿到非 nil 的
+    #   navigationController，于是 item 被装进一个**永远不被渲染**的
+    #   navigationItem：不显示、不崩溃、不留日志。用户实测「装了什么都不出现」。
+    #   真正决定「item 会不会被画」的是 topViewController，不是非 nil。
     inst = _fn_body(code, "OkaInstallXferSwitch")
     if inst is None:
         bad(K_NAVGUARD, "找不到 OkaInstallXferSwitch 函数体：挂载逻辑没落地。")
+        bad(K_FALLBACK, "找不到 OkaInstallXferSwitch 函数体：无法确认回退挂法。")
         bad(K_IDEMPOTENT, "找不到 OkaInstallXferSwitch 函数体：无法确认幂等。")
     else:
-        # navigationItem 是懒建的，非 nil 不代表有导航栏；必须是早退形态
-        # （写成 if (...) { 整段 } 容易被后续插进括号外的代码绕开）。
-        if not re.search(r"if\s*\(\s*!\s*vc\.navigationController\s*\)\s*return\s*;", inst):
+        # 判据必须精确到「拿 topViewController 跟**本页 vc** 比」。
+        # ★ 写成 `\.topViewController\s*==\s*\w+` 是错的：右侧随便什么标识符
+        #   都算过，`nav.topViewController == nav.topViewController` 这种
+        #   恒真写法照样能蒙过去 —— 那等于判据不存在。必须锁到 vc。
+        if not re.search(r"\.topViewController\s*==\s*vc\b", inst):
             bad(K_NAVGUARD,
-                "挂载函数里没有 `if (!vc.navigationController) return;` 早退："
-                "页面不在导航栈里时 item 是孤儿，用户永远看不到，也不会报错。")
+                "挂 item 前没有判 `navigationController.topViewController == vc`："
+                "子控制器沿 parent 链也能拿到非 nil 的 navigationController，"
+                "只判非 nil（或跟别的对象比）会把 item 装进永不渲染的 "
+                "navigationItem —— 界面上什么都不出现，也不报错"
+                "（v1.6.11 的实际故障）。")
+
+        # 回退挂法：判不成栈顶时必须还有别的落点。
+        # ★ 判据纪律：不能只查「addSubview: 这个词出现过」——
+        #   把回退分支写成 `if (0) { ...addSubview... }` 照样能让那个词出现，
+        #   而运行时永远走不到。也不能只查「调用了 OkaXferAttachToNavBar」——
+        #   被调函数体里若没有 addSubview，标识符在也挂不上去。
+        #   三个条件同时成立才算回退有效：
+        #     ① 挂载函数里真的调了某条回退（不是只有分支骨架）；
+        #     ② 那个调用不在恒假条件里（可达）；
+        #     ③ 被调的挂载助手函数体里真的有 addSubview + 约束。
+        def _mounts_into(fn_name, host):
+            """助手函数体里是否真的把 ctl 挂到 host 上。
+
+            两种 ObjC 写法都要认，不能只认一种：
+                [host addSubview:ctl];     ← 方括号发送，宿主在方法名前面
+                addSubview: host            ← 极少见，但语法上也存在
+            旧写法只匹配「addSubview: 后面跟宿主」，而真实源码是
+            [bar addSubview:ctl] —— 宿主在方法名**前面**，
+            于是这条判据对正确实现也报 FAIL（假红），
+            正是「判据错了不是代码错了」那一类。
+            """
+            body_ = _fn_body(code, fn_name) or ""
+            return (re.search(r"\[\s*%s\s+addSubview\s*:" % host, body_) is not None
+                    or re.search(r"addSubview\s*:\s*%s\b" % host, body_) is not None)
+
+        def _call_reachable(callee):
+            """挂载函数里对 callee 的调用是否不在恒假条件内。"""
+            for m in re.finditer(r"\b%s\s*\(" % re.escape(callee), inst):
+                # 往回找最近的 if (...) 看是不是恒假
+                head = inst[max(0, m.start() - 200):m.start()]
+                dead = re.findall(r"if\s*\(\s*(?:0|false|NO)\s*\)\s*\{[^{}]*$", head)
+                if not dead:
+                    return True
+            return False
+
+        # B 分支：调 AttachToNavBar，且它真的往 bar 上挂东西
+        b_ok = (_call_reachable("OkaXferAttachToNavBar")
+                and _mounts_into("OkaXferAttachToNavBar", "bar"))
+        # C 分支：调 AttachToView，且它真的往 host 上挂、并约束到 safeArea
+        c_body = _fn_body(code, "OkaXferAttachToView") or ""
+        c_ok = (_call_reachable("OkaXferAttachToView")
+                and _mounts_into("OkaXferAttachToView", "host")
+                and "safeAreaLayoutGuide" in c_body)
+
+        if not (b_ok or c_ok):
+            bad(K_FALLBACK,
+                "判不成栈顶之后没有**可达且真的挂上去**的回退："
+                "B 分支要真的调 OkaXferAttachToNavBar 往 navigationBar addSubview，"
+                "C 分支要真的调 OkaXferAttachToView 往 host addSubview 并约束到 "
+                "safeArea，且调用不能被包在恒假条件里。"
+                "只把标识符留在源码里、运行时走不到，等于没有回退 —— "
+                "这一页若不是栈顶，开关仍然不出现。")
+
+    # ---- ⑫ 必须有可查询的挂载自证接口 -------------------------------
+    # v1.6.11 的教训：挂错了没有任何痕迹可查，用户只说「没出现」，
+    # 本机又没有编译器和越狱设备，只能靠静态反汇编猜，猜错一次一个版本。
+    # ★ 三个条件都要成立，缺一不可：
+    #   ① 函数**有定义**（不是只有调用点 —— 只查调用点的话，
+    #      把定义改名成 OkaXferDiagResponseUnused 后，block 里那句
+    #      OkaXferDiagResponse() 调用点仍能让判据误以为通过）；
+    #   ② 它被注册成 GET /oka-xfer 路由（否则查不到）；
+    #   ③ 定义体里真的产出了内容（不是空壳 return nil）。
+    diag_def = re.search(r"static\s+id\s+OkaXferDiagResponse\s*\(\s*void\s*\)\s*\{",
+                         code)
+    if not diag_def:
+        bad(K_DIAG,
+            "没有挂载自证接口 OkaXferDiagResponse 的**定义**："
+            "开关不出现时只能靠猜，无法确认走的是哪条挂载路径。")
+    else:
+        diag_body = _fn_body(code, "OkaXferDiagResponse") or ""
+        if not re.search(r'forKey\s*:\s*@"route"', diag_body):
+            bad(K_DIAG,
+                "自证接口没有输出 route 字段："
+                "查出来也不知道走的是 A/B/C 哪条挂载路径。")
+        if not re.search(r'@"GET"\s*,\s*@"/oka-xfer"', code):
+            bad(K_DIAG,
+                '自证接口没有注册成 GET /oka-xfer 路由：函数写了但查不到。')
+
+    # ---- ⑬ 非 item 挂法必须在页面离开时摘掉 ---------------------------
+    # navigationBar / vc.view 挂上去的胶囊不归导航栏管，页面切走不会自己消失，
+    # 会顶在下一页的顶栏上。
+    # ★ 同样用词边界：「函数改名」不等于「清理实现了」，必须查注册处。
+    if not re.search(r"\bmy_fbcViewWillDisappear\s*\(", code):
+        bad(K_LEAVE_CLEAN,
+            "没有 viewWillDisappear: 清理：挂到 navigationBar / view 上的胶囊"
+            "会在页面切走后留在屏上，顶到下一页顶栏。")
+    else:
+        # 定义了还必须真注册（class_addMethod 或 HookInstanceMethod 都算，
+        # 因为本类原本没实现这个方法，两种注册方式都是有效的）。
+        reg = re.search(r"(?:class_addMethod|HookInstanceMethod)\s*\(\s*fbc\s*,\s*"
+                        r"(?:selDis|@selector\s*\(\s*viewWillDisappear:\s*\))"
+                        r"[\s\S]{0,200}?my_fbcViewWillDisappear", code)
+        if not reg:
+            bad(K_LEAVE_CLEAN,
+                "viewWillDisappear: 清理函数没有被注册到 fbc 上："
+                "函数写了但挂不上去，页面离开时不会摘胶囊。")
 
     # ---- ④ 调 App 入口前必须过 outlet 守卫 -----------------------------
     # App 的 changeWifiTransferStateAction: 在 outlet 为 nil 时走 brk #1，
@@ -235,25 +345,42 @@ def check(src: str):
                 "守卫结果可能没被真正用于拦截。")
 
     # ---- ⑤ 幂等：识别到已有项就必须早退 -------------------------------
+    # v1.6.12 起判重分散在两处：
+    #   · 路径 A 在 leftBarButtonItems 里按 customView 的类找；
+    #   · 路径 B/C 在宿主 subviews 里按类找（OkaXferReuseIn）。
+    # 两处都必须「认出 → 复用/早退」，不能认出来还继续往下追加。
     if inst is not None:
-        i_scan = inst.find("isKindOfClass")
-        i_append = inst.find("addObject")
-        if i_scan < 0 or "OkaXferBarControl class" not in inst:
+        # A：item 数组里按类判，且**认出后必须停下**
+        if "OkaXferBarControl class" not in inst:
             bad(K_IDEMPOTENT,
                 "挂载函数里没有按类（OkaXferBarControl）判已有项："
-                "无法识别「我上次装的还在不在」，幂等无从谈起。")
-        elif i_append >= 0 and i_scan > i_append:
+                "无法识别「我上次装的还在不在」，viewWillAppear 每进一次就叠一个。")
+        else:
+            # ★ 「认出来了」不等于「停下了」。缺 return 会继续往下走到
+            #   addObject，每次进页面多叠一颗。必须比位置，不能只比存在。
+            i_scan = inst.find("OkaXferBarControl class")
+            i_append = inst.find("addObject")
+            tail = inst[i_scan:i_append] if i_append > i_scan else inst[i_scan:]
+            if i_append > i_scan and not re.search(r"\breturn\b", tail):
+                bad(K_IDEMPOTENT,
+                    "路径 A 识别到已有胶囊后没有 return 早退：会继续往下追加，"
+                    "viewWillAppear 每进一次就多叠一颗。")
+        # B/C：宿主 subviews 里按类判，且必须有复用函数
+        reuse = _fn_body(code, "OkaXferReuseIn")
+        if reuse is None:
             bad(K_IDEMPOTENT,
-                "按类判已有项出现在 addObject 之后：先追加再判断，"
-                "viewWillAppear 每进一次就叠一个。")
-        elif not re.search(r"\breturn\b",
-                           inst[i_scan:i_append] if i_append > i_scan
-                           else inst[i_scan:]):
-            # ★ 这条是本判据的核心：「认出来了」不等于「停下了」。
-            #   缺 return 会继续往下走到 addObject，每次进页面多叠一颗胶囊。
-            bad(K_IDEMPOTENT,
-                "识别到已有胶囊后没有 return 早退：会继续往下追加，"
-                "viewWillAppear 每进一次就多叠一颗。")
+                "找不到 OkaXferReuseIn：挂到 navigationBar / view 上的路径没有判重，"
+                "每次 viewWillAppear 都会再挂一颗。")
+        else:
+            if "isKindOfClass" not in reuse:
+                bad(K_IDEMPOTENT,
+                    "OkaXferReuseIn 里没有按类识别已有胶囊：无法复用，只会叠加。")
+            # 认出别人的胶囊要清掉（导航栏跨页复用，上一页的会留下来）
+            if not re.search(r"removeFromSuperview", reuse):
+                bad(K_IDEMPOTENT,
+                    "OkaXferReuseIn 没有清掉**不属于本页**的胶囊："
+                    "navigationBar 是跨页复用的同一个 view，"
+                    "上一页挂上去的会显示在别的页顶栏上。")
         if "leftBarButtonItems" not in inst:
             bad(K_IDEMPOTENT,
                 "挂载函数里没读 leftBarButtonItems："
@@ -359,7 +486,7 @@ def main() -> int:
         return 2
     src = open(sys.argv[1], encoding="utf-8", errors="replace").read()
     fails, notes = check(src)
-    total = 11
+    total = 14
     if fails:
         print("✗ 导航栏 WiFi 传输开关（v1.6.11）判据不满足：%s"
               % ",".join(sorted(fails)))
