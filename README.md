@@ -692,6 +692,8 @@ sh devkit/build.sh arm64  iphoneos-arm    1.2.0   # 传统 rootful
 | `devkit/selftest-service-heal.py` | 上面那个闸门的反证：10 个破坏样本（每个精确触发一个判据键）+ 1 个良性注释变更。注入锚点按**函数体作用域**替换（v1.6.11 起开关自己也会发一次同样的 start 重放，全文替换会误改开关那一处，把判据摊薄） | CI 的 Service heal gate；本地可跑 |
 | `devkit/check-navswitch.py` | v1.6.11 导航栏 WiFi 传输开关闸门，11 条判据：查类必须用 `FILESBROWSER_CLASS_MANGLED` 且值为 mangled 形式；挂载函数必须是 `if (!vc.navigationController) return;` 早退；调 App 入口前必须过 `OkaXferOutletsReady`（四个 outlet 齐全、守卫在调用之前、`!` 早退真实存在，且每处调用点所在函数在受守卫名单内）；幂等要求「按类识别 → 命中即 return」且判重在 `addObject` 之前；四状态文案从源码实际赋值里取长度比对；`viewDidLoad` 与 `viewWillAppear:` 两个 selector 都必须真注册；`_activeConnections` 必须直读 ivar 并校验类型编码；`if (!iv)` 必须返回 -1；定时器回调必须有 `if (!gXferControl) return;`；手势必须挂在胶囊自身而非 `_dot` | `build.sh` 内；CI 的 Nav switch gate 同代码 |
 | `devkit/selftest-navswitch.py` | 上面那个闸门的反证：18 个破坏样本，每个都要求**对应判据键精确变红**（只断言"返回 1"会放过「A 误拦 B 的样本、B 从未被验证」的假绿）+ 2 个良性扰动（注释 / 改变量名）证明判据不过严 + 还原复跑 + 磁盘 sha256 前后一致 | CI 的 Nav switch gate；本地可跑 |
+| `devkit/check-dylib-fingerprint.py` | v1.6.11 产物层指纹：dylib 里必须有 mangled 类名、`okaApplyState` selector 与四个状态文案。**中文文案按 UTF-16LE 找**——ObjC 的 `@"未开启"` 在 Mach-O 里就是 UTF-16LE，用 `grep -a 未开启`（UTF-8 字节）必然找不到；而 macOS 自带 BSD grep 没有 `-P` 不能按字节匹配。要求 `okaApplyState` 存在是为了排除「文案写进死数组、没人渲染」 | `build.sh` 内 |
+| `devkit/selftest-dylib-fingerprint.py` | 上面那个指纹判据的反证，用构造的假 dylib（不需要 iOS SDK）：2 良性（UTF-16LE / UTF-8 两种编码）+ 6 破坏（缺一个文案 / 近形字替换 / 缺 selector / 缺 mangled 名 / 空文件 / 文件不存在），每个破坏样本的失败理由必须各不相同 | CI 的 Nav switch gate；本地可跑 |
 | `node --check web/oka-wifi.js` | 用真实 JS 解析器验语法（不是正则数括号）；runner 缺 node 时**明确报错**，不静默跳过 | CI 的 Web assets gate |
 
 `build.sh` 里还有一层**网页交互指纹闸门**（v1.1.5 起逐版扩充）：要求 JS 里出现一组关键符号名
@@ -819,7 +821,8 @@ v1.1.3 起插件**不输出任何系统日志**，所以判据一律看功能表
 | 复制出来的链接端口不对 / 是写死的 8080 | 不是本插件的行为（端口取自 `location`，代码里没有字面量 `8080`） | 若看到非 `location` 来的端口，说明装的不是 v1.2.0；正常情况端口必然与手机页面顶部显示的地址一致 |
 | 系统日志里还能看到 `[OkaWiFi]` | 装的不是 v1.1.3（或更早） | v1.1.3 起源码和产物里都不会有 `NSLog` / `[OkaWiFi]`；确认装的是 1.1.3 的包并重启 App |
 | CI 的 Build 步骤报 `sed: rename(): No such file or directory` | 脚本里写了 GNU-only 的 `sed -i`（v1.6.6 mkdeb.sh 引入过） | macOS 自带 BSD sed 的 `-i` 必须带 backup 后缀，脚本形式直接被当后缀、rename 失败；本地 Git Bash（GNU sed）跑得通所以看不出。改成 `sed + 临时文件 + mv`（参考 `mkdeb.sh` 的 `sub_file`），并跑 `python3 devkit/check-shell.py .`（R8） |
-| CI 报 `CPU: unbound variable`，但编译和签名都成功了 | 某行 `echo` 里写了 `$CPU，`（后跟全角标点） | macOS 的 bash 3.2 把 `0xEF` 吞进变量名。改 `${CPU}`，并跑 `python3 devkit/check-shell.py .` 扫全仓库 |
+| CI 报 `✗ dylib 缺 未开启`，但构建日志里前面明明写着「v1.6.11 导航栏开关：11 条判据 + 18/18 破坏反证通过」 | 产物指纹判据用了 `grep -a 未开启` 按 UTF-8 搜。ObjC 的 `@"未开启"` 在 Mach-O 里是 **UTF-16LE**（每个 ASCII 也带 `0x00` 高位），UTF-8 字节序列永远搜不到；而 macOS 自带 BSD grep 又没有 `-P` | **这是判据错了，不是产物缺东西。** 用 `devkit/check-dylib-fingerprint.py`（按 UTF-16LE / UTF-8 两种编码找）。记住本工程的老教训：假 FAIL 比漏报更能把人带偏，先问「是代码错了还是判据错了」 |
+| CI 报 `tree 不一致：重建=eda2423... 本地=18c4c1e...` 而 `git status` 是干净的 | `push-via-api.py` 早期版本用 `open(path,"rb")` 读磁盘再上传，而工作区文件是 CRLF（`.gitattributes` 的 `text=auto`）、提交里存 LF | blob 必须从提交对象取：`git cat-file blob <sha>:<path>`。**注意 `git hash-object` 会过 eol 过滤器报 SAME**，与 API 走的原始字节不是一回事，容易误判成「文件没问题」。已修 |
 | CI 的 Verify deb 步骤报 `IndentationError` 或 YAML `ScannerError` | 在 `run: \|` 里内嵌了 Python heredoc | 这两个错误互斥、无解：YAML 要缩进、Python 要顶格。校验逻辑必须外置成 `.py` 文件 |
 | 蜂窝/热点下能开启，但服务器地址显示 `unknown` | `Helper.uploaderUrl` 在 `serverURL == nil` 时返回 Swift 常量 `"unknown"`（framework `0x713C` 的 `mov/movk` 立即数已确认）。前两版改 UI 控件没打中源头 | **v1.0.2 直接 hook `-[GCDWebServer serverURL]`** 返回正确 NSURL。应急仍可用电脑浏览器直接开 `http://172.20.10.1:8080` |
 | 服务没在跑时地址保持空白 / `unknown` | 故意不写假地址 | 这是正确状态；v1.0.2 起端口由 `[self port]` 直取，探测不到也会采信 |
@@ -891,6 +894,8 @@ wifitweak/
 │   ├── selftest-service-heal.py # 上面这个闸门的反证：10 破坏样本 + 1 良性样本
 │   ├── check-navswitch.py      # v1.6.11 导航栏 WiFi 传输开关闸门（挂载类/导航栈守卫/outlet 守卫/幂等/文案等长/双 hook/真实连接数/定时器守卫/热区）
 │   ├── selftest-navswitch.py   # 上面这个闸门的反证：18 破坏样本（精确命中判据键）+ 2 良性扰动
+│   ├── check-dylib-fingerprint.py    # v1.6.11 dylib 指纹（mangled 类名 + okaApplyState + 四状态文案，中文按 UTF-16LE 找）
+│   ├── selftest-dylib-fingerprint.py # 上面这个指纹判据的反证：2 良性 + 6 破坏（假 dylib，无需 SDK）
 │   ├── verify-deb.py           # deb / 裸 dylib 校验（纯标准库，自己读 Mach-O）
 │   ├── selftest-verify.py      # 上面这个校验器的自测：29 用例（正向 5 / 反向 24），证明它会失败
 │   └── include/
