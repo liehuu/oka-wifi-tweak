@@ -288,6 +288,29 @@ echo "✓ v1.6.12 导航栏开关：14 条判据 + 23/23 破坏反证通过"
 python3 "$ROOT/devkit/check-dylib-fingerprint.py" "$BUILD/$NAME.dylib" \
   || { echo "✗ dylib 缺导航栏开关指纹（开关会不出现 / 状态显示错 / 挂错类）"; exit 1; }
 
+# ---------- 4-0c3) 版本号一致性（v1.6.12） ----------
+# 设置面板「插件版本」行显示的是 OKA_BUILD_TAG，README 排错表也让人按它
+# 核对「装的到底是哪一版」。这两处只要和 $VERSION 对不上，用户就会被骗：
+# 功能是新的、版本号是旧的 —— 比完全不显示更像"没更新"。
+# v1.6.12 首轮就是漏改这一行（产物里仍是 v1.6.11），死代码里没任何判据查它。
+#
+# 双端都查：源码里的 #define 与产物里的实际字符串。只查源码挡不住
+# 「宏没被用到 / 被别的值覆盖」；只查产物说不清是哪一行写错了。
+# 判据键 buildTagMatch（Tweak.xm 的注释里按这个名字引用）。
+_tag=$(sed -n 's/^#define OKA_BUILD_TAG @"\(.*\)"$/\1/p' "$ROOT/Tweak.xm" | head -1)
+if [ -z "$_tag" ]; then
+  echo "✗ [buildTagMatch] Tweak.xm 里找不到 #define OKA_BUILD_TAG @\"...\""
+  exit 1
+fi
+if [ "$_tag" != "v$VERSION" ]; then
+  echo "✗ [buildTagMatch] 版本号不一致：Tweak.xm 的 OKA_BUILD_TAG=${_tag}，但本次构建 VERSION=${VERSION}"
+  echo "  设置面板会显示 ${_tag}，用户按它核对版本会被误导"
+  exit 1
+fi
+grep -aqF "$_tag" "$BUILD/$NAME.dylib" \
+  || { echo "✗ [buildTagMatch] dylib 里没有版本串 ${_tag}（宏没被编进去）"; exit 1; }
+echo "✓ [buildTagMatch] 版本号一致：源码 OKA_BUILD_TAG=${_tag} == VERSION=v${VERSION}，且已编入产物"
+
 # ---------- 4-0d) v1.6.10 postinst 注入残留清理 ----------
 # 桌面动态图标（红染绿）v1.6.10 移除后，**旧版本可能已经注入过**宿主
 #   .app（CFBundleAlternateIcons 声明 + OkaIconGreen PNG + OkaIconInjected

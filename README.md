@@ -364,6 +364,13 @@ if (!vc.navigationController) return;   // ← 这条判据本身是错的
 
 其中一条破坏样本就是 **v1.6.11 的真身**（「守卫退回只判 `navigationController` 非 nil」）。它当年能过闸门，因为闸门就是这么写的——现在留作永久反证：判据一放松回那个形态，立刻变红。
 
+**v1.6.12 首轮构建为什么全红（两处自己打自己）**：修完挂载逻辑推上去，三个 job 全部 failure，而且**闸门全绿、卡在编译**。两个原因，都不是编译错误：
+
+1. **诊断日志闸门把自己的注释当调用。** 那条判据当时是 `build.sh` 里的一行裸 shell：`grep -n 'NSLog' Tweak.xm`。而我这次在 `OkaXferDiagResponse` 上方写了一整段说明——「产物里禁止 NSLog / os_log，写日志会让整个构建失败」——文档里提到这个名字，裸 grep 就当代码命中，直接 `exit 1`。同一个坑本仓库踩过两次（v1.1.8 的 `window.location`、v1.6.3 的 hover 闸门 6 条假红），教训写过两遍还是自己踩。现改为 `devkit/check-nolog.py`：**先剥注释再查**，剥离器自身先做单元自证（自证失败 exit 2 不放行——剥离器坏了却继续判，等于所有判据一起变瞎）。
+2. **同一条判据承诺了 `os_log` 却从来没查。** 注释从 v1.1.3 起就写着「禁止 NSLog / os_log」，代码只查 `NSLog`。一条不出现的规则就是永远通过的规则——现已补上 `os_log` 一族与 `LOG(` 宏。
+
+顺带修掉一个**真实缺陷**（不是构建问题，是产物问题）：`#define OKA_BUILD_TAG` 忘了从 `v1.6.11` 改成 `v1.6.12`，产物里编进去的仍是旧版本号，而设置面板「插件版本」行显示的正是它。功能是新的、版本号是旧的，比不显示更误导人（按 README 排错表核对版本会得出「没更新」的错误结论）。现已加判据：源码的 `OKA_BUILD_TAG` 必须等于 `v${VERSION}`，且该串必须真的出现在 dylib 里。
+
 ### 功能 3 —— 电脑网页端增强（v1.1.1 定型，v1.1.2 ~ v1.2.0 持续增强）
 
 **约束**：不能改 App 包内 `GCDWebUploader.bundle/Contents/Resources/` 的任何文件，那会破坏代码签名。所以采用「构建期把前端资源编进 dylib + 运行时注入 HTML」。
@@ -722,6 +729,7 @@ sh devkit/build.sh arm64  iphoneos-arm    1.2.0   # 传统 rootful
 | `devkit/selftest-navswitch.py` | 上面那个闸门的反证：23 个破坏样本，每个都要求**对应判据键精确变红**（只断言"返回 1"会放过「A 误拦 B 的样本、B 从未被验证」的假绿）+ 2 个良性扰动（注释 / 改变量名）证明判据不过严 + 还原复跑 + 磁盘 sha256 前后一致 | CI 的 Nav switch gate；本地可跑 |
 | `devkit/check-nolog.py` | v1.1.3 诊断日志负向闸门，**v1.6.12 重写**：查 `NSLog(` / `os_log` 一族 / `LOG(` 宏三类调用，全部跑在**剥注释后**的源码上，并先对剥注释器自证（自证失败 exit 2，不放行）。原来这段是 `build.sh` 里的裸 `grep 'NSLog'`，两个缺陷：连注释算命中（v1.6.12 首轮 CI 三个 job 全 red 的**直接原因**）、注释从 v1.1.3 起就写着「禁止 NSLog / os_log」却只查 NSLog | `build.sh` 内；CI 的 Diagnostic log gate 同代码 |
 | `devkit/selftest-nolog.py` | 上面那个闸门的反证：5 个良性（注释 / 字符串里提到 `NSLog`、`os_log`、`LOG(` 都不许误报）+ 6 个破坏（真写调用必须红，且**断言报出的行号与命中词**——只判 exit 码的话，剥离器把整段代码剥没了也会"通过"）+ 1 个剥离器退化（把 `strip_comments` 换成恒等函数，必须 exit 2 而不是放行） | CI 的 Diagnostic log gate；本地可跑 |
+| （`build.sh` 4-0c3 段）版本号一致性 | `OKA_BUILD_TAG` 必须等于 `v${VERSION}`，且该串必须真的编进 dylib。设置面板「插件版本」行显示的正是它，README 排错表也让人按它核对装的是哪一版。v1.6.12 首轮就是漏改这一行，产物里仍是 `v1.6.11`——功能是新的、版本号是旧的，比不显示更误导人 | `build.sh` 内（无独立脚本，因为它要读 `$VERSION`） |
 | `devkit/check-dylib-fingerprint.py` | v1.6.11 产物层指纹：dylib 里必须有 mangled 类名、`okaApplyState` selector 与四个状态文案。**中文文案按 UTF-16LE 找**——ObjC 的 `@"未开启"` 在 Mach-O 里就是 UTF-16LE，用 `grep -a 未开启`（UTF-8 字节）必然找不到；而 macOS 自带 BSD grep 没有 `-P` 不能按字节匹配。要求 `okaApplyState` 存在是为了排除「文案写进死数组、没人渲染」 | `build.sh` 内 |
 | `devkit/selftest-dylib-fingerprint.py` | 上面那个指纹判据的反证，用构造的假 dylib（不需要 iOS SDK）：2 良性（UTF-16LE / UTF-8 两种编码）+ 6 破坏（缺一个文案 / 近形字替换 / 缺 selector / 缺 mangled 名 / 空文件 / 文件不存在），每个破坏样本的失败理由必须各不相同 | CI 的 Nav switch gate；本地可跑 |
 | `node --check web/oka-wifi.js` | 用真实 JS 解析器验语法（不是正则数括号）；runner 缺 node 时**明确报错**，不静默跳过 | CI 的 Web assets gate |

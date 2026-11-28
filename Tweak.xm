@@ -106,7 +106,13 @@
 //   旧版本注入的残留由 postinst 幂等清理（删标记键 + 删 PNG）。
 //   v1.6.11：文件列表页导航栏加 WiFi 传输开关（胶囊控件）；
 //   开关状态取自 GCDWebServer 的真实运行态与活跃连接数，不猜。
-#define OKA_BUILD_TAG @"v1.6.11"
+//   v1.6.12：修 v1.6.11 开关完全不出现 —— 判据从「navigationController
+//   非 nil」改为「nav.topViewController == vc」，并补两条回退挂法。
+// ★ 这个值必须与 CI 的 VERSION 一致：设置面板「插件版本」行直接显示它，
+//   README 排错表也让人按它核对装的是哪一版。v1.6.12 首轮就是漏改这一行，
+//   产物里仍是 v1.6.11 —— 功能是新的、版本号是旧的，比不显示更误导人。
+//   build.sh 有一条判据查它（buildTagMatch），漏改直接构建失败。
+#define OKA_BUILD_TAG @"v1.6.12"
 
 static NSString *const kPrefsPath = @"/var/mobile/Library/Preferences/com.oka.wifitweak.plist";
 
