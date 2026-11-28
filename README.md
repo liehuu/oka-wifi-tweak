@@ -1,13 +1,13 @@
 # Oka WiFi 传输增强（com.oka.wifitweak）
 
-针对 **Oka Files / Blinker 1.7.5**（`com.blinker.documents`）的越狱插件，实现四组功能：
+针对 **Oka Files / Blinker 1.7.5**（`com.blinker.documents`）的越狱插件，实现五组功能（功能 4 桌面动态图标 v1.6.10 已移除，编号保留不变）：
 
 | # | 功能 | 效果 |
 |---|---|---|
 | 1 | 桌面长按快捷开启 | 长按图标出现「开启 WiFi 传输」，点一下直接启动服务，地址自动复制到剪贴板并弹窗提示。不用进 App、不用点按钮 |
 | 2 | 蜂窝 / 热点可开启 | 用手机流量或个人热点时，WiFi 传输页面的「开始」按钮正常出现，可正常开启；且显示的地址是手机在热点网段的真实 IP（`172.20.10.1` 这类），不再是 `unknown` |
 | 3 | 电脑网页端增强（v1.1.8） | 保留原 `Upload Files` 按钮；**整个页面就是放置区**（没有独立拖放框），把单个/多个文件、整个文件夹拖进网页任意位置即可上传（拖入时全屏提示 + 成功/失败汇总 + 失败重试）；**复用原版行末「移动」按钮与原弹窗**，增强为目录浏览 + 可勾选批量移动 + 结果反馈。v1.1.2：**文件夹置顶**、**顶部紧凑**、**任务面板默认折叠**；v1.1.5：文件夹琥珀黄 + 行内重命名按钮；**v1.1.6：删除按钮挪到最右、重命名在它左边；文件名左侧整片区域点一下即选中；每行新增下载按钮，文件直接下载、整个文件夹自动打成 ZIP；点行不再下载**；**v1.1.7：点文件夹行进入目录、点文件行在线预览 txt / pdf / mp4 / 图片 / 音频；目录 ZIP 显式带顶层文件夹；图标列按文件类型显示不同图标**；**v1.1.8：下载改 Blob 保存，不再触发 Chrome「已阻止不安全的下载」；PDF 预览可用；目录下载不再引发 IDM 弹一堆窗口**；**v1.1.9：彻底删掉导航式下载（「等二三十秒 + 已阻止不安全的下载 + IDM 接管」的根因）；每行显示最后修改时间**；**v1.2.0：每行新增「复制下载链接」，把真实下载地址发给别人，对方浏览器 / IDM / 迅雷直接下载** |
-| 4 | 桌面动态图标（v1.6.6） | WiFi 传输开着时，桌面 App 图标自动切成「红染绿」版（把现在默认图标上的红色替换成绿色）；关掉时自动切回默认原图标。四个同步点兜底（启动成功 / 停服 / 冷启动 / 回前台），**关态与未启用态同图**——不会把没生效骗成已生效；切换只调 iOS 公开 API，不碰 App 签名 |
+| 4 | 桌面动态图标（v1.6.6 引入，**v1.6.10 已移除**） | 曾实现「WiFi 传输开着时桌面 App 图标自动红染绿、关时回默认原图标」。v1.6.6–v1.6.9.2 六个版本持续修注入链路，真机始终未生效（用户 2026-11-28 最终反馈「没生效」）。v1.6.10 整体移除：dylib 切换链、安装期 helper、共源常量头与全部正向闸门已删，构建改负向闸门防回流；装 / 卸 deb 都会顺手清理旧版可能注入的残留（见「功能 4」节）。**功能 1 / 2 / 3 / 5 不受影响** |
 | 5 | 服务假死自愈（v1.6.7） | 开着 WiFi 传输放着不管，监听 socket 可能被系统回收而「假死」：实例 `isRunning` 仍报 YES、宿主显示「已连接」，但电脑网页打不开。v1.6.7 起每 45s 用**本地回环 connect 实测**端口（不读恒 YES 的 `isRunning`），回前台时也顺手探一次；确认死了就自动重放一次「关开」（同一条 hook 路，suspend=NO / 密码头 / 端口 fallback 全量补齐），90s 内不重复。可用 `ServiceHeal` 偏好关掉 |
 
 > **v1.1.9：下载慢/被拦的真正根因已清除，并新增「最后修改时间」列。**
@@ -276,50 +276,21 @@ _GCDWebServerGetPrimaryIPAddress 硬编码 strcmp(ifa_name,"en0")
    - 挂**后台保活**（`AVAudioSession` Playback + 循环播放 App 自带的 `Happy Dreams.mp3`，音量 0）——否则切到后台几秒后进程被挂起、端口就断了；
    - 等 1.5s 读 App 自己写进 `ipAddress.text` 的 URL（`Helper` 是纯 Swift 类，ObjC runtime 反射不到 `uploader`）；读不到再用「本机 IP + 端口」兜底，复制到剪贴板并弹窗显示。
 
-### 功能 4 —— 桌面动态图标（v1.6.6）
+### 功能 4 —— 桌面动态图标（v1.6.6 引入，**v1.6.10 移除**）
 
-**需求原文的三条红线**：功能要安全稳定，不能有时生效有时不生效、也不能图标没切换反而误导；不能破坏 App 签名导致打不开；不用灰度图，把**现在默认的图标当作「关」**、把默认图标上**红色替换成绿色**当作「开」。
+**已移除，不再装载任何代码。** v1.6.6 曾实现「WiFi 传输开着时桌面 App 图标自动红染绿、关时回默认原图标」，方案分两半：**注入方**是安装期 helper（`devkit/iconinject.m`，root，postinst 调用）把宿主 `.app` 里默认主图标按像素规则染成绿色，连同 `CFBundleIcons → CFBundleAlternateIcons` 声明与两张 PNG 一起落盘（dylib 跑在 App 沙箱里写不了 `.app`，只能由安装期完成）；**切换方**是 dylib 里的 `OkaSetAppIcon`，只在四个同步点（启动成功 / 停服 / 冷启动 / 回前台）调公开 API `setAlternateIconName:completionHandler:`，关态回 `nil`（= 默认原图），所以「未启用」与「已关闭」桌面同图、不破坏 App 签名。红→绿映射判定 `r ≥ 89 且 r > g×1.7 且 r > b×1.7`、映射 `G'=R×1.06、R'=R×0.12、B'=R×0.10`，曾是可单测纯函数（随功能一并删除）。
 
-**为什么只能是「安装期注入 + 公开 API 切换」**（逐条排除过）：
+**为什么移除**：v1.6.6 → v1.6.9.2 六个版本持续修注入链路——v1.6.7 修状态行与面板行序、v1.6.9.2 修装机形态门控口径（旧口径把「App Store 原版但无 `iTunesMetadata.plist`」的宿主误判成非原版、注入被白白跳过）——用户真机始终反馈「没生效」，2026-11-28 决定移除。v1.6.10 起：dylib 切换链（`OkaSetAppIcon` / 四同步点 / 面板三态行）、helper 三件套（`iconinject.m` / `iconinject-core.h` / `selftest-iconinject.c`）、共源常量头 `oka-icon-common.h`、正向闸门（`check-icon-switch.py` / `selftest-icon-gate.py`）全部删除；`build.sh` 换成负向闸门防回流——源码层 `check-no-icon-gate.py`（剥注释后查 12 个禁用标识符）+ 反证 `selftest-noicongate.py`（1 良性 + 7 破坏 + 还原），产物层 dylib 二进制不得再含 5 个图标符号、旧 6 个文件不得回流 `devkit/`、`mkdeb.sh` 必须含残留清理三字面量。
 
-- dylib 注入的是 App 沙箱进程，**写不了 `.app` 目录**——而 `setAlternateIconName:` 要求备选图标预声明在 `Info.plist` 的 `CFBundleIcons → CFBundleAlternateIcons` 且 PNG 文件在 `.app` 内；
-- 运行时 hook `CFBundleGetInfoDictionary` 骗不过 SpringBoard 侧的二次校验；
-- 直接改 SpringBoard 的图标视图必然「时灵时不灵」，违背第一条红线。
+**旧版注入残留怎么清（v1.6.10 安装 / 卸载钩子的新职责）**：v1.6.6–v1.6.9.2 的 helper 往宿主 `.app` 写过三处——Info.plist 顶层 `OkaIconInjected` 装态标记键、`.app` 内 `OkaIconGreen@2x.png` / `OkaIconGreen@3x.png` 两张备选图标、`CFBundleIcons → CFBundleAlternateIcons` 里的 `OkaIconGreen` 声明。v1.6.10 的 postinst（安装）与 prerm（卸载）都会遍历宿主 `.app`：`plutil -remove OkaIconInjected` + `rm` 两张 PNG，幂等（没注入过的设备走一遍是空操作）、任何失败都不阻断 dpkg（plutil 不可用时静默跳过并明示）。**唯一删不掉的是嵌套键**：`CFBundleIcons → CFBundleAlternateIcons` 是嵌套路径，`plutil` 的 keypath 删除不支持它，只能留一份**惰性声明**——没有人再调 `setAlternateIconName` 时，它对 iOS 无任何行为影响。桌面图标若未立即恢复，手动跑一次 `uicache` 或重启设备。
 
-所以落成两半：**注入方**是 `devkit/iconinject.m` 编出的 helper，deb 安装期以 root（postinst）跑——把默认主图标（120/180 两份）按像素规则染成绿色，连同 Info.plist 声明一起落盘；**切换方**是 dylib 里的 `OkaSetAppIcon`，只调公开 API `setAlternateIconName:completionHandler:`。
+**沉淀下来、不随功能 4 移除的设置面板修正**（v1.6.6–v1.6.9.1 真机实测得来，今天仍在生效）：
 
-**不会破坏签名**：iOS 启动校验只针对主 Mach-O 的 cdhash，资源 PNG 与 Info.plist 不在校验范围；真正会「打不开」的是 plist 写坏导致读不到 Info.plist——helper 侧用「先备份到 `/var/mobile/Library/Preferences/com.oka.wifitweak.iconbak`（不放 .app）→ 改 → **写后读回校验** → 失败自动还原」兜死，备份毫秒级存活、成功/失败双出口都删（不留垃圾文件）。
-
-**不会误导**：关 = `nil`（回 primary = App 默认原图标，恰是「未注入时的显示态」），所以**「没启用」和「已关闭」在桌面上一模一样**；App 内设置面板另有一行只读状态「桌面动态图标：已启用 / 未启用（重装本插件可恢复）」。
-
-**四个同步点**（防「时灵时不灵」）：`my_startWithOptions` 的 `if (ok)` 块内亮绿（启动失败不亮）、`my_stop` 回原图（先落状态再同步）、`my_didFinishLaunching` 按 `gServerRunning` 兜底（放在所有 `return` 之前，兜杀 App 被杀后残留的绿）、`applicationDidBecomeActive:` 回前台纠正（可选 delegate 方法，先 `class_addMethod` 补实现再 hook，注册不被任何开关 gate——gate 住的症状正是「没自动切换」）。
-
-**红→绿像素映射是可单测的纯函数**（`devkit/iconinject-core.h`，host 单测 `devkit/selftest-iconinject.c`）：判定红 = `r ≥ 89 且 r > g×1.7 且 r > b×1.7`（排除品红/橙/暗红）；映射 `G'=R×1.06、R'=R×0.12、B'=R×0.10`，alpha 不变。
-
-**dylib 与 helper 共用同一份常量头** `devkit/include/oka-icon-common.h`（alternate 图标名 `OkaIconGreen` / 标记键 `OkaIconInjected` / 宿主 bundle id）——任何一边改名而另一边没跟上，症状都是「注入成功但切换失效」且零报错，只能从源头消除。
-
-**顺带的两个 UI 修正**：设置面板入口按钮「🔒 密码」改名「⚙️ 设置」（功能早已不止密码）；浮动按钮从右下角挪到页面右上角（右下会遮挡 WebDAV 传输页签，用户实测反馈）。
-
-**v1.6.7 的四处实测修正**（都来自真机复现，不是猜的）：
-
-- **浮动按钮偏移 8 → 40**：v1.6.6 的 `constant:8.0` 让按钮正好压在 WiFi 页顶部提示标签的文字上，按钮和文字糊成一团（用户实测「位置有点高、叠加在提示标签那里」）。改 40（约两行文字高）错开顶部提示区；
-- **`OkaIconSwitchReady` 改读 plist 文件**：原来的 `[NSBundle mainBundle].infoDictionary` 是 App 启动那一刻的快照——helper 在 deb 安装期把注入标记写进 `.app/Info.plist` 后，**不重启 App 缓存里永远没有这个键**，这正是「卸载插件重装 deb 仍显示未启用」的一半原因（另一半是自签环境下 helper 安全跳过，见 postinst 的退出码提示）。直接读文件后装完即生效，不必杀 App；
-- **postinst 讲清注入退出码**：helper 退出码 2 = 安全跳过（宿主不是 App Store 原版装态）时打印「为什么没生效 + 怎么强行注入」，不再一句 `|| true` 全吞掉——设备上零线索是这次排查最花的成本；
-- **面板行序调整**：「长按快捷菜单：开/关」行成为面板**第一个 action**，「取消」垫尾——用户实测 v1.6.6 里这行被夹在密码字段和取消之间看漏，误以为开关被删了。
-
-**v1.6.8 的三处真机复测修正**（用户装机 v1.6.7 后反馈，二进制与源码逐条交叉验证过）：
-
-- **浮动按钮偏移 40 → 56**：v1.6.7 复测 40 仍**稍微**压住顶部提示标签文字（提示区比两行文字略高），再降到 56。闸门常量下限同步钉到 56（40.0 直接红）；
-- **图标状态行三态文案**：v1.6.6/v1.6.7 对所有「未启用」一律写「重装本插件可恢复」——真机实测证伪：宿主是自签/侧载装态（检测到 `embedded.mobileprovision` 或无 `iTunesMetadata.plist`）时 helper 按安全门控**直接跳过**，卸载重装 deb 一万次也不会注入，那句文案是假承诺。现在三态分家：已启用 / App Store 装态丢失（重装 deb 可恢复）/ 非 App Store 装态被门控跳过（讲清 `inject --force` 放行路径）。口径与 helper 的 `IsAppStoreInstall` 逐字对齐；
-- **面板新增构建版本只读行**（`OKA_BUILD_TAG`）：用户报「设置里的开关不见了」时第一件事是核对设备实跑构建——旧 dylib 残留（装过别的方案没卸干净）、App 装完没杀，都会让新代码不生效而面板外观看不出差别。三个 v1.6.7 交付产物的 dylib 里「长按快捷菜单」行代码与字符串经二进制验证均在；本次同时把这三条现场排查步骤写进排错表。
-
-**v1.6.9 的一处根因修复**（用户装机 v1.6.8 后仍反馈「设置里还是故障依旧」——截图里版本行在、菜单行与图标行依旧缺席）：
-
-- **面板动作行整行消失的根因与修法**：v1.6.6 → v1.6.7 → v1.6.8 三代实测收敛出一条不变式——**动作行总数一旦超过末 4 行，超出的行从栈顶开始整行消失**（v1.6.7 丢第 1 行「长按快捷菜单」、v1.6.8 再丢「桌面动态图标」，两代可见行恒为最末 4 行；两张反馈截图密码框均获焦、键盘均弹起，键盘占掉约 290pt 高度预算）。版本行在 v1.6.8 里能露面恰因为它排在第 3 位、仍在末 4 行之内——这同时反证了「设备跑的不是新构建」的旧假设不成立。修法三管齐下：① **只读信息（图标三态 + 构建版本）全部搬进 alert message**（message 是纯文本、可控高、实测从不丢，「不能误导」三态文案一字未改）；② **动作栈收敛为 4 行交互行**（长按快捷菜单 / 关闭密码 / 保存 / 取消）；③ **present 前 `endEditing:` 收键盘 + 延时 0.35s 等键盘退场**（约 0.25s 动画做完）再弹面板，避免 alert 在键盘仍占位的窗口期里定型。源码不变量（动作栈 ≤ 4 行 / 只读行走 message / 收键盘在位）在 `check-icon-switch.py` 里各有可失败判据，反证样本 M33/M34/M35 专门守这三条。
-
-**v1.6.9.1 的装机复测补丁**（v1.6.9 装机后用户截图：message 里的版本行与「长按快捷菜单：开（点我切换）」行都已正常显示——从栈顶丢行的修复生效；但面板弹出后**键盘又起来了**，底部「关闭密码/保存/取消」被挤得只露一半）：根因是 `UIAlertController` present 完成后会**自动让它自己的密码 field 成为 first responder**，密码键盘重起、高度预算再次被压爆——v1.6.9 的 0.35s 延时只等掉了宿主密码框的键盘，没防住 alert 自己的自动获焦。修法：present 的 completion 同一帧里 `resignFirstResponder` 收掉 alert 全部 text field 的焦点，键盘不占位、四行动作全可见。已知限制：用户之后**主动点面板里的密码框**输入时键盘仍会遮住底部动作行（`UIAlertController` 固有限度），收起键盘或点面板外区域即恢复完整面板。
-
-**v1.6.9.2 的装机形态门控修复**（用户装机 v1.6.9.1 后截图反馈「桌面动态 icons or icons 还是没生效」，并明确回了一句「我这个就是 AppStore 安装的啊」——直接推翻「用户装错了」的初判，定为门控判据缺陷）：旧口径把「宿主不是 App Store 原版」押在两个条件上——`iTunesMetadata.plist` 缺失 **或** 存在 `embedded.mobileprovision`——两者在 dylib 里坍缩成同一条文案「宿主非 App Store 原版装态，安装期注入被安全策略跳过」。真机上 **App Store 原版安装的宿主（Readdle Documents）bundle 里也可能没有 `iTunesMetadata.plist`**（该文件只在通过 iTunes 同步安装时才写入），于是原版安装被当非原版误拒；面板文案又与实际形态对不上，用户彻底失去排查线索。修法：**判据收窄到唯一硬信号**——只有 `embedded.mobileprovision`（第三方签名：自签 / 企业签 / TestFlight / 重签名的铁证）才否决注入；`iTunesMetadata.plist` 降级为旁证，缺失不再否决。dylib 面板文案随之改为「宿主带第三方签名，安装期注入被安全策略跳过；需 App Store 原版宿主，或按安装期输出执行 inject --force」，与设备上 helper 实际打印的「装态判定」事实行一一对应。口径共源：helper 与 dylib 不再各写一遍布尔式，统一走 `devkit/iconinject-core.h` 的 `oka_install_form(has_meta, has_prov)` / `oka_form_allows_inject` / `oka_form_name`（旧 `IsAppStoreInstall` 随之删除）；回归断言进 host 单测 `selftest-iconinject.c`——`(0,0)`（无 metadata、无 provision = Apple 签名装态）必须判 AppleSigned 且必须放行，旧口径在这条输入上放行=0，新断言必红。helper 安装期先打一行「装态判定：iTunesMetadata=在/无 embedded.mobileprovision=在/无 → <形态>」再做门控，postinst 返回值不变（rc=2 仅剩 Tweak.xm / 宿主路径缺失）。这版同时钉死四条源码不变量：M37 锁「门控回退 metadata 否决」、M38 锁「prov 恒传 0」（参数形式精确比对）、M39 锁「dylib 删共源门控头 import」、M40 锁「core 头 `oka_install_form` 改名」（devkit 侧）——判据不能悄悄漂回旧口径。
+- **⚙️ 设置按钮改名**：原「🔒 密码」改名「⚙️ 设置」（功能早已不止密码）；浮动按钮从右下角挪到页面右上角——右下会遮挡 WebDAV 传输页签（用户实测反馈）。
+- **浮动按钮偏移钉死 ≥ 56**：v1.6.6 的 `constant:8.0` 让按钮压在 WiFi 页顶部提示标签的文字上，两代真机复测（8 → 40 仍糊、再降到 56 才错开提示区），闸门常量下限钉到 56（40.0 直接红）。
+- **「长按快捷菜单：开/关」行是面板第一个动作，「取消」垫尾**——用户实测 v1.6.6 里这行被夹在密码字段和取消之间看漏，误以为开关被删了。
+- **只读信息走 message，动作栈收敛为 4 行交互行**（长按快捷菜单 / 关闭密码 / 保存 / 取消）：v1.6.6 → v1.6.7 → v1.6.8 三代实测收敛出一条不变式——**动作行总数一旦超过末 4 行，超出的行从栈顶开始整行消失**（键盘弹起时高发；两代反馈截图密码框均获焦、键盘占掉约 290pt 高度预算）。message 是纯文本、可控高、实测从不丢；构建版本行（`OKA_BUILD_TAG`）就住在这里——用户报「开关不见了」时第一件事是核对设备实跑构建（旧 dylib 残留 / App 装完没杀，都会让新代码不生效而面板外观看不出差别）。
+- **present 前 `endEditing:` 收键盘 + 延时 0.35s，completion 里再 `resignFirstResponder`**：v1.6.9 修「面板弹出后宿主密码框键盘仍占位、挤掉底部动作行」；v1.6.9.1 装机复测发现 `UIAlertController` present 完成后会**自动让自己的密码 field 成为 first responder**、键盘重起——0.35s 只等掉了宿主的，没防住 alert 自己的自动获焦，于是 present completion 同一帧再收一次。已知限度：用户之后**主动点面板密码框**输入时键盘仍会遮住底部动作行（`UIAlertController` 固有限度），收起键盘或点面板外区域即恢复。
 
 ### 功能 5 —— 服务假死自愈（v1.6.7）
 
@@ -329,7 +300,7 @@ _GCDWebServerGetPrimaryIPAddress 硬编码 strcmp(ifa_name,"en0")
 
 **自愈走与用户手动「关开」完全相同的路**：`objc_msgSend` 给同一实例发 `stop` + `startWithOptions:error:`，自然经过 `my_startWithOptions` hook，`suspend=NO`、密码头、固定端口 fallback（`use != base` 退一步）全部自动重放——不另起一条私路，也不出现「状态位置成成功但服务没起来」的脱节。
 
-**三个触发面**：`applicationDidBecomeActive:` 回前台顺手探一次（用户回来第一件事就是刷新网页）；启动时挂 45s 周期定时器（兜「没人切前后台、一直挂着」）；防抖 90s（连续假死通常是路由器踢客户端 / 系统限制，无限重拉只会耗电刷日志还掩盖真问题）。自愈结果照常同步桌面图标（成功=绿 / 失败=回原图）。
+**三个触发面**：`applicationDidBecomeActive:` 回前台顺手探一次（用户回来第一件事就是刷新网页）；启动时挂 45s 周期定时器（兜「没人切前后台、一直挂着」）；防抖 90s（连续假死通常是路由器踢客户端 / 系统限制，无限重拉只会耗电刷日志还掩盖真问题）。
 
 **反例判据全部可失败**（`devkit/check-service-heal.py` + `selftest-service-heal.py` 10 个破坏样本 + 1 个良性）：探活改用 `isRunning` / 自愈只改状态位不重放 / 删防抖 / 删任一触发面 / 删 `dispatch_resume`（timer 创建了永不触发）/ 实例或 options 不落袋（重放丢密码头，网页端 401）/ `CFSocketCreate` 删 callout 参数 / `ServiceHeal` 偏好读不到，每一条都必须让闸门红。
 
@@ -673,19 +644,18 @@ sh devkit/build.sh arm64  iphoneos-arm    1.2.0   # 传统 rootful
 | `devkit/check-shell.py` | 拦 `$VAR` 后紧跟非 ASCII、bash 4+ 专有语法（`declare -A`、`${v,,}`、`&>>`、`\|&`、`mapfile`、`wait -n`）、以及 GNU-only 的 `sed -i` / `--in-place`（R8，v1.6.6 run 44 的 BSD sed rename 事故后新增） | CI 独立步骤；本地可跑 |
 | `devkit/selftest-shell.py` | **证明上面这个 shell 闸门会失败**：7 个用例（GNU `sed -i` 三种变体 + `$CPU，` 形态必须被 R8/R1 精确拦下；`sub_file` 双兼容替换 / `${CPU}` / 管道 sed 必须放过），仓库文件 sha256 前后比对 | CI 的 Shell compatibility gate；本地可跑 |
 | `devkit/verify-deb.py --check-macho` | 编译后立刻读 Mach-O 头的 `cputype/cpusubtype` 做**整数比较**，并检查 `LC_CODE_SIGNATURE` | `build.sh` 内；CI 同代码 |
-| `devkit/verify-deb.py <deb> <scheme> <arch>` | 校验 deb 的 ar 结构、Architecture、载荷路径、DEBIAN 隔离、PAX 头、架构、签名、权限；v1.6.6 起含 C12：注入 helper 的路径按 scheme 前缀 / 755 / Mach-O 架构与 dylib 一致 / LC_CODE_SIGNATURE / 四个链路指纹标识，以及 postinst 与 prerm **存在性**（C9 只查 mode，文件整个缺失时静默通过） | CI 的 Verify deb 步骤；本地可跑 |
-| `devkit/selftest-verify.py` | **证明上面这个校验器会失败**：30 个用例（正向 5 / 反向 25），用代码拼出的 Mach-O 与 deb，含「arm64e 冒充 arm64」「缺签名」「PAX」「权限错」「helper 缺失/架构不符/缺指纹/缺 prerm」等 | CI 独立步骤；本地可跑 |
+| `devkit/verify-deb.py <deb> <scheme> <arch>` | 校验 deb 的 ar 结构、Architecture、载荷路径、DEBIAN 隔离、PAX 头、架构、签名、权限；v1.6.10 起 C12 为**负向**：deb 里不得有 `oka-iconinject`（任何 scheme 前缀）、dylib 二进制不得含图标链路符号（`OkaIconGreen` / `OkaIconInjected` / `CFBundleAlternateIcons` / `setAlternateIconName`），外加 postinst 与 prerm **存在性**（v1.6.10 起它们负责清理旧版注入残留；C9 只查 mode，文件整个缺失时静默通过） | CI 的 Verify deb 步骤；本地可跑 |
+| `devkit/selftest-verify.py` | **证明上面这个校验器会失败**：29 个用例（正向 5 / 反向 24），用代码拼出的 Mach-O 与 deb，含「arm64e 冒充 arm64」「缺签名」「PAX」「权限错」「helper 回流进包」「dylib 残留图标符号」「缺 prerm/postinst」等 | CI 独立步骤；本地可跑 |
 | `devkit/gen-webassets.py` | 生成内联前端资源头；含危险字面量检查（`</script`、`%key%` 形状）与**往返解码自检**（生成后把 C 字面量解回字节，与源文件 sha256 比对，落盘复读再比一次） | `build.sh` 内；CI 独立步骤也跑一次 |
 | `devkit/selftest-webassets.py` | **证明上面这个资源闸门会失败**：7 个用例，含注入 `</script`、注入 `%epilogue%`、删文件、空文件、篡改 C 转义应被解码检出、还原后复跑干净 | CI 的 Web assets gate；本地可跑 |
 | `devkit/check-shortcut-clear.py` | v1.6.4 快捷菜单自清：关开关必须主动摘除自己那条（写在 return 之前、带 hadOurs 守卫）、保留他人项、didFinishLaunching hook 无条件挂载 | `build.sh` 内；CI 的 Shortcut clear gate 同代码 |
 | `devkit/selftest-shortcut-gate.py` | 上面那个闸门的反证：7 个破坏注入 + 1 个良性样本 | CI 的 Shortcut clear gate；本地可跑 |
 | `devkit/check-hover-css.py` | v1.6.3 行悬停 CSS 的性质判据（真上色 / 色差 ≥1.20 / 悬停≠选中 / 选中更深） | `build.sh` 内；CI 的 Hover highlight gate 同代码 |
 | `devkit/selftest-hover-gate.py` | 上面那个闸门的反证：9 个破坏注入 | CI 的 Hover highlight gate；本地可跑 |
-| `devkit/check-icon-switch.py` | v1.6.6 桌面动态图标：切换只走公开 API 两参调用、on=绿/off=primary、四同步点（启动/停服/冷启动/回前台）与顺序、becomeActive 注册不被开关 gate、共源常量头、图标三态只读信息、按钮改名换位、负向拦截角标 API。v1.6.7 起还钉：按钮 topAnchor 偏移 ≥ 40、「长按快捷菜单」行必须是第一个 action。v1.6.8 起再钉：偏移下限 40 → 56（真机复测 40 仍压提示文字）、`OkaIconSwitchReady` 必须读 plist 文件（不许回退 `infoDictionary` 启动快照）、图标状态行三态文案（按宿主装态分支，「重装本插件 deb 可恢复」只许出现在 App Store 分支）。v1.6.9 起钉面板渲染层三条不变量：动作栈 `addAction` ≤ 4 行（actionCap）、只读信息必须走 message 不进行动栈（msgInfo）、present 前 `endEditing:` 收键盘 + 延时 ≥ 0.3s（keyboardDismiss）；v1.6.9.1 再钉：present 的 completion 里必须 `resignFirstResponder` 收掉 alert 自动获焦（装机实测键盘重起挤掉底部动作行）。v1.6.9.2 起再钉装机形态门控口径：dylib 与 helper 必须共用 `iconinject-core.h` 的 `oka_install_form(meta != nil, prov != nil)`（参数形式逐字精确，防 prov 恒传 0）、唯一否决项是 `embedded.mobileprovision`、禁止 `!meta` / `meta == nil` 否决回流 | `build.sh` 内；CI 的 Icon switch gate 同代码 |
-| `devkit/selftest-icon-gate.py` | 上面那个闸门的反证：32 个 dylib 侧 + 9 个 devkit 侧样本（含 3 个良性注释变更）——反向测试实测抓到过闸门自身缺陷（裸子串被「加后缀改名」放过、prototype 令 fn_body 抓错函数体），修的是闸门不是测试；M26/M27 分别锁「声明先于使用」与「SDK 常量↔框架头」（v1.6.6 run 42/43 两个编译盲区）；M28/M29/M30 分别锁「常量退回 8.0」「回退 infoDictionary」「取消挪回第一行」（v1.6.7 三个实测回归）；M31/M32 分别锁「图标三态退回无条件文案」「删 message 构建版本」（v1.6.8 两个实测回归）；M33/M34/M35 分别锁「只读行搬回动作栈」「删 present 前收键盘」「删保存行」（v1.6.9 渲染层修复的三条源码不变量——真机实测动作行超过末 4 行会从栈顶整行消失）；M36 锁「删 completion 收焦点」（v1.6.9.1 装机实测：alert 自动获焦重起键盘，底部动作行只露一半）；M37/M38 分别锁「装机形态门控回退 metadata 否决」「prov 恒传 0」（v1.6.9.2 装机实测：真 App Store 安装被旧口径误判成宿主带第三方签名），M39 锁「dylib 删共源门控头 import」，M40 锁「core 头 `oka_install_form` 改名」（devkit 侧） | CI 的 Icon switch gate；本地可跑 |
+| `devkit/check-no-icon-gate.py` | v1.6.10 桌面动态图标负向闸门（功能已整体移除，防回流）：Tweak.xm 剥注释后不得出现 12 个禁用标识符——`OkaSetAppIcon` / `OkaIconSwitchReady` / `OkaHostIsAppStore` / `gEnableSwitchIcon` / `OKA_ICON_NAME_GREEN` / `OKA_ICON_KEY_INJECTED` / `setAlternateIconName` / `CFBundleAlternateIcons` / `oka-iconinject` / `iconinject-core.h` / `oka-icon-common.h` / 偏好键 `"IconSwitch"` | `build.sh` 内；CI 的 No-icon gate 同代码 |
+| `devkit/selftest-noicongate.py` | 上面那个闸门的反证：1 个良性样本 + 7 个破坏注入（函数定义回流 / 调用点回流 / 注入判定回流 / 装态判定回流 / 开关变量回流 / selector 回流 / 偏好键回流）逐个必须 FAIL + 还原后复跑 PASS | CI 的 No-icon gate；本地可跑 |
 | `devkit/check-service-heal.py` | v1.6.7 服务假死自愈：探活必须本地回环 connect 且**不许读 `isRunning`**（恒 YES，探了等于没探）；自愈必须重放 `startWithOptions:error:` 原路（不许只改状态位）；防抖 90s；三个触发面齐备（回前台 / 45s 定时器含 `dispatch_resume` / 启动即挂）；实例与 options 在 `my_startWithOptions` 落袋；`ServiceHeal` 偏好可读；自愈段无 NSLog；声明先于使用 | `build.sh` 内；CI 的 Service heal gate 同代码 |
 | `devkit/selftest-service-heal.py` | 上面那个闸门的反证：10 个破坏样本（每个精确触发一个判据键）+ 1 个良性注释变更 | CI 的 Service heal gate；本地可跑 |
-| `devkit/selftest-iconinject.c` | 红→绿像素映射 host 单测（10 个 expect_tint + 4 条 is_red 断言）：视觉规格的判定边界（什么算红）改坏了只有这里会红 | `build.sh` 内先跑再编 helper |
 | `node --check web/oka-wifi.js` | 用真实 JS 解析器验语法（不是正则数括号）；runner 缺 node 时**明确报错**，不静默跳过 | CI 的 Web assets gate |
 
 `build.sh` 里还有一层**网页交互指纹闸门**（v1.1.5 起逐版扩充）：要求 JS 里出现一组关键符号名
@@ -746,16 +716,7 @@ v1.1.3 起插件**不输出任何系统日志**，所以判据一律看功能表
 3. **功能 2** —— 关 WiFi、开个人热点，进 App 的 WiFi 传输页点「开启 WiFi 传输」：
    按钮可见、状态 Connected、二维码有内容，服务器地址是 `http://172.20.10.1:8080/`
    （不再是 `unknown`）；电脑浏览器能打开。
-4. **功能 4**（桌面动态图标）—— 先看 App 内 WiFi 传输页右上角的 ⚙️ → 设置面板底部那行
-   「桌面动态图标：已启用（开=绿 / 关=原图标）」。然后：
-   - 点「开启 WiFi 传输」后**回桌面看图标**：应变成把原图标红色换成绿色的版本
-     （1~2 秒内切换，切换时系统会有一瞬的图标放大动画，属正常现象）。
-   - 在 App 内停止传输后回桌面：图标应回到默认原图标。
-   - **杀掉 App 再重开**（iOS 多任务界面划掉）：重开后即使服务没起，图标也应是默认原图
-     ——这一条专门兜「App 被杀时图标停在绿色」的误导残留。
-   - 若面板显示「未启用（重装本插件可恢复）」：说明宿主 App 更新过 / 自签形态未注入，
-     **重装本插件的 deb** 即可恢复；此时桌面与「关」同图，不会有任何误导。
-5. **功能 3** —— 电脑浏览器打开 `http://<手机IP>:8080`：
+4. **功能 3** —— 电脑浏览器打开 `http://<手机IP>:8080`：
    - 默认外观与原版几乎一致：没有独立拖放框、没有多出来的面板；顶部设备名是一行小字，
      文件列表明显比原版靠上；原按钮那行多了「全选 / 取消选择」，列表每行前面多了复选框；
      `Upload Files` 按钮照常可用。
@@ -836,14 +797,11 @@ v1.1.3 起插件**不输出任何系统日志**，所以判据一律看功能表
 | 移动完成后按钮点不动 | 故意设计：结果留在弹窗里给用户看，确认按钮保持禁用以防重复提交 | 关掉弹窗，重新点任意一行的「移动」按钮即可恢复 |
 | 移动/上传后出现 `name (1).ext` 之类的副本 | 服务端 `move` 与 `upload` 都走 `_uniquePathForPath`，目标已存在时**自动改名，不覆盖也不报错** | 这是 `GCDWebUploader.m` 的真实行为，不是插件 bug；移动前确认目标目录没有同名项 |
 | 批量移动全部报失败 | 目标目录不存在，或路径手填错了 | 弹窗里逐项列出失败原因。目录浏览只列 `GET list` 里真实存在的目录；手动输入路径时先确认它存在 |
-| 开了 WiFi 传输，桌面图标还是默认原图 | ① 注入没完成（宿主 App 升级覆盖过 / 宿主带 `embedded.mobileprovision` 被门控跳过）；② 系统拒绝切换 | 先看 App 内设置面板 message 里那行「桌面动态图标」：显示「未启用（宿主带第三方签名…）」→ 宿主 bundle 里有 `embedded.mobileprovision`（自签 / 侧载 / 企业签 / TestFlight / 重签名），重装无效，需按安装期输出 `inject --force` 强行放行；显示「未启用（App 更新或重装会丢失…）」→ Apple 签名装态丢失（App 升级覆盖了注入），重装本插件 deb 即恢复（postinst 会重新注入）；显示「已启用」仍不变 → 系统极少见的拒绝路径，功能本身（传输）不受影响，且**关态与未启用同图，不会出现「绿图标但服务没开」的误导**。30 秒诊断：v1.6.9.2 起 postinst 会打印「装态判定」事实行（哪个文件在、哪个缺席）；看不到就 `ls -l <宿主>.app/iTunesMetadata.plist <宿主>.app/embedded.mobileprovision` |
-| 关了 WiFi 传输，桌面图标还是绿的 | 同步点被跳过（极少见：停服没走 `stop`） | 杀掉了 App 再重开即恢复默认原图（冷启动同步在所有 `return` 之前）；若反复出现，确认 App 停服是否走了 `-[GCDWebServer stop]` |
-| 卸载插件后桌面图标残留绿色版本 / 长按菜单出现「开启WiFi传输」的空壳 | 卸载时 prerm 的 restore 没跑成功 | 手动 `dpkg -i` 重装一次本插件再走正常卸载（prerm 会重跑 restore）；极端情况下用 Filza 删 `<App>.app/OkaIconGreen*.png` 与 Info.plist 里的 `OkaIconInjected` 键（备份还原失败的兜底路径） |
+| 卸载插件后长按菜单出现「开启WiFi传输」的空壳 | 菜单项由 iOS 按 App 的 bundle id 持久化，只卸载插件不会让它消失（点击也没效果：回调是插件补的） | 先在上面把开关切成「关」（或让它自动清成关）再卸载。桌面图标侧：v1.6.10 起装/卸本插件都会清理旧版注入残留，静态绿 PNG 与标记键不会残留 |
+| 从 v1.6.6–v1.6.9.2 升级到 v1.6.10 后桌面还是绿的 / 多一个绿色图标 | 旧版 helper 往宿主 `.app` 注入过红染绿备选图标（Info.plist 声明 + 两张 PNG） | v1.6.10 的 postinst 安装时已自动清（`plutil -remove OkaIconInjected` + `rm` 两张 `OkaIconGreen` PNG）；没恢复就手动跑一次 uicache 或重启设备。`CFBundleAlternateIcons` 里的 `OkaIconGreen` 声明是嵌套键、plutil 删不掉，为**惰性声明**——没有再调 `setAlternateIconName` 的代码，对 iOS 无行为影响 |
 | 设置面板的浮动按钮又压住底部 WebDAV 页签了 | 按钮约束回退到了 bottomAnchor | 确认装的是 v1.6.9；按钮应锚在页面右上角 `btn.topAnchor`。有导航栏的页面走导航栏右侧 ⚙️，本就不占内容区 |
 | 设置面板的浮动按钮压住页面顶部提示标签的文字了 | 偏移常量退回 < 56 | v1.6.8 起钉死 `constant ≥ 56`（真机复测 40 仍稍微压字）；确认装的是 v1.6.9 |
 | 设置面板里「长按快捷菜单」开关不见了 | ① 设备实跑的不是新构建（旧 dylib 残留 / App 装完没杀）；② 装过别的方案（rootful+rootless 双装）导致加载的是旧副本；③ v1.6.7/v1.6.8 的渲染层缺陷：动作行超过末 4 行时超出行从栈顶整行消失（键盘弹起时高发） | 第一现场看面板 message 里的「插件版本」行：不是 v1.6.9 就先 `dpkg -l | grep com.oka.wifitweak` 核对已安装包，只保留一个；然后确认 `<App>.app` 上级的 dylib 路径只剩一份（rootful `/Library/MobileSubstrate/DynamicLibraries/`、rootless/roothide `/var/jb/Library/MobileSubstrate/DynamicLibraries/`），respring 后**从多任务划掉 App 重开**。版本行显示 v1.6.9.1 仍缺行才是代码问题，带版本号反馈；v1.6.9 起只读信息（图标三态 + 版本）已改走 message、动作栈只剩 4 行，该形态已修；v1.6.9.1 修掉「面板弹出后 alert 自动获焦重起键盘挤掉底部动作行」，若**手动点密码框**时底部行被键盘遮住，收键盘即恢复（`UIAlertController` 固有限度） |
-| 桌面动态图标装完 deb 仍显示「未启用（宿主带第三方签名…）」 | 宿主 bundle 里检测到 `embedded.mobileprovision`（自签 / 侧载 / 企业签 / TestFlight / 重签名），按「不导致 App 打不开」红线默认不注入。**v1.6.9.2 起口径收窄：只有这一个文件否决，`iTunesMetadata.plist` 缺失不再否决**——v1.6.8 那条旧口径把「App Store 原版但无 iTunesMetadata.plist」的安装也误判成这里 | 别反复卸装。要强行注入：设备上执行安装期输出的 `__HELPER__ inject --force`（或 plist 写 `IconInjectForce=true` 后再装 deb），签名风险自担。30 秒诊断：`ls -l <宿主>.app/iTunesMetadata.plist <宿主>.app/embedded.mobileprovision`（或看 postinst 的「装态判定」行） |
-| 桌面动态图标装完 deb 仍显示「未启用（App 更新或重装会丢失…）」 | App Store 原版装态但注入没成功（App 刚升级覆盖过 / 安装期 helper 退出码非 0） | 重装本插件 deb 即可恢复；postinst 会打印 helper 退出码，非 0 时连原因一起给 |
 | 开着 WiFi 传输过一会儿网页打不开，连接状态变「等待中」，关开开关就恢复 | 服务端假死：监听 socket 被系统回收 / Wi-Fi 漫游后僵住，`isRunning` 仍报 YES | v1.6.7 起 45s 周期 + 回前台自动探活自愈（本地回环实测，90s 防抖）。可 `plist` 写 `ServiceHeal=false` 关闭自愈观察旧行为 |
 
 
@@ -859,7 +817,7 @@ v1.1.3 起插件**不输出任何系统日志**，所以判据一律看功能表
 6. **网页增强依赖电脑浏览器的 `DataTransferItem.webkitGetAsEntry()`。** Chrome / Edge / Safari 支持整个文件夹递归；不提供该 API 的浏览器会自动降级为「单文件 / 多文件」拖放上传，文件夹结构无法保留（点 `Upload Files` 选文件始终可用）。另外服务端 `create` 不递归、也不允许目标已存在，所以文件夹上传是**串行**的：先逐级建目录，再逐个传文件，大文件夹会比一次多文件选择慢。
 7. **注入层依赖 `responseWithHTMLTemplate:variables:` 这条渲染路径。** 已在 1.7.5 的 `GCDWebServer` 二进制里反汇编确认（6 个 variables key 的字典 + `0x1D210` 的类方法调用）。若 App 升级换了 GCDWebServer 版本、改走别的 HTML 渲染方法，注入会静默不生效——但功能 1 / 2 完全不受影响，网页也会保持原版可用状态。
 8. **「点行打开文件 → 编辑 → 保存回手机」仍不支持编辑保存；v1.1.7 起支持只读预览。** 原版服务端只有 6 个接口：`download` 是附件下载（指向目录直接 400）、`upload` 同名自动改名不覆盖，没有 inline 读取与覆盖写回。v1.1.8 由插件侧注册了第 7 个接口 `GET /oka-raw`（只读取字节，仅限上传根内，响应不带 `Content-Disposition`），v1.1.9 又加了第 8 个只读接口 `GET /oka-stat`（取目录内各条目的修改时间，供列表时间列），预览与目录 ZIP 的字节都改从这里取；**它们只读，仍然没有覆盖写回**。v1.2.0 的「复制下载链接」**没有新增任何接口**，分享的地址就是原版 `GET /download?path=`（带 `Content-Disposition: attachment`，对方浏览器 / IDM 可直接存盘、支持断点续传）——只有页面内部取字节才走 `/oka-raw`。要真正实现在线编辑，还得再注册一个 `/save` 之类能写回的 handler，属于新增写能力，未实施。目录下载因此走浏览器端 ZIP 打包（v1.1.7 起显式带顶层文件夹），超大目录会受浏览器内存限制；单个文件预览上限 200 MB，超过只给下载按钮。
-9. **桌面动态图标（功能 4）依赖「宿主 App 不被更新」。** 注入的 Info.plist 声明与 PNG 在宿主 `.app` 里，**宿主 App 一升级就被覆盖掉**，此时 dylib 静默不切换（桌面保持默认图标 = 语义安全的「关」态），App 内面板显示「未启用」——v1.6.8 起分两种：Apple 签名装态丢失（含 App Store 原版；重装本插件 deb 即恢复，**不是自动的**）/ 宿主带 `embedded.mobileprovision` 被 helper 门控跳过（重装无效，需 `inject --force` 自担风险强行放行）。v1.6.9.2 起后者是**唯一**否决项——`iTunesMetadata.plist` 缺失不再否决（旧口径误拒过真 App Store 原版安装的宿主），口径共源于 `iconinject-core.h` 的 `oka_install_form()`。v1.6.9 起这段只读文案搬进面板 message（图标三态 + 构建版本同消息区，动作栈只剩 4 行交互行，另修掉「动作行超过末 4 行会从栈顶整行消失」的渲染缺陷）。另外：iOS < 10.3 没有 alternate icon API（`respondsToSelector` 守卫直接跳过，不崩）；自签 / TrollStore 等 bundle-tamper 敏感形态默认不注入（设置 `IconInjectForce` 可强制）；切换依赖系统 `setAlternateIconName:`，个别系统版本可能有至多半秒到一秒的切换动画延迟，功能状态 `gServerRunning` 与图标最终态保证一致。
+9. **桌面动态图标（功能 4）已于 v1.6.10 移除，只剩旧版注入残留的清理。** v1.6.6–v1.6.9.2 的 helper 往宿主 `.app` 写过的三处里，Info.plist 顶层 `OkaIconInjected` 标记键与两张 `OkaIconGreen` PNG 由 v1.6.10 的 postinst / prerm 自动清（幂等、不阻断 dpkg）；**唯一删不掉的是 `CFBundleIcons → CFBundleAlternateIcons` 里的 `OkaIconGreen` 声明**（嵌套键 plutil 无法按 keypath 删），只能留惰性声明——没有再调 `setAlternateIconName` 的代码，无行为影响。桌面未恢复时手动 uicache 或重启设备。
 
 ---
 
@@ -867,14 +825,14 @@ v1.1.3 起插件**不输出任何系统日志**，所以判据一律看功能表
 
 ```
 wifitweak/
-├── Tweak.xm                    # 全部实现（约 2650 行，含逐条逆向依据注释）
+├── Tweak.xm                    # 全部实现（约 2666 行，含逐条逆向依据注释；v1.6.10 已移除动态图标链）
 ├── OkaWiFi.plist               # CydiaSubstrate 过滤：只注入 com.blinker.documents
 ├── web/                        # 网页端增强前端资源（v1.1.7 起含点目录进入 / 文件预览 / 顶层文件夹 ZIP；v1.1.9 加时间列；v1.2.0 加复制下载链接）
 │   ├── oka-wifi.js             # 列表排序 / 全页拖放 / 文件夹递归 / 折叠任务面板 / 复用原版移动弹窗 / 行交互 / ZIP 打包 / 时间列 / 复制下载链接
 │   └── oka-wifi.css            # oka- 前缀样式 + 顶部紧凑布局 + 文件夹琥珀黄 + 选中热区 + 行内按钮 + 时间列 + 链接反馈条
 ├── devkit/
-│   ├── build.sh                # 零 Theos 编译：资源内联 + xcrun clang + codesign + 闸门（含 helper 编译与红→绿 host 单测）
-│   ├── mkdeb.sh                # 纯 Python 拼 ar 归档（不依赖 dpkg-deb）；postinst 调 helper 注入、prerm 调 restore
+│   ├── build.sh                # 零 Theos 编译：资源内联 + xcrun clang + codesign + 闸门（含 v1.6.10 负向闸门：图标符号不得回流 dylib、旧文件不得回流 devkit/）
+│   ├── mkdeb.sh                # 纯 Python 拼 ar 归档（不依赖 dpkg-deb）；postinst/prerm 清理旧版桌面动态图标注入残留（幂等，不阻断 dpkg）
 │   ├── push-via-api.py         # github.com 被代理 502 时的等价推送通道（Git Data API，重建 tree sha 与本地一致才落 ref）
 │   ├── gen-webassets.py        # JS/CSS -> .build/OkaWebAssets.h（含往返解码自检）
 │   ├── selftest-webassets.py   # 上面这个资源闸门的自测：7 用例，证明它会失败
@@ -884,18 +842,14 @@ wifitweak/
 │   ├── selftest-shortcut-gate.py # 上面这个闸门的反证：7 破坏注入 + 1 良性样本
 │   ├── check-hover-css.py      # v1.6.3 行悬停 CSS 闸门
 │   ├── selftest-hover-gate.py  # 上面这个闸门的反证
-│   ├── check-icon-switch.py    # v1.6.6 桌面动态图标闸门（切换链路 / 四同步点 / 共源常量 / UI 改名换位；v1.6.7：偏移≥40 / 读文件 / 行序；v1.6.8：偏移≥56 / 图标三态；v1.6.9：动作栈≤4行 / 只读信息走message / present前收键盘；v1.6.9.1：completion 收 alert 自动获焦；v1.6.9.2：装机形态门控共源口径——prov 唯一否决 / 参数精确 / 禁 metadata 否决回流）
-│   ├── selftest-icon-gate.py   # 上面这个闸门的反证：32 个 dylib 侧 + 9 个 devkit 侧样本（M37-M40 锁 v1.6.9.2 装机形态门控口径）
+│   ├── check-no-icon-gate.py   # v1.6.10 桌面动态图标负向闸门（源码剥注释，12 个禁用标识符，防功能回流）
+│   ├── selftest-noicongate.py  # 上面那个闸门的反证：1 良性 + 7 破坏注入 + 还原复跑
 │   ├── check-service-heal.py   # v1.6.7 服务假死自愈闸门（回环探活不读 isRunning / 原路重放 / 防抖 / 三触发面）
 │   ├── selftest-service-heal.py # 上面这个闸门的反证：10 破坏样本 + 1 良性样本
-│   ├── iconinject.m            # v1.6.6 注入 helper CLI（inject/restore，安装期以 root 跑，只用 printf）
-│   ├── iconinject-core.h       # 红→绿像素映射纯函数 + v1.6.9.2 装机形态门控判据 `oka_install_form()`（无 SDK 依赖，可 host 单测）
-│   ├── selftest-iconinject.c   # 红→绿映射 host 单测（10 个 expect_tint + 4 条 is_red 断言 + v1.6.9.2 装态门控断言组：metadata 缺失不否决、provision 才否决）
 │   ├── verify-deb.py           # deb / 裸 dylib 校验（纯标准库，自己读 Mach-O）
-│   ├── selftest-verify.py      # 上面这个校验器的自测：30 用例（正向 5 / 反向 25），证明它会失败
+│   ├── selftest-verify.py      # 上面这个校验器的自测：29 用例（正向 5 / 反向 24），证明它会失败
 │   └── include/
-│       ├── substrate.h         # 最小 MSHookFunction 声明（Theos 的 vendor/include 替代）
-│       └── oka-icon-common.h   # v1.6.6 dylib 与 helper 共源常量（图标名 / 标记键 / 宿主 bundle id）
+│       └── substrate.h         # 最小 MSHookFunction 声明（Theos 的 vendor/include 替代）
 ├── .github/workflows/build.yml # 三变体矩阵 CI（不内嵌 Python heredoc）
 ├── legacy/                     # 旧 Theos 方案，已弃用仅作参考
 │   ├── Makefile
@@ -919,7 +873,7 @@ wifitweak/
 
 ### 可选：偏好设置
 
-插件会读 `/var/mobile/Library/Preferences/com.oka.wifitweak.plist`，七个开关，缺省全开：
+插件会读 `/var/mobile/Library/Preferences/com.oka.wifitweak.plist`，六个开关，缺省全开：
 
 ```xml
 <dict>
@@ -928,19 +882,17 @@ wifitweak/
     <key>EnableIPFix</key>       <true/>   <!-- 功能 2b：热点 IP 修正 -->
     <key>EnableWebEnhance</key>  <true/>   <!-- 功能 3：网页拖放上传 / 批量移动 -->
     <key>CopyURLOnShortcut</key> <true/>   <!-- 开启后复制地址到剪贴板 -->
-    <key>IconSwitch</key>        <true/>   <!-- 功能 4：桌面动态图标（开=红染绿） -->
     <key>ServiceHeal</key>       <true/>   <!-- 功能 5：服务假死自愈（回环探活 + 自动重放，v1.6.7） -->
 </dict>
 ```
 
 把 `EnableWebEnhance` 设为 `false` 可让网页回到原版（原 `Upload Files`、原 `Move Item` 弹窗照常可用）。
 
-`IconSwitch` 只是「允不允许切图标」的开关，**注入本身由 deb 安装期完成**：helper 往宿主 `.app` 写 Info.plist 声明与两张绿色 PNG。App 更新 / 重装宿主 App 会丢掉这些文件（连同注入标记），此时 dylib 静默不切换（桌面保持默认图标 = 语义安全的「关」态），设置面板状态行显示「未启用（重装本插件可恢复）」——**重装本插件的 deb 即恢复正常**（postinst 会重新注入）。自签环境（有 `embedded.mobileprovision`）默认不注入，避免触碰签名敏感形态；确认要强制注入可设 `IconInjectForce`。
+`IconSwitch` 是 v1.6.6–v1.6.9.2 桌面动态图标的开关，**v1.6.10 起已随功能废止**；旧 plist 里残留该键无任何效果（功能 4 的全部代码与 helper 已移除）。
 
 **长按菜单项与卸载（v1.6.5）**：「开启WiFi传输」是运行时注入的**动态快捷项**，由 iOS 按 App 的 bundle id 持久化在 App 数据容器里 —— 只卸载插件而 App 不写回，它不会消失（点击也没有效果：点击回调是插件补上的，插件没了就没人处理）。
 
 - **重装自动清（v1.6.5 起，零操作）**：插件装过又卸载后，你再装回本插件，第一次启动 App 时它会发现自己那条是「残留」（系统里有这条，但你从没表达过开关选择 —— 既没在 App 里设置过、也没手动建过 plist），于是**自动摘除它，并把长按菜单开关置为关**。装回 → 启动一次 → 残留项消失，全程不用动任何文件。只用过 v1.6.4 要手动关开关的时代，过去了。
-- **长按菜单开关在哪**：WiFi 传输页**右上角的 ⚙️ 按钮**（有导航栏时是导航栏右侧的 ⚙️ 角标）→ 设置面板里有一行「长按快捷菜单：开/关（点我切换）」，点一下即时生效（不用重启 App）。这个开关存在 App 自己的偏好里，和上面说的自动清共用同一个存储，谁都不会覆盖谁。面板底部还有一行只读状态「桌面动态图标：已启用 / 未启用」，告诉你图标切换到底有没有生效。
-- 想卸载插件：先在上面把开关切成「关」（或让它自动清成关），再卸载 —— 系统里不会留下空壳菜单项。插件的 prerm 会先把 helper `restore` 跑一遍（还原 Info.plist 声明、删掉注入的 PNG），失败也不拦 dpkg 卸载。
-- **桌面图标没切换时先看面板状态行**：显示「未启用」= 宿主 App 更新过 / 自签形态，重装本插件 deb 即可恢复；显示「已启用」但桌面无变化 = 切换被系统拒绝（极少见），功能本身（WiFi 传输）不受影响，此时关态与未启用同图，不会出现「绿图标但服务没开」的误导。
+- **长按菜单开关在哪**：WiFi 传输页**右上角的 ⚙️ 按钮**（有导航栏时是导航栏右侧的 ⚙️ 角标）→ 设置面板里有一行「长按快捷菜单：开/关（点我切换）」，点一下即时生效（不用重启 App）。这个开关存在 App 自己的偏好里，和上面说的自动清共用同一个存储，谁都不会覆盖谁。
+- 想卸载插件：先在上面把开关切成「关」（或让它自动清成关），再卸载 —— 系统里不会留下空壳菜单项。插件的 prerm 还会顺手清理旧版（v1.6.6–v1.6.9.2）桌面动态图标注入残留（`plutil -remove OkaIconInjected` + 删两张 `OkaIconGreen` PNG），幂等且失败不拦 dpkg。
 - v1.6.3 及以前，关开关不会写回任何数据（`if (!gEnableShortcut) return r;`），只能删掉 App 重装（会丢 App 内的数据），或不管它（空菜单项，不崩溃、不后台运行）。

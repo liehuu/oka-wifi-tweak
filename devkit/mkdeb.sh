@@ -45,15 +45,6 @@ mkdir -p "$DEST"
 cp "$ROOT/.build/$NAME.dylib" "$DEST/$NAME.dylib"
 cp "$ROOT/$NAME.plist"        "$DEST/$NAME.plist"
 
-# ---- v1.6.6：图标注入 helper ----
-# 装到 <PREFIX>/usr/bin/（rootless 变体在 /var/jb/usr/bin，PREFIX 已含）。
-# postinst 以 root 调它：把「红染绿」备选图标写进宿主 .app + 声明
-# CFBundleAlternateIcons。dylib 在 App 沙箱里写不了 .app，所以注入
-# 必须由这个安装期工具完成。
-BINDIR="$STAGE${PREFIX:+/$PREFIX}/usr/bin"
-mkdir -p "$BINDIR"
-cp "$ROOT/.build/oka-iconinject" "$BINDIR/oka-iconinject"
-
 # 权限：目录 755，文件 644
 # ★ dylib 必须 755：644 会被 ellekit / RootHide 的加载器拒绝，
 #   表现是「装了完全没反应」，dpkg 却不报任何错。
@@ -108,64 +99,69 @@ printf '关于卸载：长按菜单项由 iOS 按 App 的 bundle id 持久化，
 printf '要移除它：先把 EnableShortcut 设为 false 并重启一次 App（v1.6.4 起会自动摘除），\n'
 printf '然后再卸载本插件；v1.6.5 起重装本插件后首次启动 App 会自动清掉残留。\n'
 printf '\n'
-# ---- v1.6.6：桌面动态图标注入 ----
-# 备选图标（默认图标红色替换为绿色的版本）+ Info.plist 声明，必须由安装期
-# root 完成（dylib 在 App 沙箱里写不了 .app）。
-# ★ v1.6.7：捕获退出码讲清楚 —— 0=注入成功/已注入；2=安全跳过（门控拒绝/
-#   无红色主色/找不到 App）；1=真失败。|| true 保留（任何码都不阻断 dpkg），
-#   但 2 必须告诉用户「为什么没生效、还能怎么办」：v1.6.6 原实现一句
-#   `|| true` 全吞掉，用户实测「卸载重装也没生效」时设备上零线索。
-# ★ v1.6.9.2：门控口径收紧为「只有 embedded.mobileprovision 才否决」，2 分支
-#   文案同步改成第三方签名口径。**原因不复述**：helper 自己会先打一行
-#   「装态判定：iTunesMetadata=… embedded.mobileprovision=… → <form>」，
-#   这里只补放行路径（复述两份必然漂移）。
-__RC=0
-__HELPER__ inject 2>&1 || __RC=$?
-if [ "$__RC" = "2" ]; then
-  printf '桌面动态图标已跳过：宿主带第三方签名（检测到 embedded.mobileprovision，自签/侧载/TestFlight）。\n'
-  printf '  这是设计内的安全跳过：不碰第三方签名 App 的 bundle。\n'
-  printf '  确认自担签名风险可强行注入：设备上执行 __HELPER__ inject --force\n'
-fi
-# uicache：让 SpringBoard 重读 bundle Info.plist（alternate icon 声明
-# 否则它拿缓存里的旧版本，会拒绝切换）。路径按 scheme 拼（rootless 不同）。
-if [ -x __UICACHE__ ]; then __UICACHE__ 2>/dev/null || true; fi
+# ---- v1.6.10：清理 v1.6.6-v1.6.9.2 桌面动态图标（红染绿）注入残留 ----
+# 旧版由安装期 helper（oka-iconinject）往宿主 .app 写过三处东西：
+#   1) Info.plist 顶层 OkaIconInjected 装态标记键 —— plutil 可删
+#   2) .app 内 OkaIconGreen@2x.png / OkaIconGreen@3x.png 备选图标 —— 可直接 rm
+#   3) Info.plist CFBundleIcons→CFBundleAlternateIcons 内的 OkaIconGreen
+#      声明 —— **嵌套键 plutil 按 keypath 删不掉**，只能留惰性声明：
+#      没人再调 setAlternateIconName 时它对 iOS 无任何行为影响
+# 全段幂等：从未注入过的设备走一遍也是空操作。任何失败都不许阻断 dpkg。
+set +e
+for __APPDIR in /var/containers/Bundle/Application/*; do
+  [ -d "$__APPDIR" ] || continue
+  for __APP in "$__APPDIR"/*.app; do
+    [ -d "$__APP" ] || continue
+    grep -aq com.blinker.documents "$__APP/Info.plist" 2>/dev/null || continue
+    if grep -aq OkaIconInjected "$__APP/Info.plist" 2>/dev/null \
+       || [ -f "$__APP/OkaIconGreen@2x.png" ] \
+       || [ -f "$__APP/OkaIconGreen@3x.png" ]; then
+      printf '清理旧版桌面动态图标残留：%s\n' "$__APP"
+      if command -v plutil >/dev/null 2>&1; then
+        plutil -remove OkaIconInjected "$__APP/Info.plist" 2>/dev/null
+      else
+        printf '  plutil 不可用，跳过 Info.plist 顶层 OkaIconInjected 标记键。\n'
+      fi
+      rm -f "$__APP/OkaIconGreen@2x.png" "$__APP/OkaIconGreen@3x.png" 2>/dev/null
+    fi
+    # CFBundleAlternateIcons 里的 OkaIconGreen 声明是嵌套键，plutil 删不掉，
+    # 故意保留为惰性声明（见段首第 3 条），这里不强行改文件。
+  done
+done
+set -e
+printf '桌面动态图标（v1.6.6-v1.6.9.2）已移除，旧注入残留按上述说明清理：\n'
+printf '  · Info.plist 顶层 OkaIconInjected 已删，OkaIconGreen PNG 已删（若有）。\n'
+printf '  · CFBundleAlternateIcons 里的 OkaIconGreen 声明删不动（嵌套键），为惰性声明，无行为影响。\n'
+printf '  · 桌面图标未立即恢复时，手动跑一次 uicache 或重启设备。\n'
 printf '\n'
 exit 0
 EOF
 chmod 755 "$STAGE/DEBIAN/postinst"
 
-# ---- v1.6.6 prerm：干净卸载 ----
-# 还原宿主 Info.plist 注入键、删备选图标 PNG、清备份残留。
-# 卸载优先：任何失败都不许拦住 dpkg（set +e 不用 set -e）。
+# ---- v1.6.10 prerm：干净卸载 ----
+# 桌面动态图标功能已整体移除，这里仍要履行旧版（v1.6.6-v1.6.9.2）
+# 可能已注入残留的还原责任：删 OkaIconInjected 标记键 + 两张 PNG，
+# 与 postinst 用同一套口径（嵌套键 CFBundleAlternateIcons 同样留惰性声明）。
+# 卸载优先：任何失败都不许拦住 dpkg（全程 set +e）。
 cat > "$STAGE/DEBIAN/prerm" <<'EOF'
 #!/bin/sh
 set +e
-# v1.6.6：桌面动态图标还原（幂等，没注入过也不会做错事）
-__HELPER__ restore 2>&1
+for __APPDIR in /var/containers/Bundle/Application/*; do
+  [ -d "$__APPDIR" ] || continue
+  for __APP in "$__APPDIR"/*.app; do
+    [ -d "$__APP" ] || continue
+    grep -aq com.blinker.documents "$__APP/Info.plist" 2>/dev/null || continue
+    if command -v plutil >/dev/null 2>&1; then
+      plutil -remove OkaIconInjected "$__APP/Info.plist" 2>/dev/null
+    fi
+    rm -f "$__APP/OkaIconGreen@2x.png" "$__APP/OkaIconGreen@3x.png" 2>/dev/null
+  done
+done
+# 注：CFBundleAlternateIcons 里的 OkaIconGreen 声明是嵌套键，plutil 删不掉，
+# 留惰性声明（无人调 setAlternateIconName 即无行为影响），postinst 已注明。
 exit 0
 EOF
 chmod 755 "$STAGE/DEBIAN/prerm"
-
-# ---- 把 scheme 相关的路径写进安装脚本 ----
-# postinst/prerm 是设备上跑的 shell，用单引号 heredoc 写死了文本；
-# helper/uicache 路径随 scheme 变（rootless 多一层 /var/jb），
-# 这里后处理注入字面量（路径是 ASCII、无 sed 元字符）。
-# ★ 不许用原地编辑标志（GNU 专属短选项）：GNU sed 直接吃 script，BSD sed
-#   （CI macos runner）要求它带 backup 后缀，两边写法互不相容 ——
-#   v1.6.6 run 44 实测死在 rename 报错。统一走 sed + 临时文件 + mv，
-#   两个实现行为一致，且不产生 .bak 垃圾（用户红线）。
-sub_file() {  # $1=sed 脚本，$2..=目标文件；BSD/GNU 双兼容
-  _script="$1"; shift
-  for _f in "$@"; do
-    _tmp="${_f}.oka-tmp"
-    sed "$_script" "$_f" > "$_tmp" || { rm -f "$_tmp"; return 1; }
-    mv "$_tmp" "$_f"
-  done
-}
-HELPER="$PREFIX/usr/bin/oka-iconinject"
-UICACHE="$PREFIX/usr/bin/uicache"
-sub_file "s|__HELPER__|$HELPER|g"  "$STAGE/DEBIAN/postinst" "$STAGE/DEBIAN/prerm"
-sub_file "s|__UICACHE__|$UICACHE|g" "$STAGE/DEBIAN/postinst"
 
 # ---- 打包 ----
 DEB="$OUT/${PKG}_${VER}_${ARCH}.deb"
@@ -188,15 +184,8 @@ def _is_exec(rel):
 
     SpringBoard 注入的 dylib 如果丢了 +x，装上去表现是「插件完全没加载」，
     而 dpkg 不报任何错 —— 这类问题排查成本极高，必须精确。
-
-    v1.6.6：oka-iconinject 没有任何扩展名，靠后缀认不出来，必须按完整
-    路径点名。它是 postinst 里 root 调的命令行工具 —— 丢了 +x 时
-    「Permission denied」，表现是注入静默不发生（而 postinst 原文有
-    || true，连错都不报）。
     """
     if rel.endswith('.dylib'):
-        return True
-    if rel == 'usr/bin/oka-iconinject' or rel.endswith('/usr/bin/oka-iconinject'):
         return True
     if rel.startswith('DEBIAN/') and rel.split('/')[-1] in \
             ('postinst', 'postrm', 'preinst', 'prerm'):
@@ -258,8 +247,8 @@ data = lzma.compress(_tar(), format=lzma.FORMAT_XZ)
 
 ctl = io.BytesIO()
 with tarfile.open(fileobj=ctl, mode='w', format=tarfile.GNU_FORMAT) as tf:
-    # v1.6.6：prerm 必须进 control.tar，否则 dpkg 根本不认这个卸载钩子
-    # （表现是"卸了插件、App 里注入的图标声明还在"，整洁卸载链断一半）。
+    # prerm 必须进 control.tar，否则 dpkg 根本不认这个卸载钩子
+    # （表现是"卸了插件，旧版注入的桌面图标残留还原不掉"）。
     for name in ('control', 'postinst', 'prerm'):
         p = os.path.join(stage, 'DEBIAN', name)
         if os.path.exists(p):

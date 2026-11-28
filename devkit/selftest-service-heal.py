@@ -5,7 +5,7 @@
 用法：python3 devkit/selftest-service-heal.py
 退出码 0 = 闸门可信；1 = 有破坏样本漏网、误伤或脚本自身 SETUP FAIL。
 
-同名方法论见 selftest-icon-gate.py：
+同名方法论见 selftest-noicongate.py：
   · 破坏样本 = 把真实源码改回「曾经出过事」或「逻辑上会让自愈失效」的形态；
   · 断言是**双向**的：闸门必须 rc=1 且触发键集合精确等于预期（少了是漏报，
     多了是误伤——误报比漏报更能把人带偏，所以键集合用集合相等而不是包含）；

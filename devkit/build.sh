@@ -71,12 +71,11 @@ python3 "$ROOT/devkit/gen-webassets.py" "$ROOT/web" "$BUILD/OkaWebAssets.h" \
 #     · 向 UIViewController* 发 respondsToSelector: 时用变量 SEL
 #   代码侧已尽量从根源改（HookInstanceMethod 的 outOrig 改成 void **），
 #   但运行时 hook 代码天然绕不开强转，抑制项保留。
-# ★ -I "$ROOT/devkit" 也是必需的（v1.6.9.2）：Tweak.xm import 了
-#   devkit/iconinject-core.h（安装形态门控判据，与 helper 共用）。该头在
-#   devkit/ 根而不是 devkit/include/，不加这个 -I 编译直接
-#   fatal error: 'iconinject-core.h' file not found。
+# ★ v1.6.10：-I "$ROOT/devkit" 已随桌面动态图标功能移除而删除 ——
+#   Tweak.xm 不再 import 任何 devkit/ 下的头（iconinject-core.h /
+#   oka-icon-common.h 与 helper 一并删除，只留 devkit/include/substrate.h）。
 xcrun clang -target "$TRIPLE" -isysroot "$SDK" \
-  -I "$INC" -I "$ROOT/devkit" -I "$BUILD" \
+  -I "$INC" -I "$BUILD" \
   -x objective-c \
   -dynamiclib -fobjc-arc -fobjc-exceptions -Os -Wall \
   -Wno-unused-parameter -Wno-unused-function -Wno-deprecated-declarations \
@@ -97,46 +96,35 @@ xcrun clang -target "$TRIPLE" -isysroot "$SDK" \
 # 表现是「装了完全没反应」，且系统不报任何错。
 codesign --force --sign - "$BUILD/$NAME.dylib"
 
-# ---------- 2b) v1.6.6 动态图标注入 helper ----------
-# 为什么需要独立工具：setAlternateIconName: 要求备选图标预声明在宿主
-#   Info.plist + 文件在 .app 内。dylib 注入的是 App 沙箱进程，**写不了
-#   .app 目录**；注入必须由 deb 安装期以 root 跑的 helper 完成。
-#   切换本身仍走公开 API（见 Tweak.xm 的 OkaSetAppIcon）。
-#
-# ★ 先跑 host 单测再编 iOS 版：红→绿像素映射的判定边界（什么算红）是
-#   用户指定的视觉规格，改坏了没有任何运行时报错，只有纯函数单测能钉住。
-#   selftest-iconinject.c 不依赖任何 SDK —— CI 的 macOS runner 直接编。
-clang -O2 -Wall -Wextra -I "$ROOT/devkit" \
-  "$ROOT/devkit/selftest-iconinject.c" -o "$BUILD/selftest-iconinject" \
-  || { echo "✗ 红→绿单测编译失败"; exit 1; }
-"$BUILD/selftest-iconinject" \
-  || { echo "✗ 红→绿映射单测未过（视觉规格的判定边界坏了）"; exit 1; }
-echo "✓ 红→绿映射 host 单测通过"
+# ---------- 2b) v1.6.10 桌面动态图标：移除 + 防回流闸门 ----------
+# 用户 2026-11-28 反馈「没生效」：注入链路（iconinject helper +
+#   CFBundleAlternateIcons + Info.plist 写键）与切换链路
+#   （setAlternateIconName:）整体删除，helper 与共用头文件一并移除。
+# 以下判据防回流，分三层：
+#   ① 源码层（剥注释）：devkit/check-no-icon-gate.py 盯 Tweak.xm，
+#      12 个被删标识符（函数/常量/selector/头文件/偏好键）出现任一即失败；
+#   ② 反证：devkit/selftest-noicongate.py 跑 1 良性 + 7 破坏 + 还原，
+#      证明闸门不是摆设（良性 PASS / 破坏逐个 FAIL / 还原 PASS）；
+#   ③ 产物层：dylib 二进制 grep -a 同词表 —— selector 走
+#      __objc_methname 会进 __cstring，注释不进，产物层无需剥注释。
+# 为什么必须有这层：回归的症状（装了没反应、桌面无提示）在真机上
+#   零报错，人只有重装一次才发现，成本由用户承担。
+python3 "$ROOT/devkit/check-no-icon-gate.py" "$ROOT/Tweak.xm" \
+  || { echo "✗ 桌面动态图标标识符回流（v1.6.10 已移除）"; exit 1; }
 
-xcrun clang -target "$TRIPLE" -isysroot "$SDK" \
-  -I "$ROOT/devkit" -I "$INC" \
-  -x objective-c \
-  -fobjc-arc -fobjc-exceptions -Os -Wall \
-  -Wno-unused-parameter -Wno-deprecated-declarations \
-  -Wno-nullability-completeness \
-  -framework Foundation -framework CoreGraphics -framework ImageIO \
-  -framework MobileCoreServices \
-  "$ROOT/devkit/iconinject.m" \
-  -o "$BUILD/oka-iconinject" \
-  || { echo "✗ 图标注入 helper 编译失败"; exit 1; }
-codesign --force --sign - "$BUILD/oka-iconinject"
+python3 "$ROOT/devkit/selftest-noicongate.py" "$ROOT/Tweak.xm" \
+  || { echo "✗ 图标防回流反证未过（良性/还原未过，或有破坏样本漏拦）"; exit 1; }
+echo "✓ v1.6.10 源码闸门 + 7/7 破坏反证通过"
 
-# 指纹闸门：注入/声明链路上四个关键标识，缺任何一个都是"静默功能
-# 缺失"（helper 能装、能跑，但注入的东西 dylib 认不出，或反过来）。
-# v1.6.9.2：装态判据的两个文件字面量（helper 侧门控的输入事实），
-#   丢了等于门控失效但没有任何报错。
-for sym in OkaIconGreen OkaIconInjected CFBundleAlternateIcons \
-           com.blinker.documents \
-           iTunesMetadata.plist embedded.mobileprovision; do
-  grep -aq "$sym" "$BUILD/oka-iconinject" \
-    || { echo "✗ helper 缺 ${sym}（注入/声明链路不完整）"; exit 1; }
+for sym in "setAlternateIconName:completionHandler:" \
+           "OkaIconGreen" "OkaIconInjected" "CFBundleAlternateIcons" \
+           "oka-iconinject"; do
+  if grep -aq "$sym" "$BUILD/$NAME.dylib"; then
+    echo "✗ dylib 仍含 ${sym}：桌面动态图标（红染绿）v1.6.10 已移除，不该再出现"
+    exit 1
+  fi
 done
-echo "✓ helper 编译 + 指纹闸门通过（oka-iconinject）"
+echo "✓ dylib 无桌面动态图标残留（负向指纹 5 项）"
 
 # ---------- 3) 架构硬闸门 ----------
 echo "--- dylib ---"
@@ -214,30 +202,30 @@ if ! python3 "$ROOT/devkit/check-shortcut-clear.py" "$ROOT/Tweak.xm"; then
 fi
 echo "✓ v1.6.4 快捷菜单：关开关主动摘除自己那条 / 保留他人项 / hook 无条件挂载"
 
-# ---------- 4-0b) v1.6.6 动态图标闸门（源码判据） ----------
-# 用户三条红线（不能误导 / 不能打不开 / 关=默认图标、开=红染绿）都要靠
-# 这组判据守住：切换 API 调用形态、四个同步点、becomeActive 兜底注册、
-# 注入标记门、只读状态行、按钮从右下挪右上。缺一条都是"静默不切换"。
-# 判据抽成独立脚本（同 4-0 的理由：写 heredoc 就只能靠另抄一份镜像来
-# 验证，那证明不了真实闸门有效）；反证见 selftest-icon-gate.py。
-if ! python3 "$ROOT/devkit/check-icon-switch.py" "$ROOT/Tweak.xm"; then
-  echo "✗ 动态图标闸门未通过（开/关图标不会自动切换，或入口位置/文案退化）"
-  exit 1
-fi
-echo "✓ v1.6.6 起动态图标：切换链路/四个同步点/becomeActive 兜底/注入标记门齐备；v1.6.8：偏移≥56/图标三态；v1.6.9：动作栈≤4行/只读信息走message/present前收键盘；v1.6.9.1：completion 再收 alert 自动获焦；v1.6.9.2：装态门控与 helper 共源（只有 embedded.mobileprovision 才否决）"
-
-# v1.6.6 dylib 侧指纹（切换链路与门控的标识，丢了不会报错、只会不切换）
-# v1.6.9.2：OkaHostIsAppStore 的两个查询字面量（@"iTunesMetadata" /
-#   @"embedded" + @"mobileprovision"）—— 缺任何一个，面板装态判定失真。
-for sym in "setAlternateIconName:completionHandler:" \
-           "OkaIconGreen" "OkaIconInjected" \
-           "applicationDidBecomeActive:" \
-           "endEditing" "resignFirstResponder" \
-           "iTunesMetadata" "mobileprovision"; do
-  grep -aq "$sym" "$BUILD/$NAME.dylib" \
-    || { echo "✗ dylib 缺 ${sym}（桌面动态图标会静默失效 / v1.6.9 面板不收键盘，动作行会被键盘高度 budget 挤掉）"; exit 1; }
+# ---------- 4-0b) v1.6.10 桌面动态图标防回流（防呆判据） ----------
+# 正向闸门（check-icon-switch.py / selftest-icon-gate.py）随功能移除
+#   一并删除；守住「不再回来」的负向判据在 2b) 段（源码 + 产物 + 反证）。
+#   这里只加一条防呆：旧 helper / 共用头 / 旧闸门脚本不得再出现在
+#   devkit/ —— 「文件悄悄回来但没人调用」同样是隐回归。
+for gone in "iconinject.m" "iconinject-core.h" "selftest-iconinject.c" \
+            "oka-icon-common.h" "check-icon-switch.py" "selftest-icon-gate.py"; do
+  if [ -e "$ROOT/devkit/$gone" ] || [ -e "$ROOT/devkit/include/$gone" ]; then
+    echo "✗ ${gone} 又出现了：动态图标（红染绿）v1.6.10 已移除，别把旧链路搬回来"
+    exit 1
+  fi
 done
-echo "✓ v1.6.6 dylib 切换链路指纹齐全（alternate 名/标记键/becomeActive）"
+echo "✓ v1.6.10 移除干净：helper / 共用头 / 旧闸门脚本均不存在"
+
+# dylib 侧指纹（顺手保留的功能标识；图标链路指纹已移到 2b) 负向段）
+#   v1.6.10：setAlternateIconName:completionHandler: / OkaIconGreen /
+#   OkaIconInjected / iTunesMetadata / mobileprovision 五个串全部随
+#   桌面动态图标与装态判定移除 —— 它们在 dylib 里出现=旧链路回流。
+for sym in "applicationDidBecomeActive:" \
+           "endEditing" "resignFirstResponder"; do
+  grep -aq "$sym" "$BUILD/$NAME.dylib" \
+    || { echo "✗ dylib 缺 ${sym}（becomeActive 自愈或面板收键盘会失效）"; exit 1; }
+done
+echo "✓ dylib 指纹齐全（becomeActive / endEditing / resignFirstResponder）"
 
 # ---------- 4-0c) v1.6.7 服务假死自愈闸门（源码判据） ----------
 # 用户实测：开着 WiFi 传输过一会儿网页打不开，App 没被杀、连接状态从
@@ -260,19 +248,19 @@ for sym in CFSocketConnectToAddress startWithOptions:error:; do
 done
 echo "✓ v1.6.7 dylib 自愈链路指纹齐全（回环连接/重放 selector）"
 
-# ---------- 4-0d) v1.6.7 postinst 注入退出码捕获 ----------
-# 用户实测「卸载插件重装 deb 仍显示未启用」时设备上零线索：v1.6.6 的
-# postinst 对 helper 注入一句 || true 全吞掉。退出码 2 = 安全跳过
-# （宿主不是 App Store 原版装态），此时必须把原因和 --force 指引打印出来。
-# 判据是成对存在性：捕获行 / 2 分支 / --force 提示，缺一条都可能重演。
-if ! grep -qF '__RC=0' "$ROOT/devkit/mkdeb.sh" \
-   || ! grep -qF '__HELPER__ inject 2>&1 || __RC=$?' "$ROOT/devkit/mkdeb.sh" \
-   || ! grep -qF 'if [ "$__RC" = "2" ]' "$ROOT/devkit/mkdeb.sh" \
-   || ! grep -qF 'inject --force' "$ROOT/devkit/mkdeb.sh"; then
-  echo "✗ mkdeb.sh 的 postinst 没捕获/讲清注入退出码（装完没生效时用户零线索）"
+# ---------- 4-0d) v1.6.10 postinst 注入残留清理 ----------
+# 桌面动态图标（红染绿）v1.6.10 移除后，**旧版本可能已经注入过**宿主
+#   .app（CFBundleAlternateIcons 声明 + OkaIconGreen PNG + OkaIconInjected
+#   标记键）。不做清理 = 用户桌面上留着一套没人切换的僵尸声明，且
+#   「功能已删但文件还在」比没装过更难看。新版 postinst 必须幂等清理
+#   三件套；判据是成对存在性：标记键 / 声明键 / PNG 名。
+if ! grep -qF 'OkaIconInjected' "$ROOT/devkit/mkdeb.sh" \
+   || ! grep -qF 'CFBundleAlternateIcons' "$ROOT/devkit/mkdeb.sh" \
+   || ! grep -qF 'OkaIconGreen' "$ROOT/devkit/mkdeb.sh"; then
+  echo "✗ mkdeb.sh 的 postinst 缺注入残留清理（旧版注入的声明/PNG 会留在宿主里）"
   exit 1
 fi
-echo "✓ v1.6.7 postinst 捕获注入退出码并在跳过时给出 --force 指引"
+echo "✓ v1.6.10 postinst 幂等清理旧版注入残留（标记键 / 声明键 / PNG）"
 
 # 功能 2a：蜂窝解禁
 for sym in SCNetworkReachabilityGetFlags reachabilityChangedWithNote: \

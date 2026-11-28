@@ -82,15 +82,6 @@
 // v1.1.0 网页增强资源（devkit/gen-webassets.py 在编译前生成到 .build/）。
 // 纯 ASCII C 字符串常量 kOkaWebJS / kOkaWebCSS，构建脚本用 -I .build 顶上来。
 #import "OkaWebAssets.h"
-// v1.6.6 桌面动态图标：与 helper iconinject 共用的常量（icon 名 / 标记键 /
-// 宿主 bundle id）。两边必须同源，防止"注入成功但切换失效"的静默分叉。
-#import "oka-icon-common.h"
-// ★ v1.6.9.2：安装形态门控的**判据本体**（纯函数，无 SDK 依赖）。dylib 的
-//   OkaHostIsAppStore 与 helper 的安装期门控共用这一份 —— 两边各写一份
-//   必然漂移，漂移的症状是「面板说一套、安装期做另一套」，运行时零报错。
-//   旧口径（metadata 缺失即否决）在真机上误拒过 App Store 安装的宿主，
-//   见 oka_install_form 处的注释与 devkit/selftest-iconinject.c 断言。
-#import "iconinject-core.h"
 
 #define SHORTCUT_TYPE  @"com.oka.wifi.start"
 // ★ Swift 类在 ObjC 运行时里注册的是 mangled 名（我从 __objc_classlist 的
@@ -100,14 +91,15 @@
 #define APPDEL_CLASS_MANGLED @"_TtC7Blinker11AppDelegate"
 #define APPDEL_CLASS_SWIFT   @"Blinker.AppDelegate"
 
-// ★ v1.6.9.2：构建标识。写进设置面板 message 的版本行 —— 用户实测
+// ★ 构建标识。写进设置面板 message 的版本行 —— 用户实测
 //   「开关不见了」时第一件事是核对设备上跑的到底是哪个构建（旧实例残留 /
 //   装错方案都会让新代码不生效，而面板外观看不出来）。改版本号必须同步这里。
-//   v1.6.9 起只读信息（图标三态 + 版本）全部走 message、不再占 action 行，
+//   v1.6.9 起只读信息（构建版本）走 message、不再占 action 行，
 //   原因见 OkaPresentWebAuthSettings 里的 v1.6.9 注释。
-//   本轮改的是安装形态门控口径：iTunesMetadata 缺失不再否决，只有
-//   embedded.mobileprovision（第三方签名）才否决，见 OkaHostIsAppStore。
-#define OKA_BUILD_TAG @"v1.6.9.2"
+//   v1.6.10：桌面动态图标（红染绿）功能整体移除 —— 真机未生效；
+//   注入链路（helper + CFBundleAlternateIcons）与切换链路全部删除，
+//   旧版本注入的残留由 postinst 幂等清理（删标记键 + 删 PNG）。
+#define OKA_BUILD_TAG @"v1.6.10"
 
 static NSString *const kPrefsPath = @"/var/mobile/Library/Preferences/com.oka.wifitweak.plist";
 
@@ -144,7 +136,6 @@ static Class LookupClass(NSString *mangled, NSString *swiftName) {
 // ---------------------------------------------------------------------------
 // 运行期配置（读 plist，缺省全开）
 // ---------------------------------------------------------------------------
-static BOOL gEnableSwitchIcon = YES;   // 功能 4（v1.6.6）：桌面动态图标（开=红染绿）
 // ★ v1.6.7：服务假死自愈（回前台探活 + 45s 定时探活，假死自动重拉）。
 //   默认 YES —— 用户红线①「不能有时生效有时不生效」的运行期落点；
 //   写 false 可整套关掉（含定时器线程，不留后台空转）。
@@ -227,8 +218,6 @@ static void LoadPrefs(void) {
     }
     if (d[@"EnableCellular"])    gEnableCellular    = [d[@"EnableCellular"] boolValue];
     if (d[@"EnableIPFix"])       gEnableIPFix       = [d[@"EnableIPFix"] boolValue];
-    // v1.6.6：桌面动态图标（红染绿）。默认 YES，写 false 可关。
-    if (d[@"IconSwitch"])        gEnableSwitchIcon  = [d[@"IconSwitch"] boolValue];
     // v1.6.7：服务假死自愈。默认 YES，写 false 关（用户可自担「放着会假死」）
     if (d[@"ServiceHeal"])       gEnableServiceHeal = [d[@"ServiceHeal"] boolValue];
     if (d[@"EnableWebEnhance"])  gEnableWebEnhance  = [d[@"EnableWebEnhance"] boolValue];
@@ -876,15 +865,6 @@ static void OkaAttachWebAuthEntry(id page);
 //   必须前置声明：调用点（OkaPresentWebAuthSettings 的面板 action）在文件中部，
 //   定义在设置区后部 —— C 规则声明先于使用，缺了这条 CI 编译直接报错。
 static void OkaToggleShortcutMenu(void);
-// ★ v1.6.6：桌面动态图标就绪状态（面板只读状态行调用），实现在设置区后部。
-//   同一教训第二次：缺前置声明时 clang 一次报两个错 —— 先
-//   call to undeclared function（implicit declaration），再
-//   static declaration follows non-static declaration。
-static BOOL OkaIconSwitchReady(void);
-// ★ v1.6.8：宿主是不是 App Store 原版装态（面板图标状态行三态文案调用）。
-//   第四次同型教训：调用点（OkaPresentWebAuthSettings）在文件中部，定义在
-//   设置区后部 —— 照旧补前置声明，别等 CI clang 来教。
-static BOOL OkaHostIsAppStore(void);
 // ★ v1.6.7：服务假死自愈入口，实现在 becomeActive hook 之后的自愈段。
 //   第三次同型教训：OkaSelfHealService 的调用点（my_applicationDidBecomeActive，
 //   文件中部）早于定义（自愈段，文件后部）——缺前置声明时 clang 先报 call to
@@ -1229,31 +1209,17 @@ static void OkaPresentWebAuthSettings(id page) {
         : @"当前未启用 —— 同一 WiFi 下谁都能直接打开网页。\n\n"
           @"设置后要重新开启 WiFi 传输才生效。";
 
-    // ★ v1.6.9：只读信息全部改走 alert message，不再占 action 行。
+    // ★ v1.6.9：只读信息（构建版本）全部走 alert message，不再占 action 行。
     //   真机实测不变式（v1.6.7 / v1.6.8 两张反馈截图，密码框获焦、键盘
     //   均弹起）：动作行总数一旦超过末 4 行，超出的行从栈顶开始整行消失
     //   —— v1.6.7 丢第 1 行「长按快捷菜单」、v1.6.8 再丢「桌面动态图标」，
     //   两代可见行恒为最末 4 行；而消息文本行从不丢。message 是纯文本、
-    //   可控高、不参与动作行淘汰，所以图标三态 + 构建版本放进 message，
+    //   可控高、不参与动作行淘汰，所以构建版本放进 message，
     //   动作栈只留 4 行交互行（菜单 / 关闭密码 / 保存 / 取消）。
-    //   「不能误导」红线不变：三态文案一字不挪，只是换了个不会丢的容器。
-    BOOL iconReady = OkaIconSwitchReady();
-    NSString *iconState;
-    if (iconReady) {
-        iconState = @"已启用（开=绿 / 关=原图标）";
-    } else if (OkaHostIsAppStore()) {
-        iconState = @"未启用（App 更新或重装会丢失，重装本插件 deb 可恢复）";
-    } else {
-        // v1.6.9.2：走到这里只有一种情况 —— 宿主带 embedded.mobileprovision
-        //   （第三方签名）。旧文案「宿主非 App Store 原版装态」是旧口径的
-        //   产物：那时 iTunesMetadata 缺失也判非原版，真机把 App Store
-        //   安装的宿主也分流到这里，用户看着文案以为是自己装错了。
-        iconState = @"未启用（宿主带第三方签名，安装期注入被安全策略跳过；"
-                    @"需 App Store 原版宿主，或按安装期输出执行 inject --force）";
-    }
+    //   （v1.6.10 前这里还有一段「桌面动态图标」三态文案，随功能整体
+    //   移除而删除， host 装态判定 OkaHostIsAppStore 一并退出。）
     NSString *infoMsg = [NSString stringWithFormat:
-        @"%@\n\n桌面动态图标：%@\n插件版本：%@（确认设备实跑构建）",
-        msg, iconState, OKA_BUILD_TAG];
+        @"%@\n\n插件版本：%@", msg, OKA_BUILD_TAG];
 
     UIAlertController *ac =
         [UIAlertController alertControllerWithTitle:@"网页访问密码"
@@ -1481,77 +1447,13 @@ static void OkaToggleShortcutMenu(void) {
 }
 
 // ===========================================================================
-//  v1.6.6：桌面动态图标 —— 开=红染绿、关=App 默认原图标
+//  v1.6.10：桌面动态图标（红染绿）功能已整体移除。
+//  用户 2026-11-28 反馈「没生效」，移除范围：helper（iconinject 注入/还原）、
+//  OkaSetAppIcon 切换链路、OkaIconSwitchReady/OkaHostIsAppStore 判定、
+//  面板三态文案、IconSwitch 偏好键、gEnableSwitchIcon 开关。
+//  旧版本注入的宿主残留由 deb postinst 幂等清理（删 OkaIconInjected 标记键
+//  + 删 OkaIconGreen PNG）；负向闸门见 devkit/build.sh 的「图标链路防回流」段。
 // ===========================================================================
-//  需求（用户原话）：桌面上直接看出 WiFi 传输开/关；拒绝小红点
-//  （"看着小红点我就想给点掉"）；两条红线 —— 不能时灵时不灵误导人、
-//  不能破坏宿主 App 签名导致打不开。
-//
-//  落地形态（唯一同时满足三条约束的路径）：
-//   · 注入一次性、只发生在 deb 安装时：helper（devkit/iconinject.m 编出的
-//     root 工具）把「默认图标红色替换为绿色的版本」写进宿主 .app，并在
-//     Info.plist 声明 CFBundleAlternateIcons。helper 带安装形态门控
-//     （仅 App Store 原版环境自动注入，自签环境默认不动）、plist 写坏
-//     自愈回滚、prerm 完整还原 —— 设计细节见 helper 头部注释。
-//   · 切换零风险：运行时只调公开 API setAlternateIconName:，是系统标准
-//     行为。注入成功即稳定生效，不存在"有时生效"。
-//   · 语义：开 = OkaIconGreen（原图标红色替换为绿色的版本）；
-//     关 = nil（回 App 原默认图标）。原图标恰好也是"未注入时的显示态"，
-//     所以「功能未启用」与「服务已关」在桌面上一模一样 —— 绝不会把
-//     没生效骗成已生效（面板里另有只读状态行，见 OkaPresentWebAuthSettings）。
-
-// 注入是否完成？读宿主 Info.plist 的 OkaIconInjected 标记键
-// （helper 成功时写入；App 更新/重装会丢失，需重装 deb 恢复）。
-static BOOL OkaIconSwitchReady(void) {
-    // ★ v1.6.7：直接读 Info.plist 文件，**不走 infoDictionary**。
-    //   infoDictionary 是 App 启动那一刻的快照：helper 在 deb 安装期把
-    //   注入标记写进 .app/Info.plist 后，没重启 App 时缓存里永远没有这个键
-    //   —— 用户实测「卸载重装 deb 也没生效」正是这个缓存（v1.6.6 原实现
-    //   用 infoDictionary，装完必须杀 App 才能好，而面板不会告诉用户）。
-    NSString *plistPath = [[NSBundle mainBundle] pathForResource:@"Info"
-                                                          ofType:@"plist"];
-    if (!plistPath) return NO;
-    NSDictionary *plist = [NSDictionary dictionaryWithContentsOfFile:plistPath];
-    return plist[[NSString stringWithUTF8String:OKA_ICON_KEY_INJECTED]] != nil;
-}
-
-// 宿主是不是"可按 App Store 原版对待"？口径与 devkit/iconinject.m 的安装期
-// 门控逐字对齐（v1.6.9.2 起两边共用 iconinject-core.h 的 oka_install_form，
-// 不再各写一份会漂移的判据）：
-//   · embedded.mobileprovision 存在 = 第三方签名（自签/企业签/TestFlight/
-//     重签名）→ 判否。这类装态改 bundle 会破坏签名，「不能导致 App 打不开」
-//     红线命中；面板文案指引 inject --force 自担路径。
-//   · iTunesMetadata.plist 缺失**不再否决** —— 用户 2026-11-28 真机反馈：
-//     App Store 装的宿主被旧判据（缺 metadata 即否决）误判成「非原版装态」，
-//     安装期注入被白白跳过、面板显示未启用。metadata 只是旁证：在=App Store
-//     原版，缺=Apple 签名形态（VPP/MDM 或被清理过旁证的真 App Store 安装），
-//     一样放行。
-// 用途：v1.6.8 起面板图标状态行的三态文案 —— 未启用时分得清「Apple 签名
-// 形态但注入丢失（重装 deb 可恢复）」和「第三方签名被门控跳过（重装无用）」，
-//   不再拿一句「重装本插件可恢复」误导自签环境用户（真机实测踩过）。
-static BOOL OkaHostIsAppStore(void) {
-    NSString *meta = [[NSBundle mainBundle] pathForResource:@"iTunesMetadata"
-                                                     ofType:@"plist"];
-    NSString *prov = [[NSBundle mainBundle] pathForResource:@"embedded"
-                                                     ofType:@"mobileprovision"];
-    return oka_form_allows_inject(oka_install_form(meta != nil, prov != nil));
-}
-
-// 切图标。所有同步点都在主线程（用户点击 / GCDWebServer 回调 / App 生命周期
-// 回调），UIKit 属性设置不做跨线程处理。失败只静默降级 —— 图标不动、
-// 功能不丢、不弹不崩；此时桌面图标保持原样，而"原样"在语义上是安全的
-// （与关态/未启用同图）。
-static void OkaSetAppIcon(BOOL on) {
-    if (!gEnableSwitchIcon)          return;
-    if (!OkaIconSwitchReady())       return;
-    if (![[UIApplication sharedApplication] respondsToSelector:
-          @selector(setAlternateIconName:completionHandler:)]) return;  // iOS < 10.3
-    NSString *name = on ? [NSString stringWithUTF8String:OKA_ICON_NAME_GREEN] : nil;
-    [[UIApplication sharedApplication] setAlternateIconName:name
-                                          completionHandler:^(NSError *err) {
-        (void)err;   // 切换失败（签名/系统拒绝）：静默保持原图标，语义安全
-    }];
-}
 
 static BOOL (*orig_startWithOptions)(id, SEL, NSDictionary *, NSError **);
 static BOOL my_startWithOptions(id self, SEL _cmd, NSDictionary *options, NSError **error) {
@@ -1599,9 +1501,6 @@ static BOOL my_startWithOptions(id self, SEL _cmd, NSDictionary *options, NSErro
     if (ok) {
         gServerRunning = YES;
         gServerOptions = use;   // v1.6.7：自愈重放用这份（suspend=NO/密码头/端口 fallback 都在内）
-        // ★ v1.6.6：启动成功 → 桌面图标切「红染绿」版（OkaIconGreen）。
-        //   放在 if (ok) 块内：启动失败时不允许亮绿图标。
-        OkaSetAppIcon(YES);
     }
     return ok;
 }
@@ -1615,9 +1514,6 @@ static void my_stop(id self, SEL _cmd) {
     if (orig_stop) orig_stop(self, _cmd);
     gServerPort = 0;
     gServerRunning = NO;
-    // ★ v1.6.6：停服 → 桌面图标回到 App 默认原图（primary）。
-    //   放在 gServerRunning = NO 之后：先落状态、再同步图标。
-    OkaSetAppIcon(NO);
 }
 
 // ★ v1.4.2：第二层保险 —— 接管 GCDWebServer 的「进后台就停服」处理器。
@@ -1638,9 +1534,9 @@ static void my_didEnterBackground(id self, SEL _cmd, id note) {
     if (orig_didEnterBackground) orig_didEnterBackground(self, _cmd, note);
 }
 
-// ★ v1.6.6：App 每次回前台按真实服务状态同步一次桌面图标。
-//   didFinishLaunching 只兜冷启动；App 被系统杀掉后重进、或图标被外部因素
-//   改动后，只有这里能纠正。
+// v1.6.6：App 每次回前台同步状态；v1.6.10 桌面动态图标整体移除后，
+//  此 hook 只保留 v1.6.7 的回前台探活自愈（假死多发生在「放着没人管」
+//  的时候，用户回来第一件事就是刷新网页，此时不修就要再吃一次打不开）。
 //   applicationDidBecomeActive: 是 UIApplicationDelegate 的**可选**方法，
 //   App 可能根本没实现 —— 所以注册（见 OkaWiFiInit）走 class_addMethod
 //   补实现，不能走 HookInstanceMethod：它对未实现的方法会直接 return，
@@ -1650,9 +1546,6 @@ static void my_applicationDidBecomeActive(id self, SEL _cmd, UIApplication *app)
     if (orig_applicationDidBecomeActive) {
         orig_applicationDidBecomeActive(self, _cmd, app);
     }
-    OkaSetAppIcon(gServerRunning);
-    // ★ v1.6.7：回前台顺手探活自愈 —— 假死多发生在「放着没人管」的时候，
-    //   用户回来第一件事就是刷新网页，此时不修就要再吃一次打不开。
     OkaSelfHealService();
 }
 
@@ -1716,8 +1609,6 @@ static void OkaSelfHealService(void) {
     NSUInteger real = ((NSUInteger (*)(id, SEL))objc_msgSend)(srv, @selector(port));
     if (real) gServerPort = real;
     gServerRunning = ok;
-    // 自愈结果同步桌面图标（成功=绿 / 失败=回原图，语义与手动开关一致）。
-    OkaSetAppIcon(gServerRunning);
 }
 
 // 定时探活：45s 一轮兜「没人切前后台、一直挂着」的场景。
@@ -2106,13 +1997,6 @@ static BOOL (*orig_didFinishLaunching)(id, SEL, UIApplication *, NSDictionary *)
 static BOOL my_didFinishLaunching(id self, SEL _cmd, UIApplication *app, NSDictionary *opts) {
     BOOL r = orig_didFinishLaunching ? orig_didFinishLaunching(self, _cmd, app, opts) : YES;
 
-    // ★ v1.6.6：按真实服务状态同步桌面图标。
-    //   位置刻意放在所有 return 之前：下面三条出口（v1.6.5 重装自动清 /
-    //   关开关摘除 / 正常注入）都会被覆盖，不会漏。
-    //   冷启动时服务必然没起（gServerRunning=NO）→ 图标回到默认原图，
-    //   同时兜住上次 App 被系统杀掉时图标停在"绿"的残留 —— 那会让用户
-    //   以为服务还在跑，正是"图标误导"要防的情况。
-    OkaSetAppIcon(gServerRunning);
     // ★ v1.6.7：挂定时探活。冷启动必然服务没起（自愈函数自己会早退），
     //   放在这里只求「App 活着期间一直有人值班」；开关关掉时自愈首行
     //   即返回，定时器空转成本 ≈ 0。
@@ -2711,9 +2595,10 @@ static void OkaWiFiInit(void) {
                                    (void **)&orig_didFinishLaunching,
                                    "-[AppDelegate application:didFinishLaunchingWithOptions:]");
 
-                // ★ v1.6.6：回前台同步桌面图标。无条件注册（与 didFinishLaunching
-                //   同理由：同步逻辑自己看 gEnableSwitchIcon / 注入标记，gate 住
-                //   它会漏同步，而漏同步的症状正是用户 bug 报的"没自动切换"）。
+                // v1.6.7：回前台探活自愈。无条件注册（与 didFinishLaunching
+                //   同理由：自愈逻辑自己看 gServerRunning / 端口与偏好开关，
+                //   gate 住它会漏自愈，而漏自愈的症状正是用户 bug 报的
+                //   「放着放着网页打不开」）。
                 //   didBecomeActive 是可选 delegate 方法，App 可能没实现：
                 //   先 class_addMethod 补实现；返回 NO 说明已存在，
                 //   再走 HookInstanceMethod 拿原实现并替换。

@@ -49,9 +49,9 @@ def main():
 
     cases = [
         # ---- 破坏样本：GNU-only 原地编辑（run 44 真事故的两行原样）----
-        ("S1 mkdeb run-44 原样（GNU sed 原地编辑）",
+        ("S1 mkdeb run-44 同形态（GNU sed 原地编辑）",
          "devkit/mkdeb.sh",
-         '#!/bin/bash\nsed -i "s|__HELPER__|/usr/bin/oka-iconinject|g" '
+         '#!/bin/bash\nsed -i "s|__MARK__|/usr/bin/generic|g" '
          '"$STAGE/DEBIAN/postinst" "$STAGE/DEBIAN/prerm"\n',
          {"R8"}),
         ("S2 sed -i 带 backup 后缀（GNU 写法、BSD 语义也不对）",
@@ -65,13 +65,13 @@ def main():
          "devkit/z.sh", '#!/bin/bash\nset -u\necho "✓ $CPU，单切片"\n',
          {"R1"}),
         # ---- 良性样本：必须放过 ----
-        ("S5 sub_file 双兼容替换（mkdeb.sh 现行写法）",
+        ("S5 sub_file 双兼容替换（sed + 临时文件 + mv 写法）",
          "devkit/mkdeb.sh",
          '#!/bin/bash\nsub_file() {\n  _script="$1"; shift\n'
          '  for _f in "$@"; do\n    _tmp="${_f}.oka-tmp"\n'
          '    sed "$_script" "$_f" > "$_tmp" || { rm -f "$_tmp"; return 1; }\n'
          '    mv "$_tmp" "$_f"\n  done\n}\n'
-         'sub_file "s|__HELPER__|/usr/bin/oka-iconinject|g" "$STAGE/DEBIAN/postinst"\n',
+         'sub_file "s|__MARK__|/usr/bin/generic|g" "$STAGE/DEBIAN/postinst"\n',
          None),
         ("S6 ${CPU} 花括号写法（R1 的安全形态）",
          "devkit/w.sh", '#!/bin/bash\nset -u\necho "✓ ${CPU}，单切片"\n',

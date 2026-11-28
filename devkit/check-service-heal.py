@@ -22,7 +22,7 @@
   · 实例/最近 options 必须在 my_startWithOptions / my_serverURL
     里落袋，否则自愈重放拿不到同样配置（密码头丢失 = 网页端 401）。
 
-判据同样全部跑在**剥注释后**的源码上（同 check-icon-switch.py）。
+判据同样全部跑在**剥注释后**的源码上（同 check-no-icon-gate.py）。
 """
 import os
 import re

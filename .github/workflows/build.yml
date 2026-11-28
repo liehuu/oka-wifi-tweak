@@ -25,7 +25,7 @@ on:
 
 env:
   # 版本号单一来源，禁止在别处硬编码（否则会出现「包名 v1.0、内容 v1.1」）。
-  VERSION: ${{ github.event.inputs.version || '1.6.9.2' }}
+  VERSION: ${{ github.event.inputs.version || '1.6.10' }}
   HOMEBREW_NO_AUTO_UPDATE: 1
 
 jobs:
@@ -80,10 +80,13 @@ jobs:
 
       # 校验器自身的自测：证明 verify-deb.py 的判定**会失败**。
       # 一个从不失败的检查等于没有检查 —— 这条就是为了防这个。
-      # 30 个用例（正向 5 / 反向 25）全部用代码里拼出来的 Mach-O 与 deb，
+      # 29 个用例（正向 5 / 反向 24）全部用代码里拼出来的 Mach-O 与 deb，
       # 不依赖 lipo/otool，因此在 macOS 与本地 Windows 上结果一致。
-      # v1.6.6 起新增 C12：动态图标 helper 的路径/权限/架构/签名/指纹四项
-      # 与 postinst/prerm 存在性（C9 只查 mode，文件整个缺失时静默通过）。
+      # v1.6.10 起 C12 反转方向：桌面动态图标功能已整体移除，C12 改为负向
+      # 钉死——deb 里不得有 oka-iconinject、dylib 二进制不得含图标链路符号
+      # （OkaIconGreen / OkaIconInjected / CFBundleAlternateIcons /
+      # setAlternateIconName），外加 postinst/prerm 存在性（v1.6.10 起它们
+      # 负责清理旧版注入残留；C9 只查 mode，文件整个缺失时静默通过）。
       - name: Verify-deb selftest
         run: |
           set -eu
@@ -129,24 +132,20 @@ jobs:
           python3 devkit/check-shortcut-clear.py Tweak.xm
           python3 devkit/selftest-shortcut-gate.py
 
-      # v1.6.6 桌面动态图标闸门：
-      #  check-icon-switch.py 是 build.sh 构建时真正调用的那一份；
-      #  selftest-icon-gate.py 对它做 32 个破坏注入 + 9 个 devkit 侧样本
-      #  （含 3 个良性注释变更），证明这些判据**会失败**、且不误伤。
-      #  v1.6.9 起面板三条源码不变量（动作栈 ≤4 行 / 只读信息走 message /
-      #  present 前收键盘）各配了专属破坏样本（M33/M34/M35）；v1.6.9.1 再补
-      #  M36（present completion 必须收掉 alert 自动获焦——装机实测键盘重起
-      #  又把底部动作行挤掉）。
-      #  v1.6.9.2 补 M37/M38（装态门控口径：metadata 缺失不得再否决、prov 事实
-      #  必须原样喂判据——用户实测 App Store 安装被旧口径误判成非原版、注入被
-      #  白白跳过）、M39（dylib 删共源门控头 import）、M40（共源判据改名）。
-      #  反向测试实测抓到过闸门自身的缺陷（裸子串 in 判断被「加后缀改名」
-      #  放过），修的是闸门不是测试 —— 这就是为什么两个都要跑。
-      - name: Icon switch gate
+      # v1.6.10 桌面动态图标负向闸门（功能已整体移除，防回流）：
+      #  check-no-icon-gate.py 是 build.sh 构建时真正调用的那一份——源码剥注释
+      #  后查 12 个禁用标识符（OkaSetAppIcon / setAlternateIconName /
+      #  OkaIconSwitchReady / gEnableSwitchIcon / 共源常量 / 偏好键 …）；
+      #  selftest-noicongate.py 对它做 1 良性 + 7 破坏注入（函数定义 / 调用点 /
+      #  注入判定 / 装态判定 / 开关变量 / selector / 偏好键回流）+ 还原复跑，
+      #  证明这些判据**会失败**、且不误伤。
+      #  产物层同向判据在 build.sh 里：dylib 二进制不得再含 5 个图标符号，
+      #  mkdeb.sh 必须含残留清理三字面量，6 个旧文件不得回流 devkit/。
+      - name: No-icon gate (v1.6.10)
         run: |
           set -eu
-          python3 devkit/check-icon-switch.py Tweak.xm
-          python3 devkit/selftest-icon-gate.py
+          python3 devkit/check-no-icon-gate.py Tweak.xm
+          python3 devkit/selftest-noicongate.py
 
       # v1.6.7 服务假死自愈闸门：
       #  check-service-heal.py 是 build.sh 构建时真正调用的那一份；
