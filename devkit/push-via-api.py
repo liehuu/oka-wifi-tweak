@@ -16,6 +16,14 @@
 校验：
   - 重建 commit 的 tree sha 必须与本地 commit 的 tree sha 一致（内容/model
     完全对齐才落 ref）；不一致只撤回 blob/tree（不碰 ref），报错退出。
+
+★ blob 内容一律用 `git cat-file blob <sha>` 从**提交对象**里取，不读磁盘：
+  磁盘上可能是 CRLF（Windows 工作区 + .gitattributes 的 text=auto），而
+  提交里存的是 LF —— 直接 open(path,"rb") 上传会得到一个与本地 commit
+  不同的 blob，tree 必然对不上。这个坑的真实症状是
+  「tree 不一致：重建=eda2423... 本地=18c4c1e...」，而 `git status` 干净、
+  `git hash-object` 又报 SAME（它默认过 eol 过滤器，和 API 走的原始字节
+  不是一回事）。
 """
 import base64
 import json
@@ -91,7 +99,9 @@ def main():
                if e["type"] == "blob"}
     new_entries = []
     for path in diff_names:
-        raw = open(path, "rb").read()
+        # 从提交对象取字节（LF 规范化后的真实内容），不读工作区磁盘文件
+        raw = subprocess.run(["git", "cat-file", "blob", "%s:%s" % (local, path)],
+                             capture_output=True, check=True).stdout
         blob = api("POST", "/git/blobs", token,
                    {"content": base64.b64encode(raw).decode(),
                     "encoding": "base64"})

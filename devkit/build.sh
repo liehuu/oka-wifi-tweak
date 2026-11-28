@@ -272,13 +272,16 @@ echo "✓ v1.6.11 导航栏开关：11 条判据 + 18/18 破坏反证通过"
 #   mangled 类名必须进产物 —— 用 Blinker.FilesBrowserController 查类会
 #   拿不到类，hook 静默不生效；而它在 Swift 侧编成 __cstring 里的
 #   _TtC7Blinker22FilesBrowserController 字面量，源码写对了产物就一定有。
-#   四个状态文案同理：少了哪个，那个状态就落回 default（显示「未开启」）。
-for sym in "_TtC7Blinker22FilesBrowserController" \
-           "未开启" "待连接" "已连接" "已停止"; do
-  grep -aq "$sym" "$BUILD/$NAME.dylib" \
-    || { echo "✗ dylib 缺 ${sym}（导航栏开关会不出现或状态显示错）"; exit 1; }
-done
-echo "✓ v1.6.11 dylib 指纹齐全（mangled 类名 + 四个状态文案）"
+#
+# ★ 中文文案**不能**用 `grep -a 未开启` 判：ObjC 的 @"..." 字符串常量在
+#   Mach-O 里编成 **UTF-16LE**（每个 ASCII 也带 0x00 高位），用 UTF-8 字节
+#   序列去搜索必然找不到 —— 这正是首轮 CI 的假失败（编译明明过了，却报
+#   「dylib 缺 未开启」）。而 macOS 自带 BSD grep 又没有 -P，不能按字节匹配。
+#   所以判据外置成 check-dylib-fingerprint.py（同 4a-5 纪律：不写内联 heredoc），
+#   它按 UTF-16LE / UTF-8 两种编码在二进制里找，并额外要求 okaApplyState
+#   这个 selector 存在（否则文案只是死字符串，没人渲染）。
+python3 "$ROOT/devkit/check-dylib-fingerprint.py" "$BUILD/$NAME.dylib" \
+  || { echo "✗ dylib 缺导航栏开关指纹（开关会不出现 / 状态显示错 / 挂错类）"; exit 1; }
 
 # ---------- 4-0d) v1.6.10 postinst 注入残留清理 ----------
 # 桌面动态图标（红染绿）v1.6.10 移除后，**旧版本可能已经注入过**宿主

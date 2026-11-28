@@ -173,6 +173,10 @@ jobs:
           set -eu
           python3 devkit/check-navswitch.py Tweak.xm
           python3 devkit/selftest-navswitch.py Tweak.xm
+          # 产物层指纹判据自身的反证（用构造的假 dylib，不需要 iOS SDK）：
+          # 它守的是「中文文案在 Mach-O 里是 UTF-16LE、不能用 UTF-8 grep」——
+          # 首轮 CI 正是栽在这条上：编译已成功，却报「dylib 缺 未开启」。
+          python3 devkit/selftest-dylib-fingerprint.py
 
       - name: Build ${{ matrix.scheme }}
         run: |
