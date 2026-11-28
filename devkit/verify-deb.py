@@ -846,6 +846,37 @@ def main(argv):
                  'control.tar 缺 %s —— 旧版注入残留的清理钩子不存在，'
                  '从 v1.6.6-v1.6.9.2 升上来的设备还原不掉' % hook)
 
+    # ---------------- C13: 装期脚本不许 fork 外部命令做逐 app 扫描 ---------
+    # v1.6.10 起 postinst / prerm 要「遍历全部已装 App、找宿主任一条」。
+    # 初版是逐 app `grep -aq` —— 装 100+ 个 App 时 fork 上百次外部进程，
+    # Sileo/Zebra 的装后脚本又是前台同步执行，用户看到的就是「安装卡住」
+    # （本机仿真树：fork 版净耗时 43 秒量级 vs 零 fork 版 <0.1 秒）。
+    # v1.6.13 改为 shell 内建 while-read + case。这里把教训固化成判据：
+    #   (1) 钩子里不得出现 fork 外部命令做子串匹配（grep / egrep / fgrep）；
+    #   (2) 必须真的在扫（while-read 形态在）—— 否则有人会把整段删掉来
+    #       「通过闸门」，清理任务本身就被牺牲了，那种绿比红更坏。
+    print('\n[C13] 装期脚本零 fork 扫描')
+    import re as _re
+    for hook in ('postinst', 'prerm'):
+        ti = ctl_by_name.get('./' + hook)
+        if ti is None:
+            ti = ctl_by_name.get(hook)
+        if ti is None:
+            ck.check(False, 'C13', '%s 存在' % hook, '%s 不存在，无法核验' % hook)
+            continue
+        text = ctl_tf.extractfile(ti).read().decode('utf-8', 'replace')
+        _scan = [ln for ln in text.split('\n')
+                 if _re.search(r'(^|[;&|]\s*|\s)(grep|egrep|fgrep)\s+-', ln)]
+        ck.check(not _scan, 'C13',
+                 '%s 无外部 grep 调用（shell 内建逐行扫）' % hook,
+                 '%s 里 fork 了外部 grep：%r —— 每 app fork 一次进程会让'
+                 '安装/卸载卡顿（v1.6.13 修「安装慢」改的正是这个），须用'
+                 '`while IFS= read -r l || [ -n "$l" ]` + case' % (hook, _scan[:3]))
+        ck.check('while IFS= read -r' in text, 'C13',
+                 '%s 仍有逐行扫描逻辑（任务没被删）' % hook,
+                 '%s 里找不到 `while IFS= read -r` —— 别把清理任务整个删掉'
+                 '来规避 grep，旧版残留会还原不掉；改成内建逐行扫' % hook)
+
     return finish(ck)
 
 

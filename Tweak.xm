@@ -108,11 +108,14 @@
 //   开关状态取自 GCDWebServer 的真实运行态与活跃连接数，不猜。
 //   v1.6.12：修 v1.6.11 开关完全不出现 —— 判据从「navigationController
 //   非 nil」改为「nav.topViewController == vc」，并补两条回退挂法。
+//   v1.6.13：修「胶囊看得见但点不动」—— 手势 target 从局部变量承载体
+//   改为胶囊自身（UIKit 不保留 target，承载体出函数即释放，点击静默失效），
+//   并给 selftest 加锚点守卫 + /oka-xfer 加 taps 自证字段。
 // ★ 这个值必须与 CI 的 VERSION 一致：设置面板「插件版本」行直接显示它，
 //   README 排错表也让人按它核对装的是哪一版。v1.6.12 首轮就是漏改这一行，
 //   产物里仍是 v1.6.11 —— 功能是新的、版本号是旧的，比不显示更误导人。
 //   build.sh 有一条判据查它（buildTagMatch），漏改直接构建失败。
-#define OKA_BUILD_TAG @"v1.6.12"
+#define OKA_BUILD_TAG @"v1.6.13"
 
 static NSString *const kPrefsPath = @"/var/mobile/Library/Preferences/com.oka.wifitweak.plist";
 
@@ -2065,6 +2068,16 @@ enum {
 // 只记内存态：重启 App 后服务本来就没了，显示「未开启」才是对的。
 static BOOL gXferEverOn = NO;
 
+// 前向声明：下面的 @implementation OkaXferBarControl 里 okaXferTap: 要调它，
+// 而它的定义在 2300 行之后。static 函数不声明就跨定义使用，编译器直接报错。
+static void OkaXferToggle(void);
+
+// 点击计数：纯自证用。/oka-xfer 的 taps 字段就是读它 ——
+//    taps 一直 0 而用户确实点了 = 触摸没到胶囊（挂了空 target / 被挡住）；
+//    taps 在涨但状态不变   = 触摸到了，是 OkaXferToggle 那段逻辑没成。
+// 有了这个字段，「点不动」这种情况不用再靠猜。
+static NSUInteger gXferTapCount = 0;
+
 // 胶囊控件。自带状态渲染，外部只喂状态值。
 @interface OkaXferBarControl : UIView
 @property (nonatomic, assign) NSInteger xferState;
@@ -2080,6 +2093,8 @@ static BOOL gXferEverOn = NO;
 // 不声明会吃 -Wobjc-method-access（build.sh 已关掉该警告，但
 // 「靠关警告让它过」是隐患，正确写法是显式声明）。
 - (void)okaApplyState;
+// ★ 手势的 target 必须是**本胶囊自己**（见下方实现的注释）。
+- (void)okaXferTap:(id)sender;
 @end
 
 @implementation OkaXferBarControl {
@@ -2169,6 +2184,32 @@ static const CGFloat kOkaXferTextW   = 40.0;   // 三个汉字 @12pt 的固定�
     _dot.backgroundColor = dot;
     self.accessibilityLabel = a11y;
     self.accessibilityValue = text;
+}
+
+// ★★★ 手势 target 为什么必须是本胶囊自己（v1.6.13 修的正是这个）★★★
+// 原实现为了「让构造函数干净一点」，单独造了一个 OkaXferTapTarget 承载体：
+//     OkaXferTapTarget *tap = [OkaXferTapTarget new];   // ← 局部变量
+//     UITapGestureRecognizer *g = [[UITapGestureRecognizer alloc]
+//         initWithTarget:tap action:@selector(okaXferTap:)];
+//     [ctl addGestureRecognizer:g];
+// 我在那条注释里写「UIGestureRecognizer 会强引用 target」—— **这句是错的**，
+// 而它是本次故障的根因。UIKit 的 target-action 约定是：
+//     Control objects do not (and should not) retain their targets.
+// 客户端（也就是我们）负责保证 target 在收到 action 时还活着。
+// 控件只被识别器弱引用，于是 `tap` 这个局部变量在 OkaXferMakeControl 返回、
+// autoreleasepool 排空的那一刻就释放了。之后用户每点一下，识别器去调一个
+// 已经不存在的对象 —— 现代 UIKit 的弱引用会归零，所以**不崩溃、不报错、
+// 什么都不发生**，正好就是用户看到的现象：
+//     「胶囊能看到了，但是他不能点击进行开启，只能看状态」。
+// 状态显示一直是好的（ticker / 刷新走的是别的链路，与手势无关），
+// 所以只有「点」这一路是死的，极具迷惑性。
+//
+// 修法：target 用胶囊自己。胶囊被 superview（或 UIBarButtonItem.customView）
+// 强引用，生命周期与视图树一致 —— 视图在它就在，不存在「先死」的问题。
+// 于是那个承载体类整个删掉：少一个抽象，少一个能犯错的环节。
+- (void)okaXferTap:(id)sender {
+    gXferTapCount++;
+    OkaXferToggle();
 }
 @end
 
@@ -2413,13 +2454,10 @@ static void OkaXferToggle(void) {
 }
 
 // 点按处理：整个胶囊都是热区。
-@interface OkaXferTapTarget : NSObject
-@property (nonatomic, copy) void (^handler)(void);
-@end
-
-@implementation OkaXferTapTarget
-- (void)okaXferTap:(id)sender { if (self.handler) self.handler(); }
-@end
+// ★ 承载体 OkaXferTapTarget 已删除（v1.6.13）：UIGestureRecognizer **不**
+//   强引用 target，局部变量造的承载体会在构造函数返回时被释放，手势就此
+//   静默失效（不崩、不报错、点不动）。target 直接用胶囊自己 —— 它被
+//   superview / UIBarButtonItem 强引用，随视图树存活。
 
 // 构造胶囊 + 点击手势。三条挂载路径共用同一份构造 —— 若三条各写一遍，
 // 日后改样式必然漏一条，界面上出现两个长得不一样的开关。
@@ -2430,12 +2468,13 @@ static OkaXferBarControl *OkaXferMakeControl(void) {
             kOkaXferH)];
     [ctl sizeToFit];
 
-    // target 由手势识别器持有（UIGestureRecognizer 会强引用 target），
-    // 再挂一个关联对象是多余的；手势挂在 ctl 上，ctl 活着它就活着。
-    OkaXferTapTarget *tap = [OkaXferTapTarget new];
-    tap.handler = ^{ OkaXferToggle(); };
+    // ★ target 必须是 ctl 自己，不能是新造的承载体：
+    //   UIKit 的 target-action 约定是「控件不保留其 target」
+    //   （"Control objects do not (and should not) retain their targets."）。
+    //   ctl 被 superview 强引用，随视图树存活；新造的 target 只是局部变量，
+    //   出函数即释放 → 识别器弱引用归零 → 点什么都不发生、也不崩。
     UITapGestureRecognizer *g =
-        [[UITapGestureRecognizer alloc] initWithTarget:tap action:@selector(okaXferTap:)];
+        [[UITapGestureRecognizer alloc] initWithTarget:ctl action:@selector(okaXferTap:)];
     [ctl addGestureRecognizer:g];
     return ctl;
 }
@@ -3064,6 +3103,7 @@ static id OkaStatResponse(id server, id request) {
 //     route: A-navitem / B-navbar / C-view / none
 //     host:  宿主的类名
 //     calls: 装挂函数被调了几次（0 = hook 根本没跑）
+//     taps:  胶囊点击事件计数（0 = 手势没触发，见下方 setObject 处注释）
 //     ctl:   胶囊对象是否还活着
 //     bar/nav/stackTop: 导航栏与栈顶判定结果
 //  用户点一下「开启 WiFi 传输」，打开 http://<地址>/oka-xfer 就能看到事实，
@@ -3091,6 +3131,12 @@ static id OkaXferDiagResponse(void) {
     [d setObject:[NSNumber numberWithBool:gServerRunning] forKey:@"serverRunning"];
     [d setObject:[NSNumber numberWithInteger:gServerPort] forKey:@"port"];
     [d setObject:(root ? NSStringFromClass([root class]) : @"(nil)") forKey:@"rootVC"];
+
+    // 点击自证计数。「胶囊看得见但点不动」这类故障，只靠 ctlAlive /
+    // ctlInWindow 分不出是「触摸没到胶囊」还是「触摸到了但开关逻辑没成」：
+    //   taps 恒 0 = 手势没触发（target 死了 / 被挡住 / userInteraction 关着）；
+    //   taps 在涨而 state 不变 = 进了 okaXferTap:，是 OkaXferToggle 那段的问题。
+    [d setObject:[NSNumber numberWithUnsignedInteger:gXferTapCount] forKey:@"taps"];
 
     // 胶囊在屏上的实际几何 —— 「装上了但被挡住 / 尺寸为 0」与
     // 「压根没装」是两种完全不同的故障，只看 ctlAlive 分不出来。

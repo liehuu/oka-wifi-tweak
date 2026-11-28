@@ -108,12 +108,31 @@ printf '\n'
 #      没人再调 setAlternateIconName 时它对 iOS 无任何行为影响
 # 全段幂等：从未注入过的设备走一遍也是空操作。任何失败都不许阻断 dpkg。
 set +e
+# ★★ 这里不许用 grep（v1.6.13 修「安装慢」的直接原因）：
+#   原写法对每个已装 App 都 fork 一次 `grep -aq`。iOS 上起一个外部进程
+#   典型 5-15ms，设备上装 100+ 个 App 就是 0.5-2 秒，而 Sileo/Zebra 的
+#   postinst 是**前台同步**执行的 —— 用户看到的就是「安装卡住」。
+#   包体反而一直在变小（1.6.10 起因加了这段从 72KB 降到 65KB），
+#   所以慢跟体积无关，纯粹是装期脚本逐个 fork。
+#   改法：shell 内建 while-read 逐行扫，命中即 break，一个进程都不 fork。
+#   读的是宿主任一条 Info.plist（几十 KB），总量降到几十毫秒。
 for __APPDIR in /var/containers/Bundle/Application/*; do
   [ -d "$__APPDIR" ] || continue
   for __APP in "$__APPDIR"/*.app; do
     [ -d "$__APP" ] || continue
-    grep -aq com.blinker.documents "$__APP/Info.plist" 2>/dev/null || continue
-    if grep -aq OkaIconInjected "$__APP/Info.plist" 2>/dev/null \
+    # `|| [ -n "$__line" ]` 别删：read 对「不以换行结尾的最后一行」返回非零，
+    # 不加这个条件末行会被漏扫（实测：无此条件时末行含 bundle id 也 is_host=0，
+    # 而 grep 不漏）。grep 是行匹配，这个写法才是逐行等价。
+    __is_host=0
+    while IFS= read -r __line || [ -n "$__line" ]; do
+      case "$__line" in *com.blinker.documents*) __is_host=1; break ;; esac
+    done < "$__APP/Info.plist" 2>/dev/null
+    [ "$__is_host" = 1 ] || continue
+    __has_residue=0
+    while IFS= read -r __line || [ -n "$__line" ]; do
+      case "$__line" in *OkaIconInjected*) __has_residue=1; break ;; esac
+    done < "$__APP/Info.plist" 2>/dev/null
+    if [ "$__has_residue" = 1 ] \
        || [ -f "$__APP/OkaIconGreen@2x.png" ] \
        || [ -f "$__APP/OkaIconGreen@3x.png" ]; then
       printf '清理旧版桌面动态图标残留：%s\n' "$__APP"
@@ -146,11 +165,16 @@ chmod 755 "$STAGE/DEBIAN/postinst"
 cat > "$STAGE/DEBIAN/prerm" <<'EOF'
 #!/bin/sh
 set +e
+# 同 postinst：不 fork grep，逐个 fork 会让卸载也慢（v1.6.13）。
 for __APPDIR in /var/containers/Bundle/Application/*; do
   [ -d "$__APPDIR" ] || continue
   for __APP in "$__APPDIR"/*.app; do
     [ -d "$__APP" ] || continue
-    grep -aq com.blinker.documents "$__APP/Info.plist" 2>/dev/null || continue
+    __is_host=0
+    while IFS= read -r __line || [ -n "$__line" ]; do
+      case "$__line" in *com.blinker.documents*) __is_host=1; break ;; esac
+    done < "$__APP/Info.plist" 2>/dev/null
+    [ "$__is_host" = 1 ] || continue
     if command -v plutil >/dev/null 2>&1; then
       plutil -remove OkaIconInjected "$__APP/Info.plist" 2>/dev/null
     fi

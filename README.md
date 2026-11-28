@@ -1,6 +1,6 @@
 # Oka WiFi 传输增强（com.oka.wifitweak）
 
-针对 **Oka Files / Blinker 1.7.5**（`com.blinker.documents`）的越狱插件，实现六组功能（功能 4 桌面动态图标 v1.6.10 已移除，编号保留不变；功能 6 为 v1.6.11 新增，v1.6.12 修复其挂载不生效）：
+针对 **Oka Files / Blinker 1.7.5**（`com.blinker.documents`）的越狱插件，实现六组功能（功能 4 桌面动态图标 v1.6.10 已移除，编号保留不变；功能 6 为 v1.6.11 新增，v1.6.12 修复其挂载不生效，v1.6.13 修复胶囊点击无响应）：
 
 | # | 功能 | 效果 |
 |---|---|---|
@@ -9,7 +9,7 @@
 | 3 | 电脑网页端增强（v1.1.8） | 保留原 `Upload Files` 按钮；**整个页面就是放置区**（没有独立拖放框），把单个/多个文件、整个文件夹拖进网页任意位置即可上传（拖入时全屏提示 + 成功/失败汇总 + 失败重试）；**复用原版行末「移动」按钮与原弹窗**，增强为目录浏览 + 可勾选批量移动 + 结果反馈。v1.1.2：**文件夹置顶**、**顶部紧凑**、**任务面板默认折叠**；v1.1.5：文件夹琥珀黄 + 行内重命名按钮；**v1.1.6：删除按钮挪到最右、重命名在它左边；文件名左侧整片区域点一下即选中；每行新增下载按钮，文件直接下载、整个文件夹自动打成 ZIP；点行不再下载**；**v1.1.7：点文件夹行进入目录、点文件行在线预览 txt / pdf / mp4 / 图片 / 音频；目录 ZIP 显式带顶层文件夹；图标列按文件类型显示不同图标**；**v1.1.8：下载改 Blob 保存，不再触发 Chrome「已阻止不安全的下载」；PDF 预览可用；目录下载不再引发 IDM 弹一堆窗口**；**v1.1.9：彻底删掉导航式下载（「等二三十秒 + 已阻止不安全的下载 + IDM 接管」的根因）；每行显示最后修改时间**；**v1.2.0：每行新增「复制下载链接」，把真实下载地址发给别人，对方浏览器 / IDM / 迅雷直接下载** |
 | 4 | 桌面动态图标（v1.6.6 引入，**v1.6.10 已移除**） | 曾实现「WiFi 传输开着时桌面 App 图标自动红染绿、关时回默认原图标」。v1.6.6–v1.6.9.2 六个版本持续修注入链路，真机始终未生效（用户 2026-11-28 最终反馈「没生效」）。v1.6.10 整体移除：dylib 切换链、安装期 helper、共源常量头与全部正向闸门已删，构建改负向闸门防回流；装 / 卸 deb 都会顺手清理旧版可能注入的残留（见「功能 4」节）。**功能 1 / 2 / 3 / 5 不受影响** |
 | 5 | 服务假死自愈（v1.6.7） | 开着 WiFi 传输放着不管，监听 socket 可能被系统回收而「假死」：实例 `isRunning` 仍报 YES、宿主显示「已连接」，但电脑网页打不开。v1.6.7 起每 45s 用**本地回环 connect 实测**端口（不读恒 YES 的 `isRunning`），回前台时也顺手探一次；确认死了就自动重放一次「关开」（同一条 hook 路，suspend=NO / 密码头 / 端口 fallback 全量补齐），90s 内不重复。可用 `ServiceHeal` 偏好关掉 |
-| 6 | 导航栏 WiFi 传输开关（v1.6.11 起，v1.6.12 修复挂载） | 文件列表页导航栏、左侧三条横线（侧边栏图标）右边的空白区加一颗胶囊开关，实时显示传输状态（**未开启 / 待连接 / 已连接 / 已停止**），点一下即开、再点即关。状态取自 GCDWebServer 的真实运行态与活跃连接数（`_activeConnections`），不是猜的。详见「功能 6」节 |
+| 6 | 导航栏 WiFi 传输开关（v1.6.11 起，v1.6.12 修复挂载，v1.6.13 修复点击无响应） | 文件列表页导航栏、左侧三条横线（侧边栏图标）右边的空白区加一颗胶囊开关，实时显示传输状态（**未开启 / 待连接 / 已连接 / 已停止**），点一下即开、再点即关。状态取自 GCDWebServer 的真实运行态与活跃连接数（`_activeConnections`），不是猜的。详见「功能 6」节 |
 
 > **v1.1.9：下载慢/被拦的真正根因已清除，并新增「最后修改时间」列。**
 >
@@ -358,11 +358,22 @@ if (!vc.navigationController) return;   // ← 这条判据本身是错的
 
 真正决定「item 会不会被画」的是 `nav.topViewController == vc`，不是非 nil。所以 v1.6.12 把判据换成这个，并补了 B/C 两条不依赖 `navigationItem` 的挂法：判不成栈顶时仍能让胶囊出现在蓝栏上。
 
-**同时补上了自证通道**：加 `GET /oka-xfer`，返回 `route`（走的是 A/B/C 哪条）、`host`（宿主类名）、`calls`（装挂被调了几次，0 = hook 根本没跑）、`ctlAlive` / `ctlInWindow`（胶囊是否还活着、是否真的在视图树上）、`frame`（实际几何）、`hidden` / `alpha`、`state`、`serverRunning`、`port`。理由是这次的教训：挂错了**没有任何痕迹可查**，用户只能说「没出现」，而本机既没有 clang（无法编译验证）也没有越狱设备（无法真机复现），只能靠静态反汇编推断，推错一次就是一个版本。有了这个接口，下次出问题打开 `http://<地址>/oka-xfer` 就能看到事实，不必再猜。
+**同时补上了自证通道**：加 `GET /oka-xfer`，返回 `route`（走的是 A/B/C 哪条）、`host`（宿主类名）、`calls`（装挂被调了几次，0 = hook 根本没跑）、`taps`（胶囊被点了几次，0 = 手势没触发）、`ctlAlive` / `ctlInWindow`（胶囊是否还活着、是否真的在视图树上）、`frame`（实际几何）、`hidden` / `alpha`、`state`、`serverRunning`、`port`。理由是这次的教训：挂错了**没有任何痕迹可查**，用户只能说「没出现」，而本机既没有 clang（无法编译验证）也没有越狱设备（无法真机复现），只能靠静态反汇编推断，推错一次就是一个版本。有了这个接口，下次出问题打开 `http://<地址>/oka-xfer` 就能看到事实，不必再猜。
 
-**闸门**：`devkit/check-navswitch.py`（14 条判据，全部落在函数体内并检查调用形态与顺序——不写「标识符存在」这类永真判据）+ `devkit/selftest-navswitch.py`（23 个破坏样本，每条都要求**对应判据键精确变红**；只断言「返回 1」会放过「A 判据误拦了 B 的样本、B 其实从未被验证」这种假绿）。另有 2 个良性扰动样本，防判据过严。产物层同向判据在 `build.sh`：dylib 必须含 mangled 类名与四个状态文案。
+**闸门**：`devkit/check-navswitch.py`（14 条判据，全部落在函数体内并检查调用形态与顺序——不写「标识符存在」这类永真判据）+ `devkit/selftest-navswitch.py`（23 个破坏样本，每条都要求**对应判据键精确变红**；只断言「返回 1」会放过「A 判据误拦了 B 的样本、B 其实从未被验证」这种假绿）。另有 2 个良性扰动样本，防判据过严。v1.6.13 起每条样本还要过「剥注释后必须真的变了」的锚点校验（防注入打在注释行上、样本变假）；产物层同向判据在 `build.sh`：dylib 必须含 mangled 类名与四个状态文案。
 
 其中一条破坏样本就是 **v1.6.11 的真身**（「守卫退回只判 `navigationController` 非 nil」）。它当年能过闸门，因为闸门就是这么写的——现在留作永久反证：判据一放松回那个形态，立刻变红。
+
+**v1.6.13：修「胶囊看得见但点不动」**——用户装完 v1.6.12 后反馈「胶囊能看到了，但是他不能点击进行开启，只能看状态」。状态显示、挂载、布局全部正常，只有点击这一路是死的，而且**不崩、不报错、什么都不发生**。
+
+根因在 UIKit 的 target-action 约定，而我当年写下的注释把它写反了：原实现「为了让构造函数干净一点」，单独造了一个 `OkaXferTapTarget` 承载体做手势 target——我在注释里写「UIGestureRecognizer 会强引用 target」，**这句是错的**。真实约定是 `Control objects do not (and should not) retain their targets.`，识别器对 target 是**弱引用**。于是那个承载体只是 `OkaXferMakeControl` 里的局部变量，函数返回、autoreleasepool 排空即释放；用户每点一下，识别器去调一个已经不复存在的对象，弱引用归零——什么都不发生，也不崩。状态显示走 ticker 另一条链路，与手势无关，所以只有「点」是死的。
+
+修法：target 直接用胶囊自身（ctl）。胶囊被 superview / `UIBarButtonItem.customView` 强引用，生命周期与视图树一致，不存在「先死」。承载体类整个删掉——少一个抽象，少一个能犯错的环节。同时把根因和 Apple 文档那句话都写进 `Tweak.xm` 的注释，防止下一个人再照着错注释写。
+
+顺手做了两件事防止「下次还得靠猜」：
+
+- `/oka-xfer` 新增 `taps` 字段（点击计数）。以后再遇到「点不动」：`taps` 恒 0 = 触摸没到胶囊；`taps` 在涨而 `state` 不变 = 进了手势回调，是 `OkaXferToggle` 那段的问题。两种故障从此不用猜。
+- selftest 加**锚点守卫**：这次跑自测时发现「胶囊没有任何手势」这个破坏样本居然 PASS。逐层查下去，判据本身是红的（手工删掉那行调用立刻变红），问题在自测的注入机制——`replace(old, new, 1)` 只替换**第一处**匹配，而那条锚点串恰好也是 `Tweak.xm` 里一段根因注释的子串，替换全打在注释上，真实代码原封不动。闸门 PASS 是正确行为，但**样本什么都没测到**——它会报告「未拦住」，而真实场景里闸门拦得住，这比漏报更能把人带偏（本仓库第三次踩「注释被当代码」：v1.1.8 的 `window.location`、v1.6.3 的 hover 闸门、v1.6.12 的诊断日志闸门，这次是它的镜像——**闸门对的时候注入器也会被注释打成假的**）。现在每条样本注入后都要过一道「剥注释后必须真的变了」的校验，锚点落在注释里直接判样本构造失败，同时 ⑪a/⑪b 两个样本的锚点改成带上下文的唯一串。反向验证过：把锚点改回会撞注释的样子，校验立刻报「样本是假的」并 exit 1。
 
 **v1.6.12 首轮构建为什么全红（两处自己打自己）**：修完挂载逻辑推上去，三个 job 全部 failure，而且**闸门全绿、卡在编译**。两个原因，都不是编译错误：
 
@@ -713,7 +724,7 @@ sh devkit/build.sh arm64  iphoneos-arm    1.2.0   # 传统 rootful
 | `devkit/check-shell.py` | 拦 `$VAR` 后紧跟非 ASCII、bash 4+ 专有语法（`declare -A`、`${v,,}`、`&>>`、`\|&`、`mapfile`、`wait -n`）、以及 GNU-only 的 `sed -i` / `--in-place`（R8，v1.6.6 run 44 的 BSD sed rename 事故后新增） | CI 独立步骤；本地可跑 |
 | `devkit/selftest-shell.py` | **证明上面这个 shell 闸门会失败**：7 个用例（GNU `sed -i` 三种变体 + `$CPU，` 形态必须被 R8/R1 精确拦下；`sub_file` 双兼容替换 / `${CPU}` / 管道 sed 必须放过），仓库文件 sha256 前后比对 | CI 的 Shell compatibility gate；本地可跑 |
 | `devkit/verify-deb.py --check-macho` | 编译后立刻读 Mach-O 头的 `cputype/cpusubtype` 做**整数比较**，并检查 `LC_CODE_SIGNATURE` | `build.sh` 内；CI 同代码 |
-| `devkit/verify-deb.py <deb> <scheme> <arch>` | 校验 deb 的 ar 结构、Architecture、载荷路径、DEBIAN 隔离、PAX 头、架构、签名、权限；v1.6.10 起 C12 为**负向**：deb 里不得有 `oka-iconinject`（任何 scheme 前缀）、dylib 二进制不得含图标链路符号（`OkaIconGreen` / `OkaIconInjected` / `CFBundleAlternateIcons` / `setAlternateIconName`），外加 postinst 与 prerm **存在性**（v1.6.10 起它们负责清理旧版注入残留；C9 只查 mode，文件整个缺失时静默通过） | CI 的 Verify deb 步骤；本地可跑 |
+| `devkit/verify-deb.py <deb> <scheme> <arch>` | 校验 deb 的 ar 结构、Architecture、载荷路径、DEBIAN 隔离、PAX 头、架构、签名、权限；v1.6.10 起 C12 为**负向**：deb 里不得有 `oka-iconinject`（任何 scheme 前缀）、dylib 二进制不得含图标链路符号（`OkaIconGreen` / `OkaIconInjected` / `CFBundleAlternateIcons` / `setAlternateIconName`），外加 postinst 与 prerm **存在性**（v1.6.10 起它们负责清理旧版注入残留；C9 只查 mode，文件整个缺失时静默通过）；**v1.6.13 起 C13**：装期脚本**零 fork 扫描**——postinst / prerm 不得出现外部 `grep`（v1.6.10 起逐 app fork grep 就是「安装慢」的根因），且必须真有 `while IFS= read -r` 逐行扫描（防止有人把清理任务整段删掉来「通过闸门」——那种绿比红更坏）。两个方向都反向验证过：把 grep 装回去 → 判据一红；把扫描删干净 → 判据二红 | CI 的 Verify deb 步骤；本地可跑 |
 | `devkit/selftest-verify.py` | **证明上面这个校验器会失败**：29 个用例（正向 5 / 反向 24），用代码拼出的 Mach-O 与 deb，含「arm64e 冒充 arm64」「缺签名」「PAX」「权限错」「helper 回流进包」「dylib 残留图标符号」「缺 prerm/postinst」等 | CI 独立步骤；本地可跑 |
 | `devkit/gen-webassets.py` | 生成内联前端资源头；含危险字面量检查（`</script`、`%key%` 形状）与**往返解码自检**（生成后把 C 字面量解回字节，与源文件 sha256 比对，落盘复读再比一次） | `build.sh` 内；CI 独立步骤也跑一次 |
 | `devkit/selftest-webassets.py` | **证明上面这个资源闸门会失败**：7 个用例，含注入 `</script`、注入 `%epilogue%`、删文件、空文件、篡改 C 转义应被解码检出、还原后复跑干净 | CI 的 Web assets gate；本地可跑 |
@@ -869,13 +880,13 @@ v1.1.3 起插件**不输出任何系统日志**，所以判据一律看功能表
 | 顶部还是很空 / 上传任务框还是占地方 | `body.oka-compact` 没加上，或注入的 CSS 被缓存了 | 控制台看 `document.body.classList.contains('oka-compact')`；为真但样式没变就强刷（Ctrl+F5）。任务面板的折叠由 `setTasksExpanded(false)` 控制，若上传后明细直接展开，检查 `startUpload()` 里那行是否被删；也可直接点头部「展开 / 收起」验证切换是否可用 |
 | 页面源码里出现两次 `OKA-WIFI-INJECTED` | 幂等标记失效（类方法 + 实例方法双 hook 都注入了） | 正常情况下 `OkaAugmentVariables` 会在第二次命中时直接返回原 variables。若重复，检查 `rangeOfString:@"OKA-WIFI-INJECTED"` 是否被改掉 |
 | 拖入文件夹后只剩顶层文件、子目录丢了 | `create` 用 `withIntermediateDirectories:NO`，父目录不存在时整条链会失败 | 任务面板会显示每个目录的失败原因。代码已按深度升序逐级创建并对「目录已存在」做 `list` 反查；若仍失败，把任务面板的失败明细发来 |
-| 导航栏上没有那颗 WiFi 开关胶囊 | 页面不是文件列表页（在 WiFi 传输页 / 设置页时按设计不挂）；或装的是 v1.6.10 及更早（该功能 v1.6.11 才有）；**或装的是 v1.6.11——那一版的守卫判据写错了，见下一行** | 先回到「我的本地文件」那一页（导航栏左侧是三条横线的那页）再看。仍在 → 打开 App 设置面板核对「插件版本」行必须是 `v1.6.12`；旧实例残留时重装并重启 App |
+| 导航栏上没有那颗 WiFi 开关胶囊 | 页面不是文件列表页（在 WiFi 传输页 / 设置页时按设计不挂）；或装的是 v1.6.10 及更早（该功能 v1.6.11 才有）；**或装的是 v1.6.11——那一版的守卫判据写错了，见下一行** | 先回到「我的本地文件」那一页（导航栏左侧是三条横线的那页）再看。仍在 → 打开 App 设置面板核对「插件版本」行必须是 `v1.6.13`；旧实例残留时重装并重启 App |
 | **v1.6.11 装完开关完全没出现**（不崩溃、不报错、什么都没有） | `OkaInstallXferSwitch` 的守卫是 `if (!vc.navigationController) return;`。子控制器读 `navigationController` 同样返回非 nil（它会沿 `parentViewController` 往上找），于是守卫放行，item 被塞进一份**永远不会被渲染**的 `navigationItem` —— 导航栏只读 `topViewController` 的 item | 这是 v1.6.11 的已知缺陷，v1.6.12 已修：判据改为 `nav.topViewController == vc`，并补了「挂 navigationBar 本体」「挂 vc.view」两条回退。**验证方法**：连上 WiFi 传输后打开 `http://<地址>/oka-xfer`，看 `route` 字段——`A-navitem` / `B-navbar` / `C-view` 哪个生效一目了然；`calls: 0` 说明 hook 根本没跑 |
-| 开关胶囊点了没反应 | 服务实例还没被创建（App 从未启动过 WiFi 传输，且 `gServerInstance` 尚未落袋） | 首次启动一个实例的可靠办法：进 WiFi 传输页手动开一次，或长按桌面图标用快捷项。之后开关就能自己开 / 关，不再依赖那一页 |
+| 开关胶囊点了没反应（能看状态、就是点不开） | **v1.6.12 及更早的手势 target 是局部变量**：为了「让构造函数干净一点」单独造了个 `OkaXferTapTarget` 承载体，而 UIKit 的约定是控件**不保留** target（识别器只有弱引用），承载体出函数即释放 → 点击时目标已死，**不崩、不报错、什么都不发生**（状态显示走 ticker 另一条链路，所以只有「点」是死的） | v1.6.13 已修（target 改为胶囊自身，承载体类整个删掉）。**先用 `taps` 字段区分**：连上 WiFi 传输后打开 `http://<地址>/oka-xfer`，`taps` 一直 0 = 触摸没到胶囊（还是旧版或热区被挡住）；`taps` 在涨而 `state` 不变 = 手势到了、开关逻辑没成。另一种情况是服务实例从未被创建（App 没启动过 WiFi 传输、`gServerInstance` 尚未落袋）：进 WiFi 传输页手动开一次，或长按桌面图标用快捷项，之后开关即可自己开 / 关 |
 | 胶囊显示「已停止」 | 服务对外报在跑但本地回环 connect 失败 = 假死（与功能 5 同一套探活口径），不是显示错误 | 点一下开关（先关后开），或直接依赖 v1.6.7 的自愈（90s 防抖）；若反复出现，多为路由器踢客户端 / Wi-Fi 漫游，考虑固定 IP 或用热点 |
 | 胶囊一直显示「待连接」，但电脑上网页已经打开了 | `_activeConnections` 的计数口径是「已建立的 HTTP 连接」，浏览器请求结束、进入 keep-alive 空闲或页面关闭后会归零；它不等于「有电脑连着」 | 这是**如实反映连接数**，不是 bug（README「功能 6」已写明限度：它是连接数不是传输速率）。传输进行中会跳到「已连接」 |
 | 开关胶囊一闪一闪 / 状态偶尔回跳 | 探活按 2s 节流走后台队列，两次采样之间的瞬时抖动会被如实显示 | 属预期；若持续在「已连接 / 待连接」间跳，说明客户端连接在反复建立又断开，去网页端看 `#alerts` 有无上传失败 |
-| 进出一次选择模式后开关消失 | 只挂 `viewDidLoad` 没挂 `viewWillAppear:`（`build.sh` 的 `bothHooks` 判据就是钉这个） | 确认装的是 v1.6.12 且构建未跳过闸门；跑 `python3 devkit/check-navswitch.py Tweak.xm` 应全绿 |
+| 进出一次选择模式后开关消失 | 只挂 `viewDidLoad` 没挂 `viewWillAppear:`（`build.sh` 的 `bothHooks` 判据就是钉这个） | 确认装的是 v1.6.13 且构建未跳过闸门；跑 `python3 devkit/check-navswitch.py Tweak.xm` 应全绿 |
 | **CI 编译成败都停在「诊断日志负向闸门」，报 `Tweak.xm 仍有诊断日志调用`，但源码里明明没写调用** | 这条判据在 v1.6.12 之前是 `build.sh` 里的裸 `grep -n 'NSLog'`，**连注释一起算命中**。只要在源码里写一句「产物里禁止 NSLog」的说明，整个构建就被自己的文档打停（v1.6.12 首轮 CI 三个 job 全 red 就是这么来的） | v1.6.12 已改为 `devkit/check-nolog.py`：先剥注释再查，并补上注释里早就承诺、实际没查的 `os_log` 一族与 `LOG(` 宏。**自查**：`python3 devkit/check-nolog.py Tweak.xm` 应通过；`python3 devkit/selftest-nolog.py Tweak.xm` 应输出「5 良性 + 6 破坏 + 1 剥离器退化」 |
 | 点开关后 App 直接闪退（无弹窗、无异常） | 绕过了 `OkaXferOutletsReady` 守卫，撞上 App 里七个 `brk #1`（`0x100013e24..e40`）——那是硬崩，`@try` 兜不住 | 跑 `python3 devkit/check-navswitch.py Tweak.xm`：`outletGuard` 变红就是这个原因。守卫必须覆盖 `connectionView` / `qrCodeView` / `startBtn` / `ipAddress` 四个 outlet，且排在调用之前 |
 | 拖放后出现两份上传 / 进度条乱跳 | 捕获阶段的 `stopPropagation` 没挡住 jQuery File Upload 在 `$(document)` 上的 drop handler | 检查是否有其它插件/浏览器扩展改写了 drag/drop；本插件的 `onDrop` 必须同时 `preventDefault()` 与 `stopPropagation()` |
@@ -885,6 +896,7 @@ v1.1.3 起插件**不输出任何系统日志**，所以判据一律看功能表
 | 批量移动全部报失败 | 目标目录不存在，或路径手填错了 | 弹窗里逐项列出失败原因。目录浏览只列 `GET list` 里真实存在的目录；手动输入路径时先确认它存在 |
 | 卸载插件后长按菜单出现「开启WiFi传输」的空壳 | 菜单项由 iOS 按 App 的 bundle id 持久化，只卸载插件不会让它消失（点击也没效果：回调是插件补的） | 先在上面把开关切成「关」（或让它自动清成关）再卸载。桌面图标侧：v1.6.10 起装/卸本插件都会清理旧版注入残留，静态绿 PNG 与标记键不会残留 |
 | 从 v1.6.6–v1.6.9.2 升级到 v1.6.10 后桌面还是绿的 / 多一个绿色图标 | 旧版 helper 往宿主 `.app` 注入过红染绿备选图标（Info.plist 声明 + 两张 PNG） | v1.6.10 的 postinst 安装时已自动清（`plutil -remove OkaIconInjected` + `rm` 两张 `OkaIconGreen` PNG）；没恢复就手动跑一次 uicache 或重启设备。`CFBundleAlternateIcons` 里的 `OkaIconGreen` 声明是嵌套键、plutil 删不掉，为**惰性声明**——没有再调 `setAlternateIconName` 的代码，对 iOS 无行为影响 |
+| **安装 / 卸载 deb 特别慢**（v1.6.10–v1.6.12，装得越久越明显；设备上 App 装得越多越慢） | 与包体无关（这期间 deb 反而从 72KB 变小到 65–71KB）。真正的分水岭是 **v1.6.10**：清理桌面图标残留的逻辑进了 `postinst` / `prerm`——**对每个已装 App 都 fork 一次 `grep -aq` 读它的 `Info.plist`**。iOS 上起一个外部进程典型 5–15ms，设备上 100+ 个 App 就是 0.5–2 秒起，而 Sileo/Zebra 的装后脚本是**前台同步**执行的，用户直接看到「安装卡住」；本机仿真树实测（100 个 App）fork 版净耗时 43 秒量级、零 fork 版降到 100ms 内。卸载同样慢（prerm 里同一段） | v1.6.13 已修：`grep` 换成 shell 内建 `while read` + `case` 逐行扫，命中即 break，**一个进程都不 fork**，行为与原版逐行等价（grep 是行匹配，`|| [ -n "$__line" ]` 保证末行无换行结尾时不漏扫——实测与 `grep` 找的是同一份宿主）。升到 v1.6.13 即恢复 |
 | 设置面板的浮动按钮又压住底部 WebDAV 页签了 | 按钮约束回退到了 bottomAnchor | 确认装的是 v1.6.9；按钮应锚在页面右上角 `btn.topAnchor`。有导航栏的页面走导航栏右侧 ⚙️，本就不占内容区 |
 | 设置面板的浮动按钮压住页面顶部提示标签的文字了 | 偏移常量退回 < 56 | v1.6.8 起钉死 `constant ≥ 56`（真机复测 40 仍稍微压字）；确认装的是 v1.6.9 |
 | 设置面板里「长按快捷菜单」开关不见了 | ① 设备实跑的不是新构建（旧 dylib 残留 / App 装完没杀）；② 装过别的方案（rootful+rootless 双装）导致加载的是旧副本；③ v1.6.7/v1.6.8 的渲染层缺陷：动作行超过末 4 行时超出行从栈顶整行消失（键盘弹起时高发） | 第一现场看面板 message 里的「插件版本」行：不是 v1.6.9 就先 `dpkg -l | grep com.oka.wifitweak` 核对已安装包，只保留一个；然后确认 `<App>.app` 上级的 dylib 路径只剩一份（rootful `/Library/MobileSubstrate/DynamicLibraries/`、rootless/roothide `/var/jb/Library/MobileSubstrate/DynamicLibraries/`），respring 后**从多任务划掉 App 重开**。版本行显示 v1.6.9.1 仍缺行才是代码问题，带版本号反馈；v1.6.9 起只读信息（图标三态 + 版本）已改走 message、动作栈只剩 4 行，该形态已修；v1.6.9.1 修掉「面板弹出后 alert 自动获焦重起键盘挤掉底部动作行」，若**手动点密码框**时底部行被键盘遮住，收键盘即恢复（`UIAlertController` 固有限度） |
@@ -895,7 +907,7 @@ v1.1.3 起插件**不输出任何系统日志**，所以判据一律看功能表
 
 ## 五、已知限制（如实说明）
 
-1. **编译环境是 macOS，本机（Windows）无法验证真实编译。** 代码做了静态审查（括号平衡、函数定义顺序、函数指针签名与赋值、ARC 桥接配对、格式串类型）。本机已用「桩替换 `xcrun`」把 `build.sh` 三个变体从编译一路跑到打包全部 `exit=0`，并在本地用 `verify-deb.py` 把三个 deb 的 C1~C12 全部跑通；`shell` 语法、打包链路、校验判据的正反方向都已实测。但**真正的 `clang` 编译与 `codesign` 只能在 macOS 上发生**——桩产出的 dylib 不是可运行代码，本地 deb 也**不能装到手机上**。唯一可交付产物必须来自 CI。
+1. **编译环境是 macOS，本机（Windows）无法验证真实编译。** 代码做了静态审查（括号平衡、函数定义顺序、函数指针签名与赋值、ARC 桥接配对、格式串类型）。本机已用「桩替换 `xcrun`」把 `build.sh` 三个变体从编译一路跑到打包全部 `exit=0`，并在本地用 `verify-deb.py` 把三个 deb 的 C1~C13 全部跑通；`shell` 语法、打包链路、校验判据的正反方向都已实测（v1.6.13 另跑了装期脚本仿真树：100 个 App 的容器树下新旧写法行为一致、宿主识别正确、退出码 0）。但**真正的 `clang` 编译与 `codesign` 只能在 macOS 上发生**——桩产出的 dylib 不是可运行代码，本地 deb 也**不能装到手机上**。唯一可交付产物必须来自 CI。
 2. **后台保活依赖音频后台模式。** App 的 `UIBackgroundModes` 是 `audio`/`fetch`，用音频钉住进程是可行的，但 iOS 会占一个「正在播放」状态（音量 0，听不到）。若你介意，可在 prefs 里关掉——但那会导致切后台后端口失效。
 3. **`_GCDWebServerGetPrimaryIPAddress` 靠符号名 hook。** 若 App 换 GCDWebServer 版本或静态链接，符号可能找不到。这层失效**不影响 v1.0.2 的主力修复**（`serverURL` 是 ObjC 方法 hook）；只有 `GCDWebServer` 类本身找不到时才会退化到 UI 层写回。功能 2a 与功能 1 始终不受影响。
 4. **地址优先级是启发式。** `bridge* > en* > pdp_ip*` 覆盖了绝大多数场景；若你同时开了 VPN 且 VPN 也建了 `bridge` 接口，可能选错；此时界面上显示的地址会不是热点网段，只能从地址本身判断（v1.1.3 起不再输出接口打分日志）。

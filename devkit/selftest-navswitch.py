@@ -200,15 +200,24 @@ INJECTIONS = [
      "            (void)gXferControl;            // 页面走了也照刷"),
 
     # ⑪a 热区挂到 7pt 小圆点上
+    #     锚点带上 initWithTarget:ctl：Tweak.xm 的根因注释里抄了同一行
+    #     旧代码（initWithTarget:tap ...），只写 `[ctl addGestureRecognizer`
+    #     会先在注释行命中，替换打在注释上、真实调用没动（见注入器的
+    #     剥注释校验）。
     ("手势挂到小圆点上",
      G.K_POINT_ONLY,
+     "initWithTarget:ctl action:@selector(okaXferTap:)];\n"
      "    [ctl addGestureRecognizer:g];",
-     "    [ctl addGestureRecognizer:g];\n    [_dot addGestureRecognizer:g];"),
+     "initWithTarget:ctl action:@selector(okaXferTap:)];\n"
+     "    [ctl addGestureRecognizer:g];\n"
+     "    [_dot addGestureRecognizer:g];"),
 
     # ⑪b 手势整个没了
     ("胶囊没有任何手势",
      G.K_POINT_ONLY,
+     "initWithTarget:ctl action:@selector(okaXferTap:)];\n"
      "    [ctl addGestureRecognizer:g];",
+     "initWithTarget:ctl action:@selector(okaXferTap:)];\n"
      "    (void)g;"),
 ]
 
@@ -296,6 +305,16 @@ def main() -> int:
                 bad = bad.replace(o, n, 1)
             if bad == src:
                 print("✗ 样本「%s」注入后内容未变：构造有误。" % name)
+                return 1
+            # ★ 改动必须落在**代码**上：锚点若同时是某条注释的子串，
+            #   replace(..., 1) 会打中排在前面的注释行，真实调用原封不动
+            #   —— 闸门 PASS 是正确行为，但样本什么都没测到。这种
+            #   「测了但没测」比漏报更危险：报告会说「未拦住」，
+            #   而真实场景里闸门是拦得住的。剥注释后必须真的变了。
+            if G.strip_comments(bad) == G.strip_comments(src):
+                print("✗ 样本「%s」的替换只发生在注释里（锚点撞上了注释行，"
+                      "replace 只改第一处）：真实代码没被破坏，这个样本"
+                      "是假的。请把锚点改成带上下文的唯一串。" % name)
                 return 1
             with open(bad_path, "w", encoding="utf-8") as f:
                 f.write(bad)
