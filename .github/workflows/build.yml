@@ -25,7 +25,7 @@ on:
 
 env:
   # 版本号单一来源，禁止在别处硬编码（否则会出现「包名 v1.0、内容 v1.1」）。
-  VERSION: ${{ github.event.inputs.version || '1.6.10' }}
+  VERSION: ${{ github.event.inputs.version || '1.6.11' }}
   HOMEBREW_NO_AUTO_UPDATE: 1
 
 jobs:
@@ -157,6 +157,22 @@ jobs:
           set -eu
           python3 devkit/check-service-heal.py Tweak.xm
           python3 devkit/selftest-service-heal.py
+
+      # v1.6.11 导航栏 WiFi 传输开关闸门：
+      #  文件列表页导航栏（汉堡按钮右边空白区）那颗胶囊开关的全部失效形态
+      #  都是静默的——挂错类→界面什么都没有；绕过 outlet 守卫→撞 App 里
+      #  七个 brk #1 硬崩（不是异常，@try 兜不住）；文案不等长→导航栏左右抖；
+      #  只挂 viewDidLoad→进出一次选择模式开关永久消失。真机零日志。
+      #  check-navswitch.py 的 11 条判据全部落在**函数体内**并检查调用形态 /
+      #  顺序（不写「标识符存在」这类永真判据）；selftest-navswitch.py 用
+      #  18 个破坏样本要求**对应判据键精确变红**——只断言"返回 1"会放过
+      #  「A 误拦了 B 的样本、B 其实从未被验证」的假绿。
+      #  产物层同向判据在 build.sh 里：dylib 必须含 mangled 类名与四个状态文案。
+      - name: Nav switch gate (v1.6.11)
+        run: |
+          set -eu
+          python3 devkit/check-navswitch.py Tweak.xm
+          python3 devkit/selftest-navswitch.py Tweak.xm
 
       - name: Build ${{ matrix.scheme }}
         run: |

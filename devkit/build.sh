@@ -248,6 +248,38 @@ for sym in CFSocketConnectToAddress startWithOptions:error:; do
 done
 echo "✓ v1.6.7 dylib 自愈链路指纹齐全（回环连接/重放 selector）"
 
+# ---------- 4-0c2) v1.6.11 导航栏 WiFi 传输开关闸门 ----------
+# 用户需求（配截图）：文件列表页导航栏、汉堡按钮右边的空白区放一个 WiFi
+#   传输开关，实时反映「未开启 / 待连接 / 已连接 / 已停止」，点一下能开能关。
+# 这个控件的失效形态全是**静默**的：挂错类 → 界面上什么都没有；不判导航栈
+#   → item 成孤儿；绕过 outlet 守卫 → 撞 App 里七个 brk #1 硬崩（不是异常，
+#   @try 兜不住）；文案不等长 → 导航栏左右抖；只挂 viewDidLoad → 进出一次
+#   选择模式开关永久消失。真机上这些都是「用户说没加」或「崩了」，零日志。
+# 判据抽成独立脚本（不写 heredoc，理由同 4a-5）；反证见 selftest-navswitch.py：
+#   18 个破坏样本，每条都必须让**对应判据键精确变红**（只要求"返回 1"会
+#   放过「A 判据误拦了 B 的样本、B 其实没被验证」这种假绿）。
+if ! python3 "$ROOT/devkit/check-navswitch.py" "$ROOT/Tweak.xm"; then
+  echo "✗ 导航栏 WiFi 传输开关闸门未通过（开关不出现 / 会硬崩 / 状态是假的）"
+  exit 1
+fi
+if ! python3 "$ROOT/devkit/selftest-navswitch.py" "$ROOT/Tweak.xm"; then
+  echo "✗ 导航栏开关反证未过（良性未过，或有破坏样本没被对应判据拦住）"
+  exit 1
+fi
+echo "✓ v1.6.11 导航栏开关：11 条判据 + 18/18 破坏反证通过"
+
+# dylib 侧指纹：开关挂载用的 mangled 类名与状态文案。
+#   mangled 类名必须进产物 —— 用 Blinker.FilesBrowserController 查类会
+#   拿不到类，hook 静默不生效；而它在 Swift 侧编成 __cstring 里的
+#   _TtC7Blinker22FilesBrowserController 字面量，源码写对了产物就一定有。
+#   四个状态文案同理：少了哪个，那个状态就落回 default（显示「未开启」）。
+for sym in "_TtC7Blinker22FilesBrowserController" \
+           "未开启" "待连接" "已连接" "已停止"; do
+  grep -aq "$sym" "$BUILD/$NAME.dylib" \
+    || { echo "✗ dylib 缺 ${sym}（导航栏开关会不出现或状态显示错）"; exit 1; }
+done
+echo "✓ v1.6.11 dylib 指纹齐全（mangled 类名 + 四个状态文案）"
+
 # ---------- 4-0d) v1.6.10 postinst 注入残留清理 ----------
 # 桌面动态图标（红染绿）v1.6.10 移除后，**旧版本可能已经注入过**宿主
 #   .app（CFBundleAlternateIcons 声明 + OkaIconGreen PNG + OkaIconInjected

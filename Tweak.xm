@@ -90,6 +90,11 @@
 #define PAGE_CLASS_SWIFT    @"Blinker.BNHttpServerPage"
 #define APPDEL_CLASS_MANGLED @"_TtC7Blinker11AppDelegate"
 #define APPDEL_CLASS_SWIFT   @"Blinker.AppDelegate"
+// ★ v1.6.11：文件列表页（截图那一页）。类名同样是 mangled 形式，
+//   直接从 __objc_classlist 的 class_ro_t.name 读出。这一页承载用户
+//   要的导航栏 WiFi 传输开关（见 OkaInstallXferSwitch 的挂载说明）。
+#define FILESBROWSER_CLASS_MANGLED @"_TtC7Blinker22FilesBrowserController"
+#define FILESBROWSER_CLASS_SWIFT   @"Blinker.FilesBrowserController"
 
 // ★ 构建标识。写进设置面板 message 的版本行 —— 用户实测
 //   「开关不见了」时第一件事是核对设备上跑的到底是哪个构建（旧实例残留 /
@@ -99,7 +104,9 @@
 //   v1.6.10：桌面动态图标（红染绿）功能整体移除 —— 真机未生效；
 //   注入链路（helper + CFBundleAlternateIcons）与切换链路全部删除，
 //   旧版本注入的残留由 postinst 幂等清理（删标记键 + 删 PNG）。
-#define OKA_BUILD_TAG @"v1.6.10"
+//   v1.6.11：文件列表页导航栏加 WiFi 传输开关（胶囊控件）；
+//   开关状态取自 GCDWebServer 的真实运行态与活跃连接数，不猜。
+#define OKA_BUILD_TAG @"v1.6.11"
 
 static NSString *const kPrefsPath = @"/var/mobile/Library/Preferences/com.oka.wifitweak.plist";
 
@@ -1992,6 +1999,486 @@ static void StartWiFiTransfer(BOOL fromShortcut) {
     });
 }
 
+// ===========================================================================
+//  v1.6.11：文件列表页导航栏 —— WiFi 传输开关（胶囊控件）
+// ===========================================================================
+//  用户需求（配截图）：进 App 后状态栏（导航栏）里，左侧三条横线（侧边栏
+//  图标）右边的空白区域放一个 WiFi 传输开关；实时反映传输状态（未开启 /
+//  已连接 / 已停止等），点一下就能开启或关闭。
+//
+//  ★ 挂载点为什么是 FilesBrowserController（截图那一页）
+//    静态证据（1.7.5 arm64 原版，非猜测）：
+//      _TtC7Blinker22FilesBrowserController 的 ivar 表与截图完全对应：
+//        hbgrMenuBarButtonItem                      ← 左侧三条横线
+//        selectBarButtonItem / searchBarButtonItem /
+//        moreAboutViewOptionsBarButtonItem          ← 右侧三个图标
+//        pathBarContainerView（"我的本地文件" 那一行）
+//        toolbarViewModeButton                      ← 右侧白色圆角胶囊
+//    该页 navigationItem 的按钮来自 nib（全 __text 扫描里
+//    navigationItem 4 处引用、setRightBarButtonItems: 2 处，均不在本类
+//    方法体内），所以只能在 viewDidLoad / viewWillAppear 之后往
+//    leftBarButtonItems 里追加 —— 直接覆盖会打掉 App 自己的按钮。
+//
+//  ★ 状态数据源（为什么不用 isRunning 一个位）
+//    GCDWebServer 的 ivar 表（从 __objc_classlist class_ro_t 解析）：
+//        _activeConnections   q        ← 当前活跃连接数（真实计数）
+//        _connected           B
+//        _port                Q
+//        _suspendInBackground B
+//    加上原有的 gServerRunning / gServerPort / OkaPortAlive() 回环探活，
+//    「有人在连」这件事有硬证据，不必靠猜。四个状态因此可区分：
+//        未开启   服务未运行（或用户刚关掉）
+//        待连接   服务在跑、回环探活通过、活跃连接数 0
+//        已连接   服务在跑、活跃连接数 > 0
+//        已停止   服务对外报在跑，但回环 connect 失败（socket 假死）
+//    ★ 已知限度如实写明：「已连接」是连接计数，不是「正在传文件」。
+//      GCDWebServer 没有就绪的字节速率口径，硬编一个会是假指标。
+//
+//  ★ 布局与对齐（与截图现状对齐，不另造一套视觉）
+//    · 位置：leftBarButtonItems 追加到汉堡按钮之后 —— 即用户指的那块
+//      空白区，不侵占右侧三个图标，也不压 titleView。
+//    · 形制：胶囊（圆角 = 高度/2）+ 状态圆点 + 3 个汉字，与右侧
+//      toolbarViewModeButton 的白色圆角容器同一套语言；
+//      底色 white 0.18、文字白色 12pt semibold，落在蓝色导航栏上对比度
+//      足够，不抢右侧图标的视觉权重。
+//    · 防抖宽：四个状态文案都取 3 个字（未开启 / 待连接 / 已连接 /
+//      已停止），标签宽度固定 —— 状态切换时胶囊宽度不变，导航栏不会
+//      因为文字变长而左右跳一下。
+//    · 高度 27、垂直居中由 UIBarButtonItem 自身负责，不写死 y。
+//    · 点击热区：整个胶囊（不是只有圆点），符合 iOS 最小 44pt 触控惯例
+//      的横向宽度。
+
+enum {
+    OkaXferStateOff       = 0,   // 未开启
+    OkaXferStateWaiting   = 1,   // 待连接
+    OkaXferStateConnected = 2,   // 已连接
+    OkaXferStateStopped   = 3,   // 已停止（假死）
+};
+
+// 曾经开启过？用来把「未开启」和「已停止」分开。
+// 只记内存态：重启 App 后服务本来就没了，显示「未开启」才是对的。
+static BOOL gXferEverOn = NO;
+
+// 胶囊控件。自带状态渲染，外部只喂状态值。
+@interface OkaXferBarControl : UIView
+@property (nonatomic, assign) NSInteger xferState;
+// 声明在 @interface 里：initWithFrame: 与 setXferState: 都调它，
+// 不声明会吃 -Wobjc-method-access（build.sh 已关掉该警告，但
+// 「靠关警告让它过」是隐患，正确写法是显式声明）。
+- (void)okaApplyState;
+@end
+
+@implementation OkaXferBarControl {
+    UIView   *_dot;
+    UILabel  *_label;
+}
+
+// 布局常量集中在此，闸门 check-navswitch.py 会核这几个数。
+static const CGFloat kOkaXferH       = 27.0;   // 胶囊高度
+static const CGFloat kOkaXferPadL    = 9.0;
+static const CGFloat kOkaXferPadR    = 9.0;
+static const CGFloat kOkaXferDot     = 7.0;    // 状态圆点直径
+static const CGFloat kOkaXferGap     = 6.0;    // 圆点与文字间距
+static const CGFloat kOkaXferTextW   = 40.0;   // 三个汉字 @12pt 的固定宽度
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (!self) return nil;
+
+    self.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.18];
+    self.layer.cornerRadius = kOkaXferH / 2.0;
+    self.layer.masksToBounds = YES;
+    self.isAccessibilityElement = YES;
+    self.accessibilityTraits = UIAccessibilityTraitButton;
+
+    _dot = [[UIView alloc] initWithFrame:CGRectZero];
+    _dot.layer.cornerRadius = kOkaXferDot / 2.0;
+    _dot.userInteractionEnabled = NO;
+    [self addSubview:_dot];
+
+    _label = [[UILabel alloc] initWithFrame:CGRectZero];
+    _label.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightSemibold];
+    _label.textColor = [UIColor whiteColor];
+    _label.textAlignment = NSTextAlignmentCenter;
+    _label.userInteractionEnabled = NO;
+    [self addSubview:_label];
+
+    _xferState = OkaXferStateOff;
+    [self okaApplyState];
+    return self;
+}
+
+- (CGSize)intrinsicContentSize {
+    return CGSizeMake(kOkaXferPadL + kOkaXferDot + kOkaXferGap + kOkaXferTextW
+                      + kOkaXferPadR, kOkaXferH);
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat h = CGRectGetHeight(self.bounds);
+    _dot.frame = CGRectMake(kOkaXferPadL, (h - kOkaXferDot) / 2.0,
+                            kOkaXferDot, kOkaXferDot);
+    _label.frame = CGRectMake(kOkaXferPadL + kOkaXferDot + kOkaXferGap, 0.0,
+                              kOkaXferTextW, h);
+}
+
+- (void)setXferState:(NSInteger)s {
+    if (_xferState == s) return;
+    _xferState = s;
+    [self okaApplyState];
+}
+
+- (void)okaApplyState {
+    NSString *text = nil;
+    UIColor  *dot  = nil;
+    NSString *a11y = nil;
+    switch (_xferState) {
+        case OkaXferStateWaiting:
+            text = @"待连接"; dot = [UIColor colorWithRed:1.00 green:0.84 blue:0.31 alpha:1.0];
+            a11y = @"WiFi 传输待连接，点一下关闭";
+            break;
+        case OkaXferStateConnected:
+            text = @"已连接"; dot = [UIColor colorWithRed:0.30 green:0.85 blue:0.39 alpha:1.0];
+            a11y = @"WiFi 传输已连接，点一下关闭";
+            break;
+        case OkaXferStateStopped:
+            text = @"已停止"; dot = [UIColor colorWithRed:1.00 green:0.62 blue:0.04 alpha:1.0];
+            a11y = @"WiFi 传输已停止，点一下重新开启";
+            break;
+        case OkaXferStateOff:
+        default:
+            text = @"未开启"; dot = [UIColor colorWithWhite:1.0 alpha:0.55];
+            a11y = @"WiFi 传输未开启，点一下开启";
+            break;
+    }
+    _label.text = text;
+    _dot.backgroundColor = dot;
+    self.accessibilityLabel = a11y;
+    self.accessibilityValue = text;
+}
+@end
+
+// 读 GCDWebServer._activeConnections。
+// 用 ivar 直读而不是 KVC：KVC 走 valueForKey: 会碰到未声明属性，
+// 而这是纯 C 类型（q），ivar 偏移是编译期常量，读一次就够。
+// ivar 取不到（GCDWebServer 换实现）时返回 -1 = 未知，不编造 0。
+static NSInteger OkaXferActiveConnections(void) {
+    id srv = gServerInstance;
+    if (!srv) return -1;
+    Class cls = object_getClass(srv);
+    Ivar iv = cls ? class_getInstanceVariable(cls, "_activeConnections") : NULL;
+    if (!iv) return -1;
+    const char *type = ivar_getTypeEncoding(iv);
+    if (!type || type[0] != 'q') return -1;     // 类型不对就不读，别读错位
+    NSInteger *p = (NSInteger *)((char *)(__bridge void *)srv + ivar_getOffset(iv));
+    return *p;
+}
+
+// 状态判定。
+//   probePort = YES 时做一次回环 connect（能识别假死，但最多 0.5s）；
+//   胶囊每秒刷新时走异步 + 降频，见 OkaXferRefreshAsync。
+static NSInteger OkaXferStateNow(BOOL probePort) {
+    if (!gServerRunning || gServerPort == 0) {
+        return gXferEverOn ? OkaXferStateStopped : OkaXferStateOff;
+    }
+    if (probePort && !OkaPortAlive(gServerPort)) {
+        gXferEverOn = YES;
+        return OkaXferStateStopped;
+    }
+    NSInteger n = OkaXferActiveConnections();
+    if (n > 0) return OkaXferStateConnected;
+    return OkaXferStateWaiting;
+}
+
+// 当前页面上挂着的胶囊（弱引用：页面随时可能被释放）。
+static __weak OkaXferBarControl *gXferControl = nil;
+// 关停时用：最近一次找到的传输页（转弱引用，别把页面钉住）。
+static __weak UIViewController *gXferPage = nil;
+// 探活节流：上一次后台探活的时刻，避免每秒都 connect 一次。
+static NSTimeInterval gXferProbedAt = 0.0;
+static BOOL gXferProbeInFlight = NO;
+
+// 把状态刷到胶囊上。
+// probe 走后台队列：OkaPortAlive 最坏 0.5s，放主线程会让导航栏卡一下。
+static void OkaXferRefreshAsync(void) {
+    OkaXferBarControl *ctl = gXferControl;
+    if (!ctl) return;
+
+    // 先按「不做探活」的便宜口径立刻刷一版：未开启/待连接/已连接
+    // 这三个状态不依赖 connect，能第一时间响应点击。
+    NSInteger quick = OkaXferStateNow(NO);
+    ctl.xferState = quick;
+
+    // 服务没跑就没必要探活（省一次系统调用，也避免无意义唤醒）。
+    if (quick == OkaXferStateOff || quick == OkaXferStateStopped) return;
+
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (gXferProbeInFlight) return;
+    if (gXferProbedAt && now - gXferProbedAt < 2.0) return;
+
+    gXferProbeInFlight = YES;
+    gXferProbedAt = now;
+    NSUInteger port = gServerPort;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        BOOL alive = OkaPortAlive(port);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            gXferProbeInFlight = NO;
+            OkaXferBarControl *c2 = gXferControl;
+            if (!c2) return;
+            if (!alive) {
+                gXferEverOn = YES;
+                c2.xferState = OkaXferStateStopped;
+            } else {
+                NSInteger n = OkaXferActiveConnections();
+                c2.xferState = (n > 0) ? OkaXferStateConnected : OkaXferStateWaiting;
+            }
+        });
+    });
+}
+
+// 一秒一跳的刷新时钟。只在胶囊存在时跑，胶囊没了自己停 ——
+// 不常驻、不空转（用户切走这一页就不该有定时器在烧电）。
+static void OkaXferStartTicker(void) {
+    static dispatch_source_t sTimer = nil;
+    if (sTimer) return;
+    sTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    if (!sTimer) return;
+    dispatch_source_set_timer(sTimer, dispatch_walltime(NULL, 0),
+                              1ull * NSEC_PER_SEC, 200ull * NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(sTimer, ^{
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!gXferControl) return;      // 页面走了：本次什么都不做
+            OkaXferRefreshAsync();
+        });
+    });
+    dispatch_resume(sTimer);
+}
+
+// 找到当前可用的传输页。优先用屏幕上已有的（App 自己维护 UI 状态），
+// 没有再退回无界面实例（MakeHeadlessPage 会真正加载 nib 连好 outlet）。
+// ★ 无界面实例必须**缓存复用**：MakeHeadlessPage 每次调用都新建一个
+//   page 并塞进 gRetained 永久保活（那是长按菜单的既有行为，不能改），
+//   这里每点一次开关就新建一个的话，点 N 次就多 N 个页面 + N 套 outlet，
+//   白占内存也白跑 reachability 注册。所以留一个弱引用缓存。
+static __weak UIViewController *gXferHeadlessPage = nil;
+
+static UIViewController *OkaXferResolvePage(void) {
+    UIViewController *page = FindPage(KeyWindow().rootViewController, 0);
+    if (page) {
+        (void)page.view;      // 保证 outlets 已连（否则下面的强解包会走到 brk）
+        return page;
+    }
+    UIViewController *cached = gXferHeadlessPage;
+    if (cached) {
+        (void)cached.view;
+        return cached;
+    }
+    UIViewController *made = MakeHeadlessPage();
+    if (made) gXferHeadlessPage = made;   // 弱引用：gRetained 里那份才是强引用
+    return made;
+}
+
+// ★★ 为什么开 / 关都不敢直接调 changeWifiTransferStateAction: ★★
+//   反汇编真实现 0x100013a14（起点）逐条确认：启动分支与停止分支都对
+//   四个 weak outlet 做「load 完立刻 cbz → brk #1」的强制解包：
+//       0x100013a78  connectionView → 0x100013e24 brk   （停止分支入口）
+//       0x100013aa8  qrCodeView     → 0x100013e28 brk
+//       0x100013af0  startBtn       → 0x100013e2c brk
+//       0x100013bd8  startBtn       → 0x100013e34 brk
+//       0x100013d04  ipAddress      → 0x100013e38 brk
+//       0x100013d70  qrCodeView     → 0x100013e3c brk
+//       0x100013dd0  qrCodeView     → 0x100013e40 brk
+//   这七个 brk 在 0x100013e24..e40 连成一片。页面没有真正上屏时这些
+//   outlet 是 nil，一调就撞 brk —— 那是硬崩，不是 ObjC 异常，@try 兜不住。
+//   （长按菜单那条路一直是先 FindPage → MakeHeadlessPage 并把页面留在
+//    gRetained 里，outlet 齐全，所以从未踩到；导航栏开关可能在用户
+//   「刚点完关闭、页面已离开」的时机被点到，必须自己守。）
+//
+//   因此统一走这个助手：outlet 齐全 → 走 App 自己的路径（UI 同步）；
+//   不齐 → 只对实例发 start/stop，绝不进那段代码。
+//   GCDWebServer 的 start 需要 options，这里用 gServerOptions 重放
+//   （my_startWithOptions hook 会把 suspend=NO / 密码头 / 端口 fallback
+//   全量重放，与自愈同一条路）。
+static BOOL OkaXferOutletsReady(UIViewController *page) {
+    if (!page) return NO;
+    const char *need[] = { "connectionView", "qrCodeView", "startBtn", "ipAddress" };
+    for (size_t i = 0; i < sizeof(need) / sizeof(need[0]); i++) {
+        // ★ GetIvar 是 ns_returns_retained（+1），放进 ARC 作用域自动配对释放；
+        //   写成 if (GetIvar(...)) 会把那次 +1 漏掉。
+        id o = GetIvar(page, need[i]);
+        if (!o) return NO;
+    }
+    return YES;
+}
+
+// 调 App 自己的开关入口。outlet 不齐时返回 NO（调用方决定怎么兜底）。
+static BOOL OkaXferCallAppToggle(void) {
+    UIViewController *page = OkaXferResolvePage();
+    if (!OkaXferOutletsReady(page)) return NO;
+    SEL toggle = NSSelectorFromString(@"changeWifiTransferStateAction:");
+    if (![page respondsToSelector:toggle]) return NO;
+    ((void (*)(id, SEL, id))objc_msgSend)(page, toggle, nil);
+    return YES;
+}
+
+// 只对实例下手（不碰 UI）。
+// ★ 为什么不直接调 OkaSelfHealService：它有 90s 防抖 +「活着就别动」的
+//   探活前置，语义是「事后补救」；用户点开关要的是「现在就开」，不能被
+//   防抖挡掉。所以这里自己发一次重放（与自愈走同一个 selector、同一份
+//   gServerOptions，my_startWithOptions hook 照样补齐 suspend=NO / 密码头 /
+//   端口 fallback，只是绕开那两道前置）。
+static BOOL OkaXferInstanceStart(void) {
+    id srv = gServerInstance;
+    if (!srv) return NO;
+    NSError *err = nil;
+    BOOL ok = ((BOOL (*)(id, SEL, NSDictionary *, NSError **))objc_msgSend)(
+        srv, @selector(startWithOptions:error:), gServerOptions ?: @{}, &err);
+    return ok;
+}
+
+static BOOL OkaXferInstanceStop(void) {
+    id srv = gServerInstance;
+    if (!srv) return NO;
+    ((void (*)(id, SEL))objc_msgSend)(srv, @selector(stop));
+    return YES;
+}
+
+// 停止。
+static BOOL OkaXferStop(void) {
+    if (OkaXferCallAppToggle()) return YES;
+    // 页面 UI 不齐（或页面已走）：只停实例。my_stop hook 会清
+    // gServerPort / gServerRunning，胶囊状态下一拍就跟上。
+    return OkaXferInstanceStop();
+}
+
+// 一键开 / 关。
+// ★ 开为什么也自己走一遍、不复用 StartWiFiTransfer(NO)：
+//   StartWiFiTransfer 开头有一段「已经开着就别再点」的启发式判据 ——
+//   `existing.length || portLive`，其中 existing 读的是页面 ipAddress 里的
+//   文字。用户开过一次再关掉时，那段文字常常还留在页面上（App 不清），
+//   于是启发式判成「已在运行」直接 return，开关点了没反应。
+//   那段判据对长按菜单是对的（避免误中断传输），对我们这个开关是错的：
+//   我们的状态由 gServerRunning + 回环探活给出，比页面文字权威。
+static BOOL OkaXferStart(void) {
+    if (OkaXferCallAppToggle()) return YES;
+    return OkaXferInstanceStart();
+}
+
+static void OkaXferToggle(void) {
+    NSInteger cur = OkaXferStateNow(YES);
+
+    if (cur == OkaXferStateOff || cur == OkaXferStateStopped) {
+        if (!OkaXferStart()) {
+            OkaToast(@"没找到传输服务，请在 App 的 WiFi 传输页手动开启一次。");
+            return;
+        }
+        // 启动是异步的（App 内部进全局队列），1.5s 后核一次。
+        // ★ 不用更短的延时判成败：0.8s 时经常还没起来，会误报失败弹窗。
+        //   真失败也不弹错 —— 状态自然停在「未开启/已停止」，
+        //   用户再点一次即可；只有「点了完全没找到服务」才提示。
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            if (gServerRunning && gServerPort) gXferEverOn = YES;
+            OkaXferRefreshAsync();
+        });
+        return;
+    }
+
+    // 关：用户明确要关，把「曾经开过」也清掉 —— 之后再看到就是「未开启」，
+    // 不是「已停止」。两者对用户的含义不同：停止是异常，未开启是常态。
+    if (OkaXferStop()) {
+        gXferEverOn = NO;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            OkaXferRefreshAsync();
+        });
+    } else {
+        OkaToast(@"没找到可停止的传输服务。");
+    }
+}
+
+// 点按处理：整个胶囊都是热区。
+@interface OkaXferTapTarget : NSObject
+@property (nonatomic, copy) void (^handler)(void);
+@end
+
+@implementation OkaXferTapTarget
+- (void)okaXferTap:(id)sender { if (self.handler) self.handler(); }
+@end
+
+// 装到导航栏上。幂等：viewDidLoad / viewWillAppear 都可能被调多次，
+// 已经在 leftBarButtonItems 里就不再追加（否则会越叠越多）。
+static void OkaInstallXferSwitch(UIViewController *vc) {
+    if (!vc) return;
+    UINavigationItem *nav = vc.navigationItem;
+    if (!nav) return;
+
+    // ★ 只有真的在导航栈里才挂。
+    //   navigationItem 是懒建的（谁读谁有），所以它非 nil **不代表**页面上
+    //   有导航栏；不在栈里时把 item 塞进去，用户永远看不到，只留下一个
+    //   孤儿 item 挂在页面身上。判据取 navigationController —— 它才是
+    //   「这一页会被导航栏渲染」的真条件。
+    if (!vc.navigationController) return;
+
+    NSArray *left = nav.leftBarButtonItems;
+    for (UIBarButtonItem *it in left) {
+        if ([it.customView isKindOfClass:[OkaXferBarControl class]]) {
+            gXferControl = (OkaXferBarControl *)it.customView;   // 刷新弱引用
+            gXferPage = vc;
+            OkaXferRefreshAsync();
+            return;
+        }
+    }
+    // 单数形式（leftBarButtonItem）装过、但 leftBarButtonItems 为空：
+    // UIKit 里两者是同一份存储的两种视图，这里统一按数组处理，避免把它顶掉。
+    if (left.count == 0 && nav.leftBarButtonItem) left = @[ nav.leftBarButtonItem ];
+
+    OkaXferBarControl *ctl =
+        [[OkaXferBarControl alloc] initWithFrame:CGRectMake(0, 0,
+            kOkaXferPadL + kOkaXferDot + kOkaXferGap + kOkaXferTextW + kOkaXferPadR,
+            kOkaXferH)];
+    [ctl sizeToFit];
+
+    // target 由手势识别器持有（UIGestureRecognizer 会强引用 target），
+    // 这里再挂一个关联对象是多余的；手势本身挂在 ctl 上，ctl 活着它就活着。
+    OkaXferTapTarget *tap = [OkaXferTapTarget new];
+    tap.handler = ^{ OkaXferToggle(); };
+    UITapGestureRecognizer *g =
+        [[UITapGestureRecognizer alloc] initWithTarget:tap action:@selector(okaXferTap:)];
+    [ctl addGestureRecognizer:g];
+
+    UIBarButtonItem *item = [[UIBarButtonItem alloc] initWithCustomView:ctl];
+
+    NSMutableArray *next = [left mutableCopy];
+    if (!next) next = [NSMutableArray array];
+    [next addObject:item];
+    nav.leftBarButtonItems = next;
+
+    gXferControl = ctl;
+    gXferPage = vc;
+    OkaXferStartTicker();
+    OkaXferRefreshAsync();
+}
+
+// hook: -[FilesBrowserController viewDidLoad]
+static void (*orig_fbcViewDidLoad)(id, SEL);
+static void my_fbcViewDidLoad(id self, SEL _cmd) {
+    if (orig_fbcViewDidLoad) orig_fbcViewDidLoad(self, _cmd);
+    // 原实现里可能用 nib 连了一堆 outlet、也可能重建了按钮 —— 必须在
+    // 原实现之后追加，不能之前（之前加的会被覆盖掉）。
+    OkaInstallXferSwitch((UIViewController *)self);
+}
+
+// hook: -[FilesBrowserController viewWillAppear:]
+//   用户从别的页切回来时，App 可能重设过 leftBarButtonItems
+//   （选择模式进出就是换一整套），这里补一次，保证胶囊还在。
+static void (*orig_fbcViewWillAppear)(id, SEL, BOOL);
+static void my_fbcViewWillAppear(id self, SEL _cmd, BOOL animated) {
+    if (orig_fbcViewWillAppear) orig_fbcViewWillAppear(self, _cmd, animated);
+    OkaInstallXferSwitch((UIViewController *)self);
+}
+
 // --- AppDelegate hooks -----------------------------------------------------
 static BOOL (*orig_didFinishLaunching)(id, SEL, UIApplication *, NSDictionary *);
 static BOOL my_didFinishLaunching(id self, SEL _cmd, UIApplication *app, NSDictionary *opts) {
@@ -2577,6 +3064,34 @@ static void OkaWiFiInit(void) {
                 HookInstanceMethod(pageClsUI, @selector(viewDidLoad),
                                    (IMP)my_viewDidLoad, (void **)&orig_viewDidLoad,
                                    "-[BNHttpServerPage viewDidLoad]");
+            }
+        }
+
+        // ---- v1.6.11：文件列表页导航栏的 WiFi 传输开关 ----
+        // ★ 只 hook 页面自己的 viewDidLoad / viewWillAppear:（两点说明）：
+        //   ① 必须是**本类自己实现**的方法 —— class_getInstanceMethod 会沿
+        //      继承链查找，FilesBrowserController 若没 override viewDidLoad，
+        //      method_setImplementation 会改到父类上，污染 App 全部页面
+        //      （BNHttpServerPage 那一处踩过同样的坑，见上）。
+        //      这里两个方法在本类方法表里都有明确 IMP（viewDidLoad
+        //      0x100128860 是 thunk、实体 0x100127a4c；viewWillAppear:
+        //      0x1001289c0），所以安全。
+        //   ② viewDidLoad 管首次进页，viewWillAppear: 管「从别的页切回来 /
+        //      退出选择模式」—— App 会在这些时机重设 leftBarButtonItems，
+        //      只挂 viewDidLoad 的话胶囊进一次选择模式就没了。
+        //   不套任何偏好开关：这是用户明确要的常驻控件，没有「关掉」这一说。
+        {
+            Class fbc = LookupClass(FILESBROWSER_CLASS_MANGLED,
+                                    FILESBROWSER_CLASS_SWIFT);
+            if (fbc) {
+                HookInstanceMethod(fbc, @selector(viewDidLoad),
+                                   (IMP)my_fbcViewDidLoad,
+                                   (void **)&orig_fbcViewDidLoad,
+                                   "-[FilesBrowserController viewDidLoad]");
+                HookInstanceMethod(fbc, @selector(viewWillAppear:),
+                                   (IMP)my_fbcViewWillAppear,
+                                   (void **)&orig_fbcViewWillAppear,
+                                   "-[FilesBrowserController viewWillAppear:]");
             }
         }
 

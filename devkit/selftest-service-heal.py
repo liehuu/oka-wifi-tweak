@@ -40,18 +40,96 @@ def run_gate(text):
         os.remove(path)
 
 
+class Anchor(object):
+    """注入锚点：pattern 可能全文多处命中，但**只应替换 scope 函数体内那一处**。
+
+    ★ 为什么需要作用域：v1.6.11 起开关自己也会发一次 start 重放，与自愈那三行
+      同形。若仍用 `REAL.replace(pattern, new)` 做全文替换，破坏样本会顺手把
+      开关那一处也改掉 —— 测的就不再是「自愈不重放会不会被抓」，而是
+      「两处都不重放会不会被抓」，判据被摊薄，假绿风险。
+    """
+
+    def __init__(self, pattern, scope=None):
+        self.pattern = pattern
+        self.scope = scope          # None = 全文唯一（原有行为）
+
+    def check(self, what):
+        if self.scope is None:
+            if REAL.count(self.pattern) != 1:
+                print("[SETUP FAIL] 从 Tweak.xm 取不到唯一 %s （count=%d）—— "
+                      "写法变了，本脚本要跟着改"
+                      % (what, REAL.count(self.pattern)))
+                sys.exit(1)
+        else:
+            span = fn_span(REAL, self.scope)
+            if span is None:
+                print("[SETUP FAIL] 找不到函数 %s —— 写法变了" % self.scope)
+                sys.exit(1)
+            n = REAL[span[0]:span[1]].count(self.pattern)
+            if n != 1:
+                print("[SETUP FAIL] 函数 %s 内取不到唯一 %s （count=%d）"
+                      % (self.scope, what, n))
+                sys.exit(1)
+        return self
+
+    def apply(self, new):
+        """在锚点作用域内做一次替换，返回新全文。"""
+        if self.scope is None:
+            return REAL.replace(self.pattern, new, 1)
+        span = fn_span(REAL, self.scope)
+        head, body, tail = REAL[:span[0]], REAL[span[0]:span[1]], REAL[span[1]:]
+        return head + body.replace(self.pattern, new, 1) + tail
+
+
 def grab(pattern, what):
-    if REAL.count(pattern) != 1:
-        print("[SETUP FAIL] 从 Tweak.xm 取不到唯一 %s （count=%d）—— 写法变了，"
-              "本脚本要跟着改" % (what, REAL.count(pattern)))
-        sys.exit(1)
-    return pattern
+    return Anchor(pattern).check(what)
+
+
+def grab_in_fn(signature, pattern, what):
+    return Anchor(pattern, scope=signature).check(what)
+
+
+def fn_span(src, signature):
+    """返回某个函数体在源码里的 (起始, 结束) 下标；找不到返回 None。
+
+    ★ 为什么需要它：本脚本的注入锚点原本要求「全文唯一」，那是**偶然前提** ——
+      自愈重放那三行是最自然的写法，别处（例如开关自己发一次 start）写出
+      同样的三行完全正常，此时 SETUP FAIL 会把它误报成「写法变了」。
+      锚点真正要保证的是「落在自愈函数体内」，全文唯一只是它的一个副作用。
+      所以这里先框定函数体，再看锚点在体内是否唯一。
+    """
+    i = src.find(signature)
+    if i < 0:
+        return None
+    # ★ 从 signature 起点往后找 `{`：signature 本身已含开头大括号，
+    #   从 i+len(signature) 开始找会跳到**内层**块，函数体被截短。
+    j = src.find("{", i)
+    if j < 0:
+        return None
+    depth, k = 0, j
+    while k < len(src):
+        if src[k] == "{":
+            depth += 1
+        elif src[k] == "}":
+            depth -= 1
+            if depth == 0:
+                return (i, k + 1)
+        k += 1
+    return None
+
+
+def grab_in_fn(signature, pattern, what):
+    """在指定函数体内取唯一锚点（体内唯一即可，不要求全文唯一）。"""
+    return Anchor(pattern, scope=signature).check(what)
 
 
 def build_cases():
     alive_stub = grab(
         "    BOOL alive = NO;\n", "OkaPortAlive 的 BOOL alive = NO; 行")
-    replay = grab(
+    # 自愈重放那三行：v1.6.11 起开关自己也会发一次同样的 start 重放，
+    # 全文出现两处是正常的 —— 锚点要求落在 OkaSelfHealService 体内。
+    replay = grab_in_fn(
+        "static void OkaSelfHealService(void) {",
         "    NSError *err = nil;\n"
         "    BOOL ok = ((BOOL (*)(id, SEL, NSDictionary *, NSError **))objc_msgSend)(\n"
         "        srv, @selector(startWithOptions:error:), gServerOptions ?: @{}, &err);\n",
@@ -78,10 +156,9 @@ def build_cases():
         # S1 探活改读 isRunning：假死时它恒 YES，探了等于没探（用户实测症状）
         ("S1 探活改读 isRunning",
          alive_stub,
-         alive_stub.replace("    BOOL alive = NO;\n",
-             "    BOOL alive = NO;\n"
-             "    alive = ((BOOL (*)(id, SEL))objc_msgSend)(gServerInstance,"
-             " @selector(isRunning));\n"),
+         "    BOOL alive = NO;\n"
+         "    alive = ((BOOL (*)(id, SEL))objc_msgSend)(gServerInstance,"
+         " @selector(isRunning));\n",
          {"healNoIsRunning"}),
         # S2 自愈改私路：不重放 startWithOptions:，只把状态位置掉
         ("S2 自愈改私路不重放",
@@ -112,18 +189,14 @@ def build_cases():
         #   （too few arguments, expected 7, have 6）。本地没有 iOS SDK
         #   编不了，只能靠这条判据钉参数个数。
         ("S10 CFSocketCreate 删 callout 参数",
-         "                                      kCFSocketNoCallBack, NULL, &ctx);\n",
+         grab("                                      kCFSocketNoCallBack, NULL, &ctx);\n",
+              "CFSocketCreate callout 参数行"),
          "                                      kCFSocketNoCallBack, &ctx);\n",
          {"healSocketCtor"}),
         # S9 删前置声明：回到 v1.6.6 首发 CI 挂掉的形态第三次
         ("S9 删 OkaSelfHealService 前置声明",
          proto, "", {"declBeforeUse"}),
     ]
-    for name, old, _new, _exp in cases:
-        if REAL.count(old) != 1:
-            print("[SETUP FAIL] %s：注入锚点出现 %d 次（应为 1，全文替换会误伤）"
-                  % (name, REAL.count(old)))
-            sys.exit(1)
     return cases
 
 
@@ -150,7 +223,7 @@ def main():
 
     # 2) 破坏样本：rc=1 且触发键集合精确等于预期
     for name, old, new, expect in build_cases():
-        mutated = REAL.replace(old, new)
+        mutated = old.apply(new)
         if mutated == REAL:
             print("  ✗ %s：注入是空操作（替换前后一致）—— 假测试" % name)
             bad += 1
@@ -168,7 +241,7 @@ def main():
 
     # 3) 良性样本：必须 rc=0（闸门不是什么都拦）
     for name, old, new in benign_cases():
-        mutated = REAL.replace(old, new)
+        mutated = old.apply(new)
         if mutated == REAL:
             print("  ✗ %s：注入是空操作 —— 良性样本写错了" % name)
             bad += 1

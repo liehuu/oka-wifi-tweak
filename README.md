@@ -1,6 +1,6 @@
 # Oka WiFi 传输增强（com.oka.wifitweak）
 
-针对 **Oka Files / Blinker 1.7.5**（`com.blinker.documents`）的越狱插件，实现五组功能（功能 4 桌面动态图标 v1.6.10 已移除，编号保留不变）：
+针对 **Oka Files / Blinker 1.7.5**（`com.blinker.documents`）的越狱插件，实现六组功能（功能 4 桌面动态图标 v1.6.10 已移除，编号保留不变；功能 6 为 v1.6.11 新增）：
 
 | # | 功能 | 效果 |
 |---|---|---|
@@ -9,6 +9,7 @@
 | 3 | 电脑网页端增强（v1.1.8） | 保留原 `Upload Files` 按钮；**整个页面就是放置区**（没有独立拖放框），把单个/多个文件、整个文件夹拖进网页任意位置即可上传（拖入时全屏提示 + 成功/失败汇总 + 失败重试）；**复用原版行末「移动」按钮与原弹窗**，增强为目录浏览 + 可勾选批量移动 + 结果反馈。v1.1.2：**文件夹置顶**、**顶部紧凑**、**任务面板默认折叠**；v1.1.5：文件夹琥珀黄 + 行内重命名按钮；**v1.1.6：删除按钮挪到最右、重命名在它左边；文件名左侧整片区域点一下即选中；每行新增下载按钮，文件直接下载、整个文件夹自动打成 ZIP；点行不再下载**；**v1.1.7：点文件夹行进入目录、点文件行在线预览 txt / pdf / mp4 / 图片 / 音频；目录 ZIP 显式带顶层文件夹；图标列按文件类型显示不同图标**；**v1.1.8：下载改 Blob 保存，不再触发 Chrome「已阻止不安全的下载」；PDF 预览可用；目录下载不再引发 IDM 弹一堆窗口**；**v1.1.9：彻底删掉导航式下载（「等二三十秒 + 已阻止不安全的下载 + IDM 接管」的根因）；每行显示最后修改时间**；**v1.2.0：每行新增「复制下载链接」，把真实下载地址发给别人，对方浏览器 / IDM / 迅雷直接下载** |
 | 4 | 桌面动态图标（v1.6.6 引入，**v1.6.10 已移除**） | 曾实现「WiFi 传输开着时桌面 App 图标自动红染绿、关时回默认原图标」。v1.6.6–v1.6.9.2 六个版本持续修注入链路，真机始终未生效（用户 2026-11-28 最终反馈「没生效」）。v1.6.10 整体移除：dylib 切换链、安装期 helper、共源常量头与全部正向闸门已删，构建改负向闸门防回流；装 / 卸 deb 都会顺手清理旧版可能注入的残留（见「功能 4」节）。**功能 1 / 2 / 3 / 5 不受影响** |
 | 5 | 服务假死自愈（v1.6.7） | 开着 WiFi 传输放着不管，监听 socket 可能被系统回收而「假死」：实例 `isRunning` 仍报 YES、宿主显示「已连接」，但电脑网页打不开。v1.6.7 起每 45s 用**本地回环 connect 实测**端口（不读恒 YES 的 `isRunning`），回前台时也顺手探一次；确认死了就自动重放一次「关开」（同一条 hook 路，suspend=NO / 密码头 / 端口 fallback 全量补齐），90s 内不重复。可用 `ServiceHeal` 偏好关掉 |
+| 6 | 导航栏 WiFi 传输开关（v1.6.11） | 文件列表页导航栏、左侧三条横线（侧边栏图标）右边的空白区加一颗胶囊开关，实时显示传输状态（**未开启 / 待连接 / 已连接 / 已停止**），点一下即开、再点即关。状态取自 GCDWebServer 的真实运行态与活跃连接数（`_activeConnections`），不是猜的。详见「功能 6」节 |
 
 > **v1.1.9：下载慢/被拦的真正根因已清除，并新增「最后修改时间」列。**
 >
@@ -303,6 +304,39 @@ _GCDWebServerGetPrimaryIPAddress 硬编码 strcmp(ifa_name,"en0")
 **三个触发面**：`applicationDidBecomeActive:` 回前台顺手探一次（用户回来第一件事就是刷新网页）；启动时挂 45s 周期定时器（兜「没人切前后台、一直挂着」）；防抖 90s（连续假死通常是路由器踢客户端 / 系统限制，无限重拉只会耗电刷日志还掩盖真问题）。
 
 **反例判据全部可失败**（`devkit/check-service-heal.py` + `selftest-service-heal.py` 10 个破坏样本 + 1 个良性）：探活改用 `isRunning` / 自愈只改状态位不重放 / 删防抖 / 删任一触发面 / 删 `dispatch_resume`（timer 创建了永不触发）/ 实例或 options 不落袋（重放丢密码头，网页端 401）/ `CFSocketCreate` 删 callout 参数 / `ServiceHeal` 偏好读不到，每一条都必须让闸门红。
+
+### 功能 6 —— 导航栏 WiFi 传输开关（v1.6.11）
+
+**要解决的问题**：原来要开 / 关 WiFi 传输，得先进 WiFi 传输页（或长按桌面图标）。文件列表页是用户停留时间最长的一页，却完全看不到传输状态——用户只能靠「电脑那头能不能打开」来判断。
+
+**挂在哪一页、凭什么确定是这一页**：截图里那一页是 `_TtC7Blinker22FilesBrowserController`（Swift 类的 ObjC 注册名，就是 mangled 形式；用 `Blinker.FilesBrowserController` 调 `NSClassFromString` 会返回 Nil，hook 静默不生效）。这个判断不是靠「看起来像」，而是把它 ivar 表与截图逐项对齐：`hbgrMenuBarButtonItem`（左侧三条横线）、`selectBarButtonItem` / `searchBarButtonItem` / `moreAboutViewOptionsBarButtonItem`（右侧三个图标）、`pathBarContainerView`（「我的本地文件」那一行）、`toolbarViewModeButton`（右侧白色圆角胶囊）。
+
+**① 状态怎么展示**：一颗胶囊 = 状态圆点 + 三个汉字，四个状态一一对应真实数据源：
+
+| 状态 | 圆点 | 判定依据 |
+|---|---|---|
+| 未开启 | 白（α 0.55） | 服务没在跑（`gServerRunning` 为假或端口为 0），且本次 App 生命周期内没开过 |
+| 待连接 | 黄 | 服务在跑、回环探活通过，但 `_activeConnections == 0`（没有电脑连着） |
+| 已连接 | 绿 | 服务在跑、探活通过，且 `_activeConnections > 0` |
+| 已停止 | 橙 | 服务对外报在跑，但 `CFSocketConnectToAddress` 连 `127.0.0.1` 失败 = 假死（与功能 5 同一套探活） |
+
+「已连接」取的是 `GCDWebServer` 的 `_activeConnections`（用 `class_getInstanceVariable` 直读 ivar，并校验类型编码是 `q`）。这里**如实写明限度**：它是「连着的客户端数」，不是「正在传文件的字节速率」——GCDWebServer 没有就绪的速率口径，硬编一个就是假指标。另外读不到 ivar（GCDWebServer 换实现）时返回 `-1` 表示未知，**不返回 0**：返回 0 会把「不知道」渲染成「待连接」，等于给用户一个假状态。
+
+**② 开关交互怎么实现**：整颗胶囊挂一个 `UITapGestureRecognizer`（不是只有 7pt 的圆点——那样点中是碰运气）。点击按当前状态分两路：未开启 / 已停止 → 开；待连接 / 已连接 → 关。
+
+开启路径**没有**复用长按菜单的 `StartWiFiTransfer`：那个函数开头有一段「已经开着就别再点」的启发式判据（`existing.length || portLive`），`existing` 读的是页面 `ipAddress` 里的文字，而 App 关掉传输后常常不清这段文字——于是开关点了没反应。那段判据对长按菜单是对的（避免误中断正在传的文件），对这个开关是错的，所以自己走：状态由 `gServerRunning` + 回环探活给出，比页面文字权威。启动是异步的，1.5s 后核一次（不用 0.8s：那时经常还没起来，会误报失败弹窗）；真失败也不弹错，状态自然停在未开启 / 已停止，用户再点一次即可。
+
+**关闭路径有一个硬约束**：App 的 `-[BNHttpServerPage changeWifiTransferStateAction:]`（真实现 `0x100013a14`）**开、停两条分支**都对 weak outlet 做「load 完立刻 `cbz → brk #1`」的强制解包，七个 `brk` 连成一片（`0x100013e24..e40`）。页面没真正上屏时这些 outlet 是 nil，调下去就是**硬崩**——不是 ObjC 异常，`@try` 兜不住。所以调 App 入口前必须先过 `OkaXferOutletsReady`（逐个确认 `connectionView` / `qrCodeView` / `startBtn` / `ipAddress` 都非 nil）；不齐时降级为只对服务实例发 `stop` / `startWithOptions:error:`，绝不进那段代码。这也意味着：开关**不依赖**用户曾经打开过 WiFi 传输页。
+
+**③ 布局与对齐**：追加到 `leftBarButtonItems`（不是替换），所以落在汉堡按钮右侧那块空白区，不动右侧三个图标，也不碰 `titleView`。高度 27pt，垂直居中交给 `UIBarButtonItem` 自己处理（不写死 y），所以不同机型、不同导航栏高度下都对齐。左右内边距各 9pt、圆点 7pt、圆点与文字间距 6pt、文字区固定 40pt。
+
+**④ 为什么和现有状态栏风格一致**：胶囊圆角取高度的一半（`27/2`），与右侧 `toolbarViewModeButton` 的白色圆角容器是同一套语言；底色 `white 0.18`、文字 12pt semibold 白色，落在蓝色导航栏上对比度够、又不抢右侧图标的权重。**四个状态文案统一三个字**（未开启 / 待连接 / 已连接 / 已停止）：文字等长 + 文字区固定宽度，状态切换时胶囊宽度不变，导航栏不会因为文字变长而左右跳一下。
+
+**为什么两个 hook 都要挂**：App 在进出选择模式时会整套重设 `leftBarButtonItems`，只挂 `viewDidLoad` 的话，用户进出一次选择模式开关就永久消失。所以 `viewDidLoad` 与 `viewWillAppear:` 都挂，且都做**幂等**（按类识别已有项、命中就早退），否则每进一次页面就多叠一颗。
+
+**已知限度**：「已连接」是连接数不是传输速率（见上）；「已停止」需要一次回环连接才能判定，探活走后台队列并按 2s 节流，所以状态最多晚约 1~2 秒；胶囊不显示 IP 与端口（那是 WiFi 传输页的职责，塞进导航栏会挤掉标题）。
+
+**闸门**：`devkit/check-navswitch.py`（11 条判据，全部落在函数体内并检查调用形态与顺序——不写「标识符存在」这类永真判据）+ `devkit/selftest-navswitch.py`（18 个破坏样本，每条都要求**对应判据键精确变红**；只断言「返回 1」会放过「A 判据误拦了 B 的样本、B 其实从未被验证」这种假绿）。另有 2 个良性扰动样本，防判据过严。产物层同向判据在 `build.sh`：dylib 必须含 mangled 类名与四个状态文案。
 
 ### 功能 3 —— 电脑网页端增强（v1.1.1 定型，v1.1.2 ~ v1.2.0 持续增强）
 
@@ -655,7 +689,9 @@ sh devkit/build.sh arm64  iphoneos-arm    1.2.0   # 传统 rootful
 | `devkit/check-no-icon-gate.py` | v1.6.10 桌面动态图标负向闸门（功能已整体移除，防回流）：Tweak.xm 剥注释后不得出现 12 个禁用标识符——`OkaSetAppIcon` / `OkaIconSwitchReady` / `OkaHostIsAppStore` / `gEnableSwitchIcon` / `OKA_ICON_NAME_GREEN` / `OKA_ICON_KEY_INJECTED` / `setAlternateIconName` / `CFBundleAlternateIcons` / `oka-iconinject` / `iconinject-core.h` / `oka-icon-common.h` / 偏好键 `"IconSwitch"` | `build.sh` 内；CI 的 No-icon gate 同代码 |
 | `devkit/selftest-noicongate.py` | 上面那个闸门的反证：1 个良性样本 + 7 个破坏注入（函数定义回流 / 调用点回流 / 注入判定回流 / 装态判定回流 / 开关变量回流 / selector 回流 / 偏好键回流）逐个必须 FAIL + 还原后复跑 PASS | CI 的 No-icon gate；本地可跑 |
 | `devkit/check-service-heal.py` | v1.6.7 服务假死自愈：探活必须本地回环 connect 且**不许读 `isRunning`**（恒 YES，探了等于没探）；自愈必须重放 `startWithOptions:error:` 原路（不许只改状态位）；防抖 90s；三个触发面齐备（回前台 / 45s 定时器含 `dispatch_resume` / 启动即挂）；实例与 options 在 `my_startWithOptions` 落袋；`ServiceHeal` 偏好可读；自愈段无 NSLog；声明先于使用 | `build.sh` 内；CI 的 Service heal gate 同代码 |
-| `devkit/selftest-service-heal.py` | 上面那个闸门的反证：10 个破坏样本（每个精确触发一个判据键）+ 1 个良性注释变更 | CI 的 Service heal gate；本地可跑 |
+| `devkit/selftest-service-heal.py` | 上面那个闸门的反证：10 个破坏样本（每个精确触发一个判据键）+ 1 个良性注释变更。注入锚点按**函数体作用域**替换（v1.6.11 起开关自己也会发一次同样的 start 重放，全文替换会误改开关那一处，把判据摊薄） | CI 的 Service heal gate；本地可跑 |
+| `devkit/check-navswitch.py` | v1.6.11 导航栏 WiFi 传输开关闸门，11 条判据：查类必须用 `FILESBROWSER_CLASS_MANGLED` 且值为 mangled 形式；挂载函数必须是 `if (!vc.navigationController) return;` 早退；调 App 入口前必须过 `OkaXferOutletsReady`（四个 outlet 齐全、守卫在调用之前、`!` 早退真实存在，且每处调用点所在函数在受守卫名单内）；幂等要求「按类识别 → 命中即 return」且判重在 `addObject` 之前；四状态文案从源码实际赋值里取长度比对；`viewDidLoad` 与 `viewWillAppear:` 两个 selector 都必须真注册；`_activeConnections` 必须直读 ivar 并校验类型编码；`if (!iv)` 必须返回 -1；定时器回调必须有 `if (!gXferControl) return;`；手势必须挂在胶囊自身而非 `_dot` | `build.sh` 内；CI 的 Nav switch gate 同代码 |
+| `devkit/selftest-navswitch.py` | 上面那个闸门的反证：18 个破坏样本，每个都要求**对应判据键精确变红**（只断言"返回 1"会放过「A 误拦 B 的样本、B 从未被验证」的假绿）+ 2 个良性扰动（注释 / 改变量名）证明判据不过严 + 还原复跑 + 磁盘 sha256 前后一致 | CI 的 Nav switch gate；本地可跑 |
 | `node --check web/oka-wifi.js` | 用真实 JS 解析器验语法（不是正则数括号）；runner 缺 node 时**明确报错**，不静默跳过 | CI 的 Web assets gate |
 
 `build.sh` 里还有一层**网页交互指纹闸门**（v1.1.5 起逐版扩充）：要求 JS 里出现一组关键符号名
@@ -792,6 +828,13 @@ v1.1.3 起插件**不输出任何系统日志**，所以判据一律看功能表
 | 顶部还是很空 / 上传任务框还是占地方 | `body.oka-compact` 没加上，或注入的 CSS 被缓存了 | 控制台看 `document.body.classList.contains('oka-compact')`；为真但样式没变就强刷（Ctrl+F5）。任务面板的折叠由 `setTasksExpanded(false)` 控制，若上传后明细直接展开，检查 `startUpload()` 里那行是否被删；也可直接点头部「展开 / 收起」验证切换是否可用 |
 | 页面源码里出现两次 `OKA-WIFI-INJECTED` | 幂等标记失效（类方法 + 实例方法双 hook 都注入了） | 正常情况下 `OkaAugmentVariables` 会在第二次命中时直接返回原 variables。若重复，检查 `rangeOfString:@"OKA-WIFI-INJECTED"` 是否被改掉 |
 | 拖入文件夹后只剩顶层文件、子目录丢了 | `create` 用 `withIntermediateDirectories:NO`，父目录不存在时整条链会失败 | 任务面板会显示每个目录的失败原因。代码已按深度升序逐级创建并对「目录已存在」做 `list` 反查；若仍失败，把任务面板的失败明细发来 |
+| 导航栏上没有那颗 WiFi 开关胶囊 | 页面不是文件列表页（在 WiFi 传输页 / 设置页时按设计不挂）；或装的是 v1.6.10 及更早（该功能 v1.6.11 才有）；或该页当时不在导航栈里（守卫会拒绝挂一个看不见的孤儿 item） | 先回到「我的本地文件」那一页（导航栏左侧是三条横线的那页）再看。仍在 → 打开 App 设置面板核对「插件版本」行必须是 `v1.6.11`；旧实例残留时重装并重启 App |
+| 开关胶囊点了没反应 | 服务实例还没被创建（App 从未启动过 WiFi 传输，且 `gServerInstance` 尚未落袋） | 首次启动一个实例的可靠办法：进 WiFi 传输页手动开一次，或长按桌面图标用快捷项。之后开关就能自己开 / 关，不再依赖那一页 |
+| 胶囊显示「已停止」 | 服务对外报在跑但本地回环 connect 失败 = 假死（与功能 5 同一套探活口径），不是显示错误 | 点一下开关（先关后开），或直接依赖 v1.6.7 的自愈（90s 防抖）；若反复出现，多为路由器踢客户端 / Wi-Fi 漫游，考虑固定 IP 或用热点 |
+| 胶囊一直显示「待连接」，但电脑上网页已经打开了 | `_activeConnections` 的计数口径是「已建立的 HTTP 连接」，浏览器请求结束、进入 keep-alive 空闲或页面关闭后会归零；它不等于「有电脑连着」 | 这是**如实反映连接数**，不是 bug（README「功能 6」已写明限度：它是连接数不是传输速率）。传输进行中会跳到「已连接」 |
+| 开关胶囊一闪一闪 / 状态偶尔回跳 | 探活按 2s 节流走后台队列，两次采样之间的瞬时抖动会被如实显示 | 属预期；若持续在「已连接 / 待连接」间跳，说明客户端连接在反复建立又断开，去网页端看 `#alerts` 有无上传失败 |
+| 进出一次选择模式后开关消失 | 只挂 `viewDidLoad` 没挂 `viewWillAppear:`（`build.sh` 的 `bothHooks` 判据就是钉这个） | 确认装的是 v1.6.11 且构建未跳过闸门；跑 `python3 devkit/check-navswitch.py Tweak.xm` 应全绿 |
+| 点开关后 App 直接闪退（无弹窗、无异常） | 绕过了 `OkaXferOutletsReady` 守卫，撞上 App 里七个 `brk #1`（`0x100013e24..e40`）——那是硬崩，`@try` 兜不住 | 跑 `python3 devkit/check-navswitch.py Tweak.xm`：`outletGuard` 变红就是这个原因。守卫必须覆盖 `connectionView` / `qrCodeView` / `startBtn` / `ipAddress` 四个 outlet，且排在调用之前 |
 | 拖放后出现两份上传 / 进度条乱跳 | 捕获阶段的 `stopPropagation` 没挡住 jQuery File Upload 在 `$(document)` 上的 drop handler | 检查是否有其它插件/浏览器扩展改写了 drag/drop；本插件的 `onDrop` 必须同时 `preventDefault()` 与 `stopPropagation()` |
 | 点行末「移动」按钮还是原版那个只有路径输入框的弹窗 | 捕获阶段接管没生效（v1.1.1 仍复用原版 `#move-modal`，**弹窗长得很像原版是正常的**，判据是里面有没有「本次移动 N 项」和目录浏览） | 先在浏览器控制台确认 `window.__okaWiFiLoaded` 为真；再看源码里有没有 `onMoveButtonCapture`。若原版 handler 仍执行，会出现「弹窗立刻自动关闭 + 只发 1 个 POST move」——这是 `.off('click')` 没摘掉 `#move-confirm` 旧绑定的特征 |
 | 移动完成后按钮点不动 | 故意设计：结果留在弹窗里给用户看，确认按钮保持禁用以防重复提交 | 关掉弹窗，重新点任意一行的「移动」按钮即可恢复 |
@@ -825,13 +868,13 @@ v1.1.3 起插件**不输出任何系统日志**，所以判据一律看功能表
 
 ```
 wifitweak/
-├── Tweak.xm                    # 全部实现（约 2666 行，含逐条逆向依据注释；v1.6.10 已移除动态图标链）
+├── Tweak.xm                    # 全部实现（约 3180 行，含逐条逆向依据注释；v1.6.10 已移除动态图标链，v1.6.11 新增导航栏开关）
 ├── OkaWiFi.plist               # CydiaSubstrate 过滤：只注入 com.blinker.documents
 ├── web/                        # 网页端增强前端资源（v1.1.7 起含点目录进入 / 文件预览 / 顶层文件夹 ZIP；v1.1.9 加时间列；v1.2.0 加复制下载链接）
 │   ├── oka-wifi.js             # 列表排序 / 全页拖放 / 文件夹递归 / 折叠任务面板 / 复用原版移动弹窗 / 行交互 / ZIP 打包 / 时间列 / 复制下载链接
 │   └── oka-wifi.css            # oka- 前缀样式 + 顶部紧凑布局 + 文件夹琥珀黄 + 选中热区 + 行内按钮 + 时间列 + 链接反馈条
 ├── devkit/
-│   ├── build.sh                # 零 Theos 编译：资源内联 + xcrun clang + codesign + 闸门（含 v1.6.10 负向闸门：图标符号不得回流 dylib、旧文件不得回流 devkit/）
+│   ├── build.sh                # 零 Theos 编译：资源内联 + xcrun clang + codesign + 闸门（含 v1.6.10 负向闸门：图标符号不得回流 dylib、旧文件不得回流 devkit/；v1.6.11 导航栏开关闸门 + 产物指纹）
 │   ├── mkdeb.sh                # 纯 Python 拼 ar 归档（不依赖 dpkg-deb）；postinst/prerm 清理旧版桌面动态图标注入残留（幂等，不阻断 dpkg）
 │   ├── push-via-api.py         # github.com 被代理 502 时的等价推送通道（Git Data API，重建 tree sha 与本地一致才落 ref）
 │   ├── gen-webassets.py        # JS/CSS -> .build/OkaWebAssets.h（含往返解码自检）
@@ -846,6 +889,8 @@ wifitweak/
 │   ├── selftest-noicongate.py  # 上面那个闸门的反证：1 良性 + 7 破坏注入 + 还原复跑
 │   ├── check-service-heal.py   # v1.6.7 服务假死自愈闸门（回环探活不读 isRunning / 原路重放 / 防抖 / 三触发面）
 │   ├── selftest-service-heal.py # 上面这个闸门的反证：10 破坏样本 + 1 良性样本
+│   ├── check-navswitch.py      # v1.6.11 导航栏 WiFi 传输开关闸门（挂载类/导航栈守卫/outlet 守卫/幂等/文案等长/双 hook/真实连接数/定时器守卫/热区）
+│   ├── selftest-navswitch.py   # 上面这个闸门的反证：18 破坏样本（精确命中判据键）+ 2 良性扰动
 │   ├── verify-deb.py           # deb / 裸 dylib 校验（纯标准库，自己读 Mach-O）
 │   ├── selftest-verify.py      # 上面这个校验器的自测：29 用例（正向 5 / 反向 24），证明它会失败
 │   └── include/
