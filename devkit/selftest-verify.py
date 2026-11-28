@@ -35,6 +35,7 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 VERIFY = os.path.join(HERE, 'verify-deb.py')
+MKDEB = os.path.join(HERE, 'mkdeb.sh')
 PY = sys.executable
 
 MH_MAGIC_64 = 0xFEEDFACF
@@ -135,8 +136,32 @@ def hover_css(hover='#cfe0f5', sel='#bdd4f0',
 HOVER_CSS = hover_css().encode()
 
 
+def extract_hook(name):
+    """从 mkdeb.sh 抽出指定装期钩子（postinst / prerm）的 heredoc 原文。
+
+    ★ 合法样本必须与**真包同一来源**：另抄一份「看起来对」的钩子脚本，
+      一旦 mkdeb.sh 改了形态（v1.6.13 就把 fork grep 改成 while-read），
+      抄的那份不会跟着变，C13 这类新判据立刻把合法样本判死 ——
+      那是假 FAIL，比漏报更能把人带偏。单一事实来源在这里。
+    """
+    src = open(MKDEB, encoding='utf-8').read()
+    marker = "cat > \"$STAGE/DEBIAN/%s\" <<'EOF'" % name
+    i = src.find(marker)
+    if i < 0:
+        raise SystemExit('mkdeb.sh 里找不到 %s 的 heredoc 头' % marker)
+    j = src.find("\n", src.find("<<'EOF'", i) + 1)   # 首行 EOF 行本身跳过
+    k = src.find("\nEOF\n", j)
+    if k < 0:
+        raise SystemExit('mkdeb.sh 里 %s 的 heredoc 没有结束行' % name)
+    body = src[j + 1:k + 1]
+    if not body.strip():
+        raise SystemExit('mkdeb.sh 的 %s heredoc 是空的' % name)
+    return body
+
+
 def make_control_tar(arch='iphoneos-arm', postinst_mode=0o755, with_postinst=True,
-                     with_prerm=True):
+                     with_prerm=True,
+                     postinst_body=None, prerm_body=None):
     buf = io.BytesIO()
     tf = tarfile.open(fileobj=buf, mode='w', format=tarfile.GNU_FORMAT)
     control = (
@@ -154,7 +179,10 @@ def make_control_tar(arch='iphoneos-arm', postinst_mode=0o755, with_postinst=Tru
     tf.addfile(ti, io.BytesIO(control))
 
     if with_postinst:
-        pi = b'#!/bin/sh\nexit 0\n'
+        # v1.6.13 起与 mkdeb.sh 产物同源（见 extract_hook 注释）；
+        # postinst_body 参数仅供 C13 反向样本改写成坏形态。
+        pi = (postinst_body if postinst_body is not None
+              else extract_hook('postinst')).encode()
         ti = tarfile.TarInfo('./postinst')
         ti.size = len(pi)
         ti.mode = postinst_mode
@@ -165,7 +193,8 @@ def make_control_tar(arch='iphoneos-arm', postinst_mode=0o755, with_postinst=Tru
         # v1.6.10：prerm 负责清理旧版（v1.6.6-v1.6.9.2）桌面动态图标注入残留
         #（删 OkaIconInjected 标记键 + 两张 OkaIconGreen PNG）。
         # 缺了它：卸载后旧版注入的桌面图标残留还原不掉。
-        pr = b'#!/bin/sh\nexit 0\n'
+        pr = (prerm_body if prerm_body is not None
+              else extract_hook('prerm')).encode()
         ti = tarfile.TarInfo('./prerm')
         ti.size = len(pr)
         ti.mode = 0o755
@@ -291,7 +320,9 @@ def build_deb(dylib_blob, arch='iphoneos-arm', prefix='', **kw):
     ctl = make_control_tar(arch=arch,
                            postinst_mode=kw.pop('postinst_mode', 0o755),
                            with_postinst=kw.pop('with_postinst', True),
-                           with_prerm=kw.pop('with_prerm', True))
+                           with_prerm=kw.pop('with_prerm', True),
+                           postinst_body=kw.pop('postinst_body', None),
+                           prerm_body=kw.pop('prerm_body', None))
     data = make_data_tar(dylib_blob, prefix=prefix, **kw)
 
     import gzip
@@ -505,6 +536,38 @@ def build_cases():
     case('合法包无 oka-iconinject 且 dylib 无图标符号', True,
          build_deb(ok_arm64, 'iphoneos-arm', ''),
          'rootful', 'iphoneos-arm', 'arm64')
+
+    # ---- C13（v1.6.13）：装期脚本零 fork 扫描 --------------------------
+    # 反向 1：postinst/prerm 退回 fork 外部 grep。
+    #   v1.6.10-v1.6.12 的「安装慢」根因：逐 app `grep -aq` 读 Info.plist，
+    #   iOS 单次 fork 5-15ms × 100+ 个 App = 秒级，装后脚本还是前台同步跑。
+    #   注意 postinst/prerm **同时**改：真实钩子是成对同源的，只改一边
+    #   造出的样本另一半仍是好形态，闸门放行是对的、样本却是废的。
+    grep_scan = (
+        '#!/bin/sh\n'
+        'set +e\n'
+        'for __APPDIR in /var/containers/Bundle/Application/*; do\n'
+        '  [ -d "$__APPDIR" ] || continue\n'
+        '  for __APP in "$__APPDIR"/*.app; do\n'
+        '    grep -aq com.blinker.documents "$__APP/Info.plist" '
+        '2>/dev/null || continue\n'
+        '  done\n'
+        'done\n'
+        'exit 0\n'
+    )
+    case('装期钩子退回 fork grep（安装慢的根因）', False,
+         build_deb(ok_arm64, 'iphoneos-arm', '',
+                   postinst_body=grep_scan, prerm_body=grep_scan),
+         'rootful', 'iphoneos-arm', 'arm64', '[C13]')
+
+    # 反向 2：为「过闸」把清理任务整个删掉。
+    #   比 fork grep 更坏：grep 只是慢，删任务是旧版残留还原不掉。
+    #   所以 C13 判据二是「必须有 while-read」，不是只查 grep 不在。
+    empty_scan = '#!/bin/sh\nexit 0\n'
+    case('装期钩子把扫描任务整个删掉（规避 grep）', False,
+         build_deb(ok_arm64, 'iphoneos-arm', '',
+                   postinst_body=empty_scan, prerm_body=empty_scan),
+         'rootful', 'iphoneos-arm', 'arm64', '[C13]')
 
 
 def main():
