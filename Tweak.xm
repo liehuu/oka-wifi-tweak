@@ -3067,6 +3067,8 @@ static id OkaStatResponse(id server, id request) {
 //  build.sh 对源码与产物做日志调用与前缀常量的双向负向检查（v1.1.3 起
 //  产物里禁止 NSLog / os_log），写日志会让整个构建失败。走 HTTP 是唯一
 //  不碰那条红线的可观测通道 —— 而且它本来就是这个插件的主界面。
+//  （源码侧那条判据 v1.6.12 起已改为「先剥注释再查」：这段说明写着这两个
+//   名字，裸 grep 会把文档当代码打死，本文件就是这么把三个 job 全打红的。）
 static id OkaXferDiagResponse(void) {
     UIViewController *page = gXferPage;
     UIViewController *root = KeyWindow().rootViewController;

@@ -650,14 +650,32 @@ for stale in oka-dropzone oka-move-modal oka-move-open oka-batch-bar; do
 done
 echo "✓ 无 v1.1.0 独立拖放框 / 独立移动弹窗残留"
 
-# ---------- 4b) 诊断日志负向闸门（v1.1.3） ----------
-# 使用者不需要诊断日志：源码里不能有 LOG( / NSLog，编译产物里不能有
-# "[OkaWiFi]" 日志前缀，也不能再引用 _NSLog 未定义符号。
-# 光看源码"没写 NSLog"不算数 —— 必须从 dylib 原始字节反查，防止宏回流。
-if grep -nE '(^|[^A-Za-z_])LOG\(' "$ROOT/Tweak.xm" || grep -n 'NSLog' "$ROOT/Tweak.xm"; then
-  echo "✗ Tweak.xm 仍有诊断日志调用（v1.1.3 起已移除）"
+# ---------- 4b) 诊断日志负向闸门（v1.1.3；v1.6.12 改为独立脚本 + 剥注释） ----------
+# 使用者不需要诊断日志：编译产物里不能有 "[OkaWiFi]" 日志前缀，也不能再引用
+# _NSLog 未定义符号；源码里不能有 NSLog / os_log / LOG( 调用。
+#
+# ★ v1.6.12 修了两处（这是 v1.6.12 首轮 CI 三个 job 全 red 的直接原因）：
+#   1) 源码侧原来是裸 `grep -n 'NSLog'` —— 连注释一起算命中。v1.6.12 在
+#      OkaXferDiagResponse 上方写的说明「产物里禁止 NSLog / os_log」把它打停。
+#      本仓库已踩过两次同样的坑（v1.1.8 window.location、v1.6.3 hover 闸门
+#      6 条假红）：**注释是文档不是代码**，判据必须跑在剥注释后的源码上。
+#   2) 注释从 v1.1.3 起就写着「禁止 NSLog / os_log」，但判据只查 NSLog ——
+#      一条不出现的规则就是永远通过的规则。现已补上 os_log 一族与 LOG 宏。
+#
+# ★ 为什么搬成独立脚本（devkit/check-nolog.py）而不是留在这段 heredoc 里：
+#   写在 heredoc 里的判据**没法被自测注入破坏样本来反证**，等于「看着有闸门、
+#   没人验证过它会红」。独立成文件后由 selftest-nolog.py 做正反两向反证：
+#   5 个良性（注释/字符串里提到这些名字不许误报）+ 6 个破坏（真写了必须红，
+#   连行号与命中词一起断言）+ 1 个剥离器退化（必须 exit 2 而不是放行）。
+if ! python3 "$ROOT/devkit/check-nolog.py" "$ROOT/Tweak.xm"; then
+  echo "✗ Tweak.xm 诊断日志闸门未通过（v1.1.3 起已移除，可观测性走 /oka-xfer）"
   exit 1
 fi
+if ! python3 "$ROOT/devkit/selftest-nolog.py" "$ROOT/Tweak.xm"; then
+  echo "✗ 诊断日志闸门反证未过（良性误报 / 破坏样本没红 / 剥注释器退化没拦住）"
+  exit 1
+fi
+echo "✓ 无源码侧诊断日志（剥注释判据 + 5 良性/6 破坏/1 退化反证）"
 for stale in '[OkaWiFi]' NSLog; do
   if grep -aqF "$stale" "$BUILD/$NAME.dylib"; then
     echo "✗ dylib 仍有诊断日志残留 ${stale}"

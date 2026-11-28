@@ -168,6 +168,19 @@ jobs:
       #  18 个破坏样本要求**对应判据键精确变红**——只断言"返回 1"会放过
       #  「A 误拦了 B 的样本、B 其实从未被验证」的假绿。
       #  产物层同向判据在 build.sh 里：dylib 必须含 mangled 类名与四个状态文案。
+      - name: Diagnostic log gate (v1.6.12)
+        run: |
+          set -eu
+          # v1.6.12 首轮 CI 就是被这一条打停的：原判据是裸 grep 'NSLog'，
+          # 连源码注释都算命中 —— 我在 OkaXferDiagResponse 上方写了一整段
+          # 「产物里禁止 NSLog / os_log」，文档把构建打死，三个 job 全 red。
+          # 现在判据跑在剥注释后的源码上，并补上注释里早就承诺、实际没查的
+          # os_log 一族与 LOG 宏。
+          # 自测同时反证：注释里提到这些名字不许误报（5 良性），真写了必须
+          # 红且行号准确（6 破坏），剥注释器退化必须 exit 2 而不是放行（1）。
+          python3 devkit/check-nolog.py Tweak.xm
+          python3 devkit/selftest-nolog.py Tweak.xm
+
       - name: Nav switch gate (v1.6.12)
         run: |
           set -eu

@@ -581,7 +581,9 @@ ZIP 下载使用独立的 `zipping` 标志，不占用 `tasks` / `running`，`Up
 功能语句逐句保留（返回的 URL、flags 改写、hook 注册、弹窗、前端注入都没动）。
 代价是**不能再靠日志确认插件是否加载**——改为看功能：长按图标有没有出现「开启 WiFi 传输」、
 蜂窝下按钮与地址是否正常、电脑网页有没有注入标记。构建期 `devkit/build.sh` 的
-「诊断日志负向闸门」会从 dylib 原始字节反查 `NSLog` 与 `[OkaWiFi]`，一旦回流直接构建失败。
+「诊断日志负向闸门」双向查：**产物侧**从 dylib 原始字节反查 `NSLog` 与 `[OkaWiFi]`；
+**源码侧**由 `devkit/check-nolog.py` 在剥注释后查 `NSLog(` / `os_log` 一族 / `LOG(` 宏
+（v1.6.12 起；原先是裸 `grep 'NSLog'`，注释里提到这个名字就会误拦）。任一方向命中直接构建失败。
 
 #### v1.1.2 三项补齐（按真机使用反馈改的）
 
@@ -717,7 +719,9 @@ sh devkit/build.sh arm64  iphoneos-arm    1.2.0   # 传统 rootful
 | `devkit/check-service-heal.py` | v1.6.7 服务假死自愈：探活必须本地回环 connect 且**不许读 `isRunning`**（恒 YES，探了等于没探）；自愈必须重放 `startWithOptions:error:` 原路（不许只改状态位）；防抖 90s；三个触发面齐备（回前台 / 45s 定时器含 `dispatch_resume` / 启动即挂）；实例与 options 在 `my_startWithOptions` 落袋；`ServiceHeal` 偏好可读；自愈段无 NSLog；声明先于使用 | `build.sh` 内；CI 的 Service heal gate 同代码 |
 | `devkit/selftest-service-heal.py` | 上面那个闸门的反证：10 个破坏样本（每个精确触发一个判据键）+ 1 个良性注释变更。注入锚点按**函数体作用域**替换（v1.6.11 起开关自己也会发一次同样的 start 重放，全文替换会误改开关那一处，把判据摊薄） | CI 的 Service heal gate；本地可跑 |
 | `devkit/check-navswitch.py` | 导航栏 WiFi 传输开关闸门，14 条判据：查类必须用 `FILESBROWSER_CLASS_MANGLED` 且值为 mangled 形式；挂 item 前必须判 `navigationController.topViewController == vc`（**不是判非 nil**——子控制器沿 parent 链也非 nil，v1.6.11 就栽在这里）；必须有「非 item 的回退挂法」且回退助手体里真有 `addSubview`、调用点不在恒假条件里；必须有可查询的自证接口 `OkaXferDiagResponse`（**查定义**而非查调用点）并注册成 `GET /oka-xfer`；非 item 挂法必须有 `viewWillDisappear:` 清理且真注册；调 App 入口前必须过 `OkaXferOutletsReady`（四个 outlet 齐全、守卫在调用之前、`!` 早退真实存在，且每处调用点所在函数在受守卫名单内）；幂等要求「按类识别 → 命中即 return」，B/C 路径还要求清掉不属于本页的胶囊；四状态文案从源码实际赋值里取长度比对；`viewDidLoad` 与 `viewWillAppear:` 两个 selector 都必须真注册；`_activeConnections` 必须直读 ivar 并校验类型编码；`if (!iv)` 必须返回 -1；定时器回调必须有 `if (!gXferControl) return;`；手势必须挂在胶囊自身而非 `_dot` | `build.sh` 内；CI 的 Nav switch gate 同代码 |
-| `devkit/selftest-navswitch.py` | 上面那个闸门的反证：18 个破坏样本，每个都要求**对应判据键精确变红**（只断言"返回 1"会放过「A 误拦 B 的样本、B 从未被验证」的假绿）+ 2 个良性扰动（注释 / 改变量名）证明判据不过严 + 还原复跑 + 磁盘 sha256 前后一致 | CI 的 Nav switch gate；本地可跑 |
+| `devkit/selftest-navswitch.py` | 上面那个闸门的反证：23 个破坏样本，每个都要求**对应判据键精确变红**（只断言"返回 1"会放过「A 误拦 B 的样本、B 从未被验证」的假绿）+ 2 个良性扰动（注释 / 改变量名）证明判据不过严 + 还原复跑 + 磁盘 sha256 前后一致 | CI 的 Nav switch gate；本地可跑 |
+| `devkit/check-nolog.py` | v1.1.3 诊断日志负向闸门，**v1.6.12 重写**：查 `NSLog(` / `os_log` 一族 / `LOG(` 宏三类调用，全部跑在**剥注释后**的源码上，并先对剥注释器自证（自证失败 exit 2，不放行）。原来这段是 `build.sh` 里的裸 `grep 'NSLog'`，两个缺陷：连注释算命中（v1.6.12 首轮 CI 三个 job 全 red 的**直接原因**）、注释从 v1.1.3 起就写着「禁止 NSLog / os_log」却只查 NSLog | `build.sh` 内；CI 的 Diagnostic log gate 同代码 |
+| `devkit/selftest-nolog.py` | 上面那个闸门的反证：5 个良性（注释 / 字符串里提到 `NSLog`、`os_log`、`LOG(` 都不许误报）+ 6 个破坏（真写调用必须红，且**断言报出的行号与命中词**——只判 exit 码的话，剥离器把整段代码剥没了也会"通过"）+ 1 个剥离器退化（把 `strip_comments` 换成恒等函数，必须 exit 2 而不是放行） | CI 的 Diagnostic log gate；本地可跑 |
 | `devkit/check-dylib-fingerprint.py` | v1.6.11 产物层指纹：dylib 里必须有 mangled 类名、`okaApplyState` selector 与四个状态文案。**中文文案按 UTF-16LE 找**——ObjC 的 `@"未开启"` 在 Mach-O 里就是 UTF-16LE，用 `grep -a 未开启`（UTF-8 字节）必然找不到；而 macOS 自带 BSD grep 没有 `-P` 不能按字节匹配。要求 `okaApplyState` 存在是为了排除「文案写进死数组、没人渲染」 | `build.sh` 内 |
 | `devkit/selftest-dylib-fingerprint.py` | 上面那个指纹判据的反证，用构造的假 dylib（不需要 iOS SDK）：2 良性（UTF-16LE / UTF-8 两种编码）+ 6 破坏（缺一个文案 / 近形字替换 / 缺 selector / 缺 mangled 名 / 空文件 / 文件不存在），每个破坏样本的失败理由必须各不相同 | CI 的 Nav switch gate；本地可跑 |
 | `node --check web/oka-wifi.js` | 用真实 JS 解析器验语法（不是正则数括号）；runner 缺 node 时**明确报错**，不静默跳过 | CI 的 Web assets gate |
@@ -863,7 +867,8 @@ v1.1.3 起插件**不输出任何系统日志**，所以判据一律看功能表
 | 胶囊显示「已停止」 | 服务对外报在跑但本地回环 connect 失败 = 假死（与功能 5 同一套探活口径），不是显示错误 | 点一下开关（先关后开），或直接依赖 v1.6.7 的自愈（90s 防抖）；若反复出现，多为路由器踢客户端 / Wi-Fi 漫游，考虑固定 IP 或用热点 |
 | 胶囊一直显示「待连接」，但电脑上网页已经打开了 | `_activeConnections` 的计数口径是「已建立的 HTTP 连接」，浏览器请求结束、进入 keep-alive 空闲或页面关闭后会归零；它不等于「有电脑连着」 | 这是**如实反映连接数**，不是 bug（README「功能 6」已写明限度：它是连接数不是传输速率）。传输进行中会跳到「已连接」 |
 | 开关胶囊一闪一闪 / 状态偶尔回跳 | 探活按 2s 节流走后台队列，两次采样之间的瞬时抖动会被如实显示 | 属预期；若持续在「已连接 / 待连接」间跳，说明客户端连接在反复建立又断开，去网页端看 `#alerts` 有无上传失败 |
-| 进出一次选择模式后开关消失 | 只挂 `viewDidLoad` 没挂 `viewWillAppear:`（`build.sh` 的 `bothHooks` 判据就是钉这个） | 确认装的是 v1.6.11 且构建未跳过闸门；跑 `python3 devkit/check-navswitch.py Tweak.xm` 应全绿 |
+| 进出一次选择模式后开关消失 | 只挂 `viewDidLoad` 没挂 `viewWillAppear:`（`build.sh` 的 `bothHooks` 判据就是钉这个） | 确认装的是 v1.6.12 且构建未跳过闸门；跑 `python3 devkit/check-navswitch.py Tweak.xm` 应全绿 |
+| **CI 编译成败都停在「诊断日志负向闸门」，报 `Tweak.xm 仍有诊断日志调用`，但源码里明明没写调用** | 这条判据在 v1.6.12 之前是 `build.sh` 里的裸 `grep -n 'NSLog'`，**连注释一起算命中**。只要在源码里写一句「产物里禁止 NSLog」的说明，整个构建就被自己的文档打停（v1.6.12 首轮 CI 三个 job 全 red 就是这么来的） | v1.6.12 已改为 `devkit/check-nolog.py`：先剥注释再查，并补上注释里早就承诺、实际没查的 `os_log` 一族与 `LOG(` 宏。**自查**：`python3 devkit/check-nolog.py Tweak.xm` 应通过；`python3 devkit/selftest-nolog.py Tweak.xm` 应输出「5 良性 + 6 破坏 + 1 剥离器退化」 |
 | 点开关后 App 直接闪退（无弹窗、无异常） | 绕过了 `OkaXferOutletsReady` 守卫，撞上 App 里七个 `brk #1`（`0x100013e24..e40`）——那是硬崩，`@try` 兜不住 | 跑 `python3 devkit/check-navswitch.py Tweak.xm`：`outletGuard` 变红就是这个原因。守卫必须覆盖 `connectionView` / `qrCodeView` / `startBtn` / `ipAddress` 四个 outlet，且排在调用之前 |
 | 拖放后出现两份上传 / 进度条乱跳 | 捕获阶段的 `stopPropagation` 没挡住 jQuery File Upload 在 `$(document)` 上的 drop handler | 检查是否有其它插件/浏览器扩展改写了 drag/drop；本插件的 `onDrop` 必须同时 `preventDefault()` 与 `stopPropagation()` |
 | 点行末「移动」按钮还是原版那个只有路径输入框的弹窗 | 捕获阶段接管没生效（v1.1.1 仍复用原版 `#move-modal`，**弹窗长得很像原版是正常的**，判据是里面有没有「本次移动 N 项」和目录浏览） | 先在浏览器控制台确认 `window.__okaWiFiLoaded` 为真；再看源码里有没有 `onMoveButtonCapture`。若原版 handler 仍执行，会出现「弹窗立刻自动关闭 + 只发 1 个 POST move」——这是 `.off('click')` 没摘掉 `#move-confirm` 旧绑定的特征 |
@@ -904,7 +909,7 @@ wifitweak/
 │   ├── oka-wifi.js             # 列表排序 / 全页拖放 / 文件夹递归 / 折叠任务面板 / 复用原版移动弹窗 / 行交互 / ZIP 打包 / 时间列 / 复制下载链接
 │   └── oka-wifi.css            # oka- 前缀样式 + 顶部紧凑布局 + 文件夹琥珀黄 + 选中热区 + 行内按钮 + 时间列 + 链接反馈条
 ├── devkit/
-│   ├── build.sh                # 零 Theos 编译：资源内联 + xcrun clang + codesign + 闸门（含 v1.6.10 负向闸门：图标符号不得回流 dylib、旧文件不得回流 devkit/；v1.6.11 导航栏开关闸门 + 产物指纹）
+│   ├── build.sh                # 零 Theos 编译：资源内联 + xcrun clang + codesign + 闸门（含 v1.6.10 负向闸门：图标符号不得回流 dylib、旧文件不得回流 devkit/；v1.6.11 导航栏开关闸门 + 产物指纹；v1.6.12 诊断日志闸门改独立脚本 + 剥注释）
 │   ├── mkdeb.sh                # 纯 Python 拼 ar 归档（不依赖 dpkg-deb）；postinst/prerm 清理旧版桌面动态图标注入残留（幂等，不阻断 dpkg）
 │   ├── push-via-api.py         # github.com 被代理 502 时的等价推送通道（Git Data API，重建 tree sha 与本地一致才落 ref）
 │   ├── gen-webassets.py        # JS/CSS -> .build/OkaWebAssets.h（含往返解码自检）
@@ -920,7 +925,9 @@ wifitweak/
 │   ├── check-service-heal.py   # v1.6.7 服务假死自愈闸门（回环探活不读 isRunning / 原路重放 / 防抖 / 三触发面）
 │   ├── selftest-service-heal.py # 上面这个闸门的反证：10 破坏样本 + 1 良性样本
 │   ├── check-navswitch.py      # 导航栏 WiFi 传输开关闸门（挂载类/栈顶判据/回退挂法/自证接口/离开清理/outlet 守卫/幂等/文案等长/双 hook/真实连接数/定时器守卫/热区）
-│   ├── selftest-navswitch.py   # 上面这个闸门的反证：18 破坏样本（精确命中判据键）+ 2 良性扰动
+│   ├── selftest-navswitch.py   # 上面这个闸门的反证：23 破坏样本（精确命中判据键）+ 2 良性扰动
+│   ├── check-nolog.py          # v1.6.12 诊断日志闸门（剥注释后查 NSLog / os_log 一族 / LOG 宏；剥离器先自证）
+│   ├── selftest-nolog.py       # 上面这个闸门的反证：5 良性误报防护 + 6 破坏（断言行号与命中词）+ 1 剥离器退化
 │   ├── check-dylib-fingerprint.py    # v1.6.11 dylib 指纹（mangled 类名 + okaApplyState + 四状态文案，中文按 UTF-16LE 找）
 │   ├── selftest-dylib-fingerprint.py # 上面这个指纹判据的反证：2 良性 + 6 破坏（假 dylib，无需 SDK）
 │   ├── verify-deb.py           # deb / 裸 dylib 校验（纯标准库，自己读 Mach-O）
